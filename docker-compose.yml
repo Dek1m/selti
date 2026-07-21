@@ -1,0 +1,66 @@
+# ============================================================
+# docker-compose.yml — Memory MCP Server
+# ============================================================
+# Использование:
+#   С внешней БД: docker compose up -d
+#   С локальной БД: docker compose --profile local-db up -d
+#
+# Переменные окружения берутся из .env (создай на основе .env.example)
+# ============================================================
+
+services:
+  memory-server:
+    image: ghcr.io/${GITHUB_REPOSITORY:-your-org/memory-server}:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: athena-memory
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Если используем локальный PG — переопределяем DATABASE_URL
+      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://athena:athena@postgres:5432/athena_memory}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - athena-net
+
+  # Локальная БД — поднимается только при --profile local-db
+  postgres:
+    profiles:
+      - local-db
+    image: pgvector/pgvector:pg17
+    container_name: athena-pg
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: athena
+      POSTGRES_PASSWORD: athena
+      POSTGRES_DB: athena_memory
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U athena -d athena_memory"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - athena-net
+
+volumes:
+  pgdata:
+
+networks:
+  athena-net:
+    driver: bridge
