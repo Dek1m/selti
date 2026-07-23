@@ -91,7 +91,18 @@ async def metrics_middleware(request: Request, call_next):
 # ---- Health ----
 @app.get("/health")
 async def health():
-    return {"status": "ok", "server": settings.mcp_server_name}
+    return {
+        "status": "ok",
+        "server": settings.mcp_server_name,
+        "version": "0.1.0",
+        "checks": {
+            "config": {
+                "dedup_enabled": settings.dedup_enabled,
+                "api_key_configured": bool(settings.api_key),
+                "redis_configured": bool(settings.redis_url),
+            }
+        },
+    }
 
 
 # ---- Prometheus metrics endpoint ----

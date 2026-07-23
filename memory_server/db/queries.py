@@ -67,3 +67,11 @@ FORGET_MEMORIES = """
     WHERE user_id = $1
       AND ($2::text IS NULL OR namespace = $2)
 """
+
+MEMORY_STATS = """
+    SELECT namespace, count(*) as count, max(updated_at) as last_updated
+    FROM memories
+    WHERE user_id = $1 AND is_archived = false
+    GROUP BY namespace
+    ORDER BY namespace
+"""

@@ -3,11 +3,19 @@ from typing import Any
 
 from fastmcp import Context
 
+from memory_server.config import Namespace
 from memory_server.exceptions import NotFoundError
 from memory_server.memory.dedup import DedupAction
 from memory_server.server import mcp
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_namespace(namespace: str | None) -> None:
+    if namespace is not None and namespace not in [ns.value for ns in Namespace]:
+        raise ValueError(
+            f"Invalid namespace: {namespace}. Allowed: {[ns.value for ns in Namespace]}"
+        )
 
 
 @mcp.tool()
@@ -23,6 +31,7 @@ async def memory_store(
     Generates an embedding for the content and persists it to the database.
     Deduplication is applied automatically — returns existing record if a match is found.
     """
+    _validate_namespace(namespace)
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
     try:
@@ -53,6 +62,7 @@ async def memory_search(
 
     Returns memories matching the query, ordered by relevance score.
     """
+    _validate_namespace(namespace)
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
     try:
@@ -67,6 +77,79 @@ async def memory_search(
     except Exception as e:
         logger.exception("Failed to search memories")
         raise RuntimeError(str(e)) from e
+
+
+@mcp.tool()
+async def memory_ingest_batch(
+    entries: list[dict],
+    user_id: str,
+    ctx: Context | None = None,
+) -> dict:
+    """Store multiple memory records in batch.
+
+    Entries format: [{content, metadata?, namespace?}, ...]
+    Returns summary of inserted/skipped/updated counts.
+    """
+    assert ctx is not None
+    service = ctx.request_context.lifespan_context["service"]
+
+    results = []
+    for entry in entries:
+        _validate_namespace(entry.get("namespace"))
+        record, action = await service.store(
+            content=entry["content"],
+            user_id=user_id,
+            metadata=entry.get("metadata"),
+            namespace=entry.get("namespace"),
+        )
+        results.append({
+            "id": record.id,
+            "action": action.value,
+            "namespace": record.namespace,
+        })
+
+    summary: dict[str, int] = {"insert": 0, "skip": 0, "update": 0}
+    for r in results:
+        summary[r["action"]] += 1
+
+    return {"results": results, "summary": summary}
+
+
+@mcp.tool()
+async def memory_stats(
+    user_id: str,
+    ctx: Context | None = None,
+) -> list[dict]:
+    """Get memory statistics for a user — per-namespace counts and last updated."""
+    assert ctx is not None
+    service = ctx.request_context.lifespan_context["service"]
+
+    result = await service.get_stats(user_id)
+    return [item.model_dump(mode="json") for item in result]
+
+
+@mcp.tool()
+async def memory_find_similar(
+    content: str,
+    user_id: str,
+    limit: int = 10,
+    threshold: float = 0.7,
+    namespace: str | None = None,
+    ctx: Context | None = None,
+) -> list[dict]:
+    """Find semantically similar memories without storing."""
+    _validate_namespace(namespace)
+    assert ctx is not None
+    service = ctx.request_context.lifespan_context["service"]
+
+    results = await service.search(
+        query=content,
+        user_id=user_id,
+        limit=limit,
+        threshold=threshold,
+        namespace=namespace,
+    )
+    return [r.model_dump(mode="json") for r in results]
 
 
 @mcp.tool()

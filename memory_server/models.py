@@ -40,3 +40,9 @@ class DeleteResult(BaseModel):
 
 class ForgetResult(BaseModel):
     deleted_count: int
+
+
+class MemoryStatsItem(BaseModel):
+    namespace: str
+    count: int
+    last_updated: datetime | None = None

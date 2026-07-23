@@ -1,4 +1,14 @@
+from enum import Enum
+
 from pydantic_settings import BaseSettings
+
+
+class Namespace(str, Enum):
+    DEFAULT = "default"
+    USER_FACTS = "user_facts"
+    CODE_KNOWLEDGE = "code_knowledge"
+    DIALOGUE_INSIGHTS = "dialogue_insights"
+    PROJECT_META = "project_meta"
 
 
 class Settings(BaseSettings):

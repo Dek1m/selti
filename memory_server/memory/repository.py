@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import asyncpg
 
 from memory_server.db import queries as q
-from memory_server.models import MemoryListResult, MemoryRecord, SearchResult
+from memory_server.models import MemoryListResult, MemoryRecord, MemoryStatsItem, SearchResult
 
 
 class MemoryRepository:
@@ -164,5 +166,16 @@ class MemoryRepository:
     ) -> int:
         async with self.pool.acquire() as conn:
             result = await conn.execute(q.FORGET_MEMORIES, user_id, namespace)
-            # result format: "DELETE N"
             return int(result.split()[-1])
+    async def get_stats(self, user_id: str) -> list[MemoryStatsItem]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(q.MEMORY_STATS, user_id)
+            return [
+                MemoryStatsItem(
+                    namespace=row["namespace"],
+                    count=row["count"],
+                    last_updated=row["last_updated"],
+                )
+                for row in rows
+            ]
+

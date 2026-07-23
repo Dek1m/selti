@@ -138,3 +138,6 @@ class MemoryService:
             user_id=user_id,
             namespace=namespace,
         )
+
+    async def get_stats(self, user_id: str) -> list:
+        return await self.repository.get_stats(user_id)
