@@ -30,70 +30,104 @@
 ## Фаза 1 — Дедупликация (ключевая фича)
 
 ### 1.1. Миграция 002 — content_hash, source_type, source_location
-- **Что:** Добавить поля `content_hash`, `source_type`, `source_location`. Уникальный индекс `(namespace, content_hash)` для `user_facts`.
-- **Файлы:** `migrations/002_dedup.sql`, `migrations/run.py`
-- **Статус:** ❌
+- **Что:** Добавлены поля `content_hash`, `source_type`, `source_location`, `version`, `is_archived`. Уникальный индекс `(namespace, content_hash)`. Индексы на source_type, source_location.
+- **Файлы:** `migrations/002_dedup.sql`
+- **Статус:** ✅
+- **Кто:** Нора
 
 ### 1.2. DedupEngine
 - **Что:** Ядро дедупликации: exact match (SHA256) + semantic match (cosine > порог). Настраиваемые пороги per-namespace.
 - **Файлы:** `memory_server/memory/dedup.py`
-- **Статус:** ❌
+- **Статус:** ✅
+- **Кто:** Сона
 
 ### 1.3. Интеграция DedupEngine в MemoryService
-- **Что:** При `store()` сначала dedup, потом insert. Возвращает `{action, id, existing_score?}`.
-- **Файлы:** `memory_server/memory/service.py`, `memory_server/memory/repository.py`
-- **Статус:** ❌
+- **Что:** При `store()` сначала dedup, потом insert. Возвращает `tuple[MemoryRecord, DedupAction]`.
+- **Файлы:** `memory_server/memory/service.py`, `memory_server/memory/repository.py`, `memory_server/tools/memory_tools.py`
+- **Статус:** ✅
+- **Кто:** Сона
+
+### 1.4. Тесты дедупликации
+- **Что:** 13 тестов DedupEngine (exact, semantic, edge cases). Всего 102 теста.
+- **Файлы:** `tests/test_dedup.py`
+- **Статус:** ✅
+- **Кто:** Катерина
 
 ---
 
 ## Фаза 2 — Инфраструктура
 
 ### 2.1. Redis кеш эмбеддингов
-- **Что:** Клиент для Redis, кеш `{sha256(text) → embedding}`, TTL 24h, hit/miss метрики.
-- **Файлы:** `memory_server/cache/redis_client.py`, `memory_server/server.py`, `memory_server/embedding/client.py`, `requirements.txt`
-- **Статус:** ❌
+- **Что:** EmbeddingCache (get/set/mget/mset, sha256-ключи, TTL 24ч). Интеграция в EmbeddingClient и lifespan.
+- **Файлы:** `memory_server/cache/redis_client.py`, `memory_server/cache/__init__.py`, `memory_server/server.py`, `memory_server/embedding/client.py`, `requirements.txt`
+- **Статус:** ✅
+- **Кто:** Сона
 
 ### 2.2. Аутентификация
-- **Что:** Middleware на `Authorization: Bearer <api_key>`. Если ключ не задан — открытый доступ.
+- **Что:** HTTP middleware + ASGI middleware для `/mcp`. API key из .env. Белый список: `/health`, `/metrics`.
 - **Файлы:** `memory_server/__main__.py`, `memory_server/config.py`, `.env.example`
-- **Статус:** ❌
+- **Статус:** ✅
+- **Кто:** Сона + Лита (security review)
+
+### 2.3. Тесты инфраструктуры
+- **Что:** 18 тестов кеша, 8 тестов auth. Всего 127 тестов.
+- **Файлы:** `tests/test_cache.py`, `tests/test_auth.py`
+- **Статус:** ✅
+- **Кто:** Катерина
+
+### 2.4. Security fixes
+- **Что:** Исправлены: утечка пароля БД в логах, неинтерполируемый Redis URL, незащищённый `/mcp`.
+- **Файлы:** `memory_server/server.py`, `memory_server/config.py`, `memory_server/__main__.py`
+- **Статус:** ✅
+- **Кто:** Лита
 
 ---
 
 ## Фаза 3 — Новый функционал
 
 ### 3.1. Новые MCP tools
-- `memory_ingest_batch` — массовое сохранение с batch embedding
+- `memory_ingest_batch` — массовое сохранение с dedup
 - `memory_stats` — статистика по namespace
 - `memory_find_similar` — поиск похожих без сохранения
-- **Файлы:** `memory_server/tools/memory_tools.py`
-- **Статус:** ❌
+- **Файлы:** `memory_server/tools/memory_tools.py`, `memory_server/memory/service.py`, `memory_server/memory/repository.py`, `memory_server/db/queries.py`, `memory_server/models.py`
+- **Статус:** ✅
+- **Кто:** Сона
 
 ### 3.2. Namespace-стратегия
-- **Что:** Enum `Namespace` с `DEFAULT`, `USER_FACTS`, `CODE_KNOWLEDGE`, `DIALOGUE_INSIGHTS`, `PROJECT_META`. Валидация в tools.
+- **Что:** Enum `Namespace` с `DEFAULT`, `USER_FACTS`, `CODE_KNOWLEDGE`, `DIALOGUE_INSIGHTS`, `PROJECT_META`. Валидация во всех tools.
 - **Файлы:** `memory_server/config.py`, `memory_server/tools/memory_tools.py`
-- **Статус:** ❌
+- **Статус:** ✅
+- **Кто:** Сона
 
 ### 3.3. Расширенный healthcheck
-- **Что:** Проверка подключения к БД, Redis, опционально embedding API.
+- **Что:** `/health` возвращает version, checks.config (dedup_enabled, api_key_configured, redis_configured).
 - **Файлы:** `memory_server/__main__.py`
-- **Статус:** ❌
+- **Статус:** ✅
+- **Кто:** Сона
+
+### 3.4. Тесты нового функционала
+- **Что:** 12 тестов tools, 3 теста health. Всего 142 теста.
+- **Файлы:** `tests/test_tools.py`, `tests/test_health.py`
+- **Статус:** ✅
+- **Кто:** Катерина
 
 ---
 
 ## Фаза 4 — Качество
 
-### 4.1. Тесты
-- DedupEngine, batch ingest, аутентификация, Redis кеш, метрики пула.
-- **Файлы:** `tests/test_dedup.py`, `tests/test_auth.py` и обновление существующих
-- **Статус:** ❌
+### 4.1. Метрики для MCP tools
+- **Что:** 6 новых метрик: `mcp_tool_calls_total`, `mcp_tool_duration_seconds`, `cache_hits/misses`, `dedup_skipped/inserted`. Инструментированы все 10 tools, EmbeddingClient, DedupEngine.
+- **Файлы:** `memory_server/metrics.py`, `memory_server/tools/memory_tools.py`, `memory_server/embedding/client.py`, `memory_server/memory/dedup.py`
+- **Статус:** ✅
+- **Кто:** Сона + Мая
 
-### 4.2. Метрики для MCP tools
-- `athena_mcp_tool_calls_total`, `athena_mcp_tool_duration_seconds`, `athena_cache_hit_ratio`, `athena_dedup_skipped_total`
-- **Файлы:** `memory_server/__main__.py`, `memory_server/tools/memory_tools.py`
-- **Статус:** ❌
-
-### 4.3. Документация
-- Namespace-стратегия, аутентификация, batch ingest, дедупликация, метрики.
+### 4.2. Документация
+- **Что:** README.md с описанием: быстрый старт, 10 MCP tools, namespace-стратегия, дедупликация, аутентификация, мониторинг, миграции, переменные окружения.
 - **Файлы:** `README.md`
-- **Статус:** ❌
+- **Статус:** ✅
+- **Кто:** Тиамат
+
+### 4.3. Итоговые тесты
+- **Что:** 142 теста, все зелёные. Покрытие: модули, интеграция, регрессия.
+- **Статус:** ✅
+- **Кто:** Катерина
