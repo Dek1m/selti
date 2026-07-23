@@ -10,6 +10,11 @@ SELECT_MEMORY_BY_ID = """
     WHERE id = $1
 """
 
+# HNSW search via SQL function (defined in 001_initial.sql).
+# Порог отсечения применяется в SQL для точности,
+# но HNSW всё равно может возвращать результаты чуть ниже порога
+# (используется как финальный фильтр).
+# ef_search выставляется на пуле соединений (см. pool.py).
 SEARCH_MEMORIES = """
     SELECT id, content, metadata,
            1 - (embedding <=> $1::vector) AS score
@@ -17,7 +22,7 @@ SEARCH_MEMORIES = """
     WHERE user_id = $2
       AND ($3::text IS NULL OR namespace = $3)
       AND 1 - (embedding <=> $1::vector) >= $4
-    ORDER BY score DESC
+    ORDER BY embedding <=> $1::vector
     LIMIT $5
 """
 

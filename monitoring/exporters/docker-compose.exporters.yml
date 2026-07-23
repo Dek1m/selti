@@ -1,0 +1,54 @@
+# ============================================================
+# docker-compose.exporters.yml — Exporters for PostgreSQL & Redis
+# ============================================================
+# Использование:
+#   docker compose -f docker-compose.yml -f monitoring/exporters/docker-compose.exporters.yml up -d
+# ============================================================
+
+services:
+  # ----- PostgreSQL Exporter (prometheus-community/postgres_exporter) -----
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    container_name: athena-pg-exporter
+    restart: unless-stopped
+    ports:
+      - "9187:9187"
+    environment:
+      DATA_SOURCE_NAME: "postgresql://athena:${PG_PASSWORD}@postgres:5432/athena_memory?sslmode=disable"
+      # Кастомные метрики для pgvector
+      PG_EXPORTER_EXTEND_QUERY_PATH: /etc/postgres-exporter/queries.yaml
+    volumes:
+      - ./queries.yaml:/etc/postgres-exporter/queries.yaml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - athena-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  # ----- Redis Exporter (oliver006/redis_exporter) -----
+  redis-exporter:
+    image: oliver006/redis_exporter:latest
+    container_name: athena-redis-exporter
+    restart: unless-stopped
+    ports:
+      - "9121:9121"
+    environment:
+      REDIS_ADDR: "redis://:${REDIS_PASSWORD}@redis:6379"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - athena-net
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+
+# Подключаемся к существующей сети athena-net
+networks:
+  athena-net:
+    external: true

@@ -1,0 +1,66 @@
+# ============================================================
+# queries.yaml — Дополнительные метрики postgres_exporter
+# ============================================================
+# pgvector: мониторинг векторных индексов
+# ============================================================
+
+pg_vector_index_stats:
+  query: |
+    SELECT
+      schemaname,
+      tablename,
+      indexname,
+      index_type,
+      idx_size,
+      num_vectors,
+      dimensionality
+    FROM (
+      SELECT
+        n.nspname AS schemaname,
+        c.relname AS tablename,
+        i.relname AS indexname,
+        am.amname AS index_type,
+        pg_size_pretty(pg_relation_size(i.oid)) AS idx_size,
+        pg_relation_size(i.oid) AS idx_size_bytes,
+        (SELECT count(*) FROM memories WHERE embedding IS NOT NULL) AS num_vectors,
+        8192 AS dimensionality
+      FROM pg_index ix
+      JOIN pg_class i ON i.oid = ix.indexrelid
+      JOIN pg_class c ON c.oid = ix.indrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      LEFT JOIN pg_opclass op ON op.oid = ix.indclass[0]
+      LEFT JOIN pg_am am ON am.oid = i.relam
+      WHERE am.amname IN ('hnsw', 'ivf')
+    ) sub;
+  metrics:
+    - schemaname:
+        usage: "LABEL"
+    - tablename:
+        usage: "LABEL"
+    - indexname:
+        usage: "LABEL"
+    - index_type:
+        usage: "LABEL"
+    - idx_size_bytes:
+        usage: "GAUGE"
+        description: "Size of vector index in bytes"
+    - num_vectors:
+        usage: "GAUGE"
+        description: "Number of vectors in the table"
+    - dimensionality:
+        usage: "GAUGE"
+        description: "Vector dimensionality"
+
+pg_vector_search_latency:
+  query: |
+    -- Примерная оценка латентности поиска (последние 100 запросов)
+    SELECT
+      count(*) AS total_queries,
+      avg(EXISTS(...)) AS avg_duration_ms
+    FROM pg_stat_statements
+    WHERE query ILIKE '%<=>%' OR query ILIKE '%vector_cosine_ops%'
+  metrics:
+    - total_queries:
+        usage: "GAUGE"
+    - avg_duration_ms:
+        usage: "GAUGE"

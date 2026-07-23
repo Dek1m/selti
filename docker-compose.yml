@@ -6,9 +6,18 @@
 #   С локальной БД: docker compose --profile local-db up -d
 #
 # Переменные окружения берутся из .env (создай на основе .env.example)
+# .env НЕ КОММИТИТЬ — он в .gitignore
+# ============================================================
+# Production checklist:
+#   □ Сгенерировать и прописать пароли в .env
+#   □ Настроить внешние бэкапы (WAL-G / pgBackRest)
+#   □ Порт 5432 не должен быть открыт наружу (убрать ports: если не нужно)
 # ============================================================
 
 services:
+  # ----------------------------------------------------------
+  # Memory MCP Server
+  # ----------------------------------------------------------
   memory-server:
     image: ghcr.io/${GITHUB_REPOSITORY:-your-org/memory-server}:${IMAGE_TAG:-latest}
     build:
@@ -16,15 +25,18 @@ services:
       dockerfile: Dockerfile
     container_name: athena-memory
     restart: unless-stopped
+    # В production порт наружу не выставляем —
+    # трафик идёт через reverse proxy (nginx/traefik)
     ports:
       - "8000:8000"
     env_file:
       - .env
     environment:
-      # Если используем локальный PG — переопределяем DATABASE_URL
-      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://athena:athena@postgres:5432/athena_memory}
+      DATABASE_URL: ${DATABASE_URL}
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health')"]
@@ -34,33 +46,105 @@ services:
       start_period: 15s
     networks:
       - athena-net
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
 
-  # Локальная БД — поднимается только при --profile local-db
+  # ----------------------------------------------------------
+  # PostgreSQL 17 + pgvector
+  # ----------------------------------------------------------
   postgres:
     profiles:
       - local-db
     image: pgvector/pgvector:pg17
     container_name: athena-pg
     restart: unless-stopped
+    shm_size: 256MB
+    # В production: НЕ выставляем порт наружу.
+    # Если нужен внешний доступ — используй SSH-туннель или VPN
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
-      POSTGRES_USER: athena
-      POSTGRES_PASSWORD: athena
-      POSTGRES_DB: athena_memory
+      POSTGRES_USER: ${PG_USER:-athena}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?PG_PASSWORD is required}
+      POSTGRES_DB: ${PG_DATABASE:-athena_memory}
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    command:
+      - "postgres"
+      - "-c"
+      - "config_file=/etc/postgresql/postgresql.conf"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U athena -d athena_memory"]
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-athena} -d ${PG_DATABASE:-athena_memory}"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 15s
     networks:
       - athena-net
+    deploy:
+      resources:
+        limits:
+          memory: 1.5G
+          cpus: "2"
+        reservations:
+          memory: 1G
+
+  # ----------------------------------------------------------
+  # Redis — кэш эмбеддингов, rate limiting, очереди
+  # ----------------------------------------------------------
+  redis:
+    profiles:
+      - local-db
+    image: redis:7-alpine
+    container_name: athena-redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    command:
+      - "redis-server"
+      - "--requirepass"
+      - "${REDIS_PASSWORD}"
+      - "--save"
+      - "60"
+      - "10000"
+      - "--appendonly"
+      - "yes"
+      - "--maxmemory"
+      - "512mb"
+      - "--maxmemory-policy"
+      - "allkeys-lru"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks:
+      - athena-net
+    deploy:
+      resources:
+        limits:
+          memory: 512M
 
 volumes:
   pgdata:
+    driver: local
+  redis-data:
+    driver: local
 
 networks:
   athena-net:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

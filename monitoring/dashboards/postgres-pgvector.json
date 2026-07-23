@@ -1,0 +1,130 @@
+{
+  "__inputs": [],
+  "__requires": [],
+  "title": "PostgreSQL + pgvector — Athena Memory",
+  "version": 1,
+  "panels": [
+    {
+      "title": "Общее состояние",
+      "type": "row",
+      "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1}
+    },
+    {
+      "title": "Соединения",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 1, "w": 8, "h": 8},
+      "targets": [{
+        "expr": "pg_stat_database_numbackends{datname='athena_memory'}",
+        "legendFormat": "активные"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": 0},
+              {"color": "yellow", "value": 30},
+              {"color": "red", "value": 45}
+            ]
+          },
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "title": "Размер БД",
+      "type": "gauge",
+      "gridPos": {"x": 8, "y": 1, "w": 8, "h": 8},
+      "targets": [{
+        "expr": "pg_database_size_bytes{datname='athena_memory'}",
+        "legendFormat": "размер"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": 0},
+              {"color": "yellow", "value": 1073741824},
+              {"color": "red", "value": 5368709120}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Количество записей в memories",
+      "type": "stat",
+      "gridPos": {"x": 16, "y": 1, "w": 8, "h": 8},
+      "targets": [{
+        "expr": "pg_vector_index_stats_num_vectors{tablename='memories'}",
+        "legendFormat": "векторов"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "title": "Производительность",
+      "type": "row",
+      "gridPos": {"x": 0, "y": 9, "w": 24, "h": 1}
+    },
+    {
+      "title": "TPS (транзакции/сек)",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 10, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(pg_stat_database_xact_commit{datname='athena_memory'}[1m])",
+          "legendFormat": "commit"
+        },
+        {
+          "expr": "rate(pg_stat_database_xact_rollback{datname='athena_memory'}[1m])",
+          "legendFormat": "rollback"
+        }
+      ]
+    },
+    {
+      "title": "Векторный поиск (латентность)",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 10, "w": 12, "h": 8},
+      "targets": [{
+        "expr": "rate(pg_stat_user_tuples_returned{datname='athena_memory'}[1m])",
+        "legendFormat": "rows/sec"
+      }]
+    },
+    {
+      "title": "Размер индексов pgvector",
+      "type": "bar_gauge",
+      "gridPos": {"x": 0, "y": 18, "w": 12, "h": 8},
+      "targets": [{
+        "expr": "pg_vector_index_stats_idx_size_bytes{tablename='memories'}",
+        "legendFormat": "{{indexname}}"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      }
+    },
+    {
+      "title": "WAL Archiving",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 18, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(pg_stat_archiver_archived_count[5m])",
+          "legendFormat": "WAL files/sec"
+        },
+        {
+          "expr": "pg_stat_archiver_last_archive_age_seconds",
+          "legendFormat": "age (sec)"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 36
+}

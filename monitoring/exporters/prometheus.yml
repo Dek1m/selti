@@ -1,0 +1,32 @@
+# ============================================================
+# prometheus.yml — Сбор метрик с PostgreSQL и Redis
+# ============================================================
+# Добавить в docker-compose как отдельный сервис,
+# либо использовать существующий Prometheus в инфраструктуре
+# ============================================================
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 30s
+
+scrape_configs:
+  # ----- PostgreSQL exporter -----
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+    metrics_relabel_configs:
+      # Оставляем только нужные метрики для экономия места
+      - source_labels: [__name__]
+        regex: 'pg_stat_database.*|pg_locks.*|pg_replication.*|pg_vector.*'
+        action: keep
+
+  # ----- Redis exporter -----
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+
+  # ----- Memory MCP Server -----
+  - job_name: 'athena-memory'
+    static_configs:
+      - targets: ['athena-memory:8000']
+    metrics_path: '/metrics'

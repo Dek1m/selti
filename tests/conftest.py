@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -13,11 +13,20 @@ def mock_pool():
     Usage:
         async with mock_pool.acquire() as conn:
             conn.fetchrow(...)
+
+    Важно: pool.acquire — MagicMock, а не AsyncMock.
+    asyncpg.Pool.acquire() — корутина, возвращающая асинхронный контекстный менеджер.
+    Используем MagicMock, чтобы `.acquire()` возвращал acm напрямую (без обёртки в корутину).
     """
-    pool = AsyncMock()
+    pool = MagicMock()
     conn = AsyncMock()
-    pool.acquire.return_value.__aenter__.return_value = conn
-    pool.acquire.return_value.__aexit__.return_value = None
+
+    # Асинхронный контекстный менеджер для acquire()
+    acm = AsyncMock()
+    acm.__aenter__.return_value = conn
+    acm.__aexit__.return_value = None
+
+    pool.acquire.return_value = acm
     return pool
 
 

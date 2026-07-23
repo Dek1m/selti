@@ -1,6 +1,14 @@
+-- ============================================================
+-- 001_initial.sql — Initial schema for Memory MCP Server
+-- ============================================================
+-- pgvector extension, таблица memories, индексы, триггеры
+-- ============================================================
+
 CREATE EXTENSION IF NOT EXISTS vector;
 
--- Auto-update updated_at trigger function
+-- ════════════════════════════════════════════════════════════
+-- Хелпер: автообновление updated_at
+-- ════════════════════════════════════════════════════════════
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -9,6 +17,13 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- ════════════════════════════════════════════════════════════
+-- Таблица memories
+-- ════════════════════════════════════════════════════════════
+-- embedding: vector(8192) — под qwen3-embedding-8b
+-- metadata: JSONB — гибкие метаданные, индексируется через GIN при необходимости
+-- namespace: логическая изоляция данных (multi-tenant)
+-- ════════════════════════════════════════════════════════════
 CREATE TABLE IF NOT EXISTS memories (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id     TEXT NOT NULL,
@@ -20,23 +35,84 @@ CREATE TABLE IF NOT EXISTS memories (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_memories_user_id ON memories (user_id);
-CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories (namespace);
-CREATE INDEX IF NOT EXISTS idx_memories_created_at ON memories (created_at DESC);
+-- ════════════════════════════════════════════════════════════
+-- B-tree индексы для фильтрации
+-- ════════════════════════════════════════════════════════════
+CREATE INDEX IF NOT EXISTS idx_memories_user_id    ON memories (user_id);
+CREATE INDEX IF NOT EXISTS idx_memories_namespace   ON memories (namespace);
+CREATE INDEX IF NOT EXISTS idx_memories_created_at  ON memories (created_at DESC);
 
--- Vector similarity index (IVFFlat, cosine distance)
-CREATE INDEX IF NOT EXISTS idx_memories_embedding
+-- ════════════════════════════════════════════════════════════
+-- HNSW — векторный индекс (cosine distance)
+-- ════════════════════════════════════════════════════════════
+-- Почему HNSW вместо IVFFlat:
+--   - 8192-dim — IVFFlat даёт низкий recall (эффект проклятия размерности)
+--   - HNSW стабильно держит recall 0.95+ при ef_search = 40-80
+--   - build время дольше, но строится один раз
+--   - Память: ~1.1x от размера векторов (для 8192-dim ~35KB на вектор)
+--
+-- Параметры:
+--   m = 16           — количество связей на узел (default 16, можно до 64)
+--   ef_construction  = 200 — качество построения графа (по умолч. 40, для 8k-dim нужно выше)
+CREATE INDEX IF NOT EXISTS idx_memories_embedding_hnsw
     ON memories
-    USING ivf (embedding vector_cosine_ops)
-    WITH (lists = 100);
+    USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 200);
 
--- Trigger to auto-update updated_at on row modification
+-- ════════════════════════════════════════════════════════════
+-- Триггер автообновления updated_at
+-- ════════════════════════════════════════════════════════════
 CREATE TRIGGER trg_memories_updated_at
     BEFORE UPDATE ON memories
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();
 
--- DOWN migration (for --down flag)
+-- ════════════════════════════════════════════════════════════
+-- GIN индекс на metadata (по необходимости)
+-- ════════════════════════════════════════════════════════════
+-- Раскомментировать, если планируются частые фильтры по metadata->>'key'
+-- CREATE INDEX IF NOT EXISTS idx_memories_metadata ON memories USING gin (metadata jsonb_path_ops);
+
+-- ════════════════════════════════════════════════════════════
+-- Функция для реранкинга (точный поиск после HNSW)
+-- ════════════════════════════════════════════════════════════
+-- Использовать для повышения точности:
+-- SELECT * FROM search_memories_approx('user_1', embedding, 0.7, 100);
+-- Затем пересчитать расстояния точно
+-- ════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION search_memories_approx(
+    p_user_id TEXT,
+    p_embedding vector(8192),
+    p_threshold FLOAT DEFAULT 0.7,
+    p_limit INT DEFAULT 20
+)
+RETURNS TABLE(
+    id UUID,
+    user_id TEXT,
+    content TEXT,
+    metadata JSONB,
+    score FLOAT
+)
+LANGUAGE SQL
+STABLE
+AS $$
+    SELECT
+        m.id,
+        m.user_id,
+        m.content,
+        m.metadata,
+        1 - (m.embedding <=> p_embedding) AS score
+    FROM memories m
+    WHERE m.user_id = p_user_id
+      AND 1 - (m.embedding <=> p_embedding) >= p_threshold
+    ORDER BY m.embedding <=> p_embedding
+    LIMIT p_limit;
+$$;
+
+-- ════════════════════════════════════════════════════════════
+-- DOWN migration
+-- ════════════════════════════════════════════════════════════
 -- DROP TRIGGER IF EXISTS trg_memories_updated_at ON memories;
 -- DROP TABLE IF EXISTS memories CASCADE;
 -- DROP FUNCTION IF EXISTS update_updated_at_column();
+-- DROP FUNCTION IF EXISTS search_memories_approx(vector(8192), float, int);

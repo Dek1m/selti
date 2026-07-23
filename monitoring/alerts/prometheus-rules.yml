@@ -1,0 +1,114 @@
+# ============================================================
+# prometheus-rules.yml — Алерты для PostgreSQL + Redis
+# ============================================================
+groups:
+  - name: postgres
+    interval: 30s
+    rules:
+      # ----- Доступность -----
+      - alert: PostgreSQLDown
+        expr: pg_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL недоступен"
+          description: "PG instance {{ $labels.instance }} не отвечает"
+
+      - alert: PostgreSQLHighConnectionsUsage
+        expr: |
+          pg_stat_database_numbackends > 0.8 * 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Высокая загрузка соединений"
+          description: "Использовано {{ $value }} из 50 соединений"
+
+      # ----- Производительность -----
+      - alert: PostgreSQLQueryConflict
+        expr: |
+          rate(pg_stat_database_conflicts_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Конфликты запросов (standby)"
+          description: "Обнаружены конфликты запросов на реплике"
+
+      - alert: PostgreSQLLongRunningQuery
+        expr: |
+          time() - max(pg_stat_activity_query_start{state='active'}) by (datname) > 300
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Долгий запрос > 5 минут"
+          description: "Запрос выполняется {{ $value }} секунд"
+
+      # ----- WAL / Бэкапы -----
+      - alert: PostgreSQLWalBackupLag
+        expr: |
+          (pg_stat_archiver_last_archive_age_seconds > 3600)
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "WAL-архивация отстаёт"
+          description: "Последняя архивация WAL была > 1 часа назад"
+
+      - alert: PostgreSQLNoBackup
+        expr: |
+          time() - pg_last_backup_timestamp > 86400 * 2
+        for: 1h
+        labels:
+          severity: critical
+        annotations:
+          summary: "Нет полного бэкапа > 2 дней"
+          description: "Последний полный бэкап: {{ $value | humanizeTimestamp }}"
+
+      # ----- pgvector -----
+      - alert: PostgreSQLHNSWIndexMissing
+        expr: |
+          pg_vector_index_stats_index_type{index_type!="hnsw"} > 0
+          and on(instance)
+          pg_vector_index_stats_num_vectors > 10000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Таблица memories > 10k записей без HNSW индекса"
+          description: "Используется {{ $labels.index_type }}, рекомендуется HNSW для 8192-dim"
+
+  - name: redis
+    interval: 30s
+    rules:
+      - alert: RedisDown
+        expr: redis_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis недоступен"
+
+      - alert: RedisMemoryHigh
+        expr: |
+          redis_memory_used_bytes / redis_memory_max_bytes > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis использует > 85% памяти"
+          description: "Занято {{ $value | humanizePercentage }} памяти"
+
+      - alert: RedisCacheMissRateHigh
+        expr: |
+          rate(redis_keyspace_misses_total[5m])
+          /
+          (rate(redis_keyspace_hits_total[5m]) + rate(redis_keyspace_misses_total[5m]))
+          > 0.3
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Cache miss rate > 30%"
