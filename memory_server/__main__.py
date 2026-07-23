@@ -5,7 +5,6 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI, Request, Response
 from prometheus_client import generate_latest, REGISTRY
-from starlette.routing import Mount
 from starlette.types import ASGIApp, Scope, Receive, Send
 
 from memory_server.config import settings
@@ -40,9 +39,18 @@ class AuthASGIMiddleware:
 # ============================================================
 
 
+# MCP Streamable HTTP sub-app (создаём до lifespan, т.к. lifespan его использует)
+mcp_http_app = mcp.http_app(path="/", stateless_http=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with mcp._lifespan_manager():
+    """Lifespan: делегируем управление MCP sub-app'у.
+    
+    mcp_http_app.lifespan сам вызывает mcp._lifespan_manager()
+    и session_manager.run() для streamable HTTP.
+    """
+    async with mcp_http_app.lifespan(app):
         yield
 
 
@@ -116,28 +124,11 @@ async def metrics():
 
 
 # ---- MCP Streamable HTTP transport ----
-# Используем Streamable HTTP с stateless_http=True — opencode не шлёт
-# initialize handshake (требуется для SSE), поэтому SSE не работает.
-# Streamable HTTP самодостаточен: каждый запрос содержит всё необходимое.
-#
-# path="/" — роут внутри sub-app, монтируем на /mcp.
-# Монтируем напрямую через Mount (как Starlette) с redirect_slashes=False,
-# чтобы POST /mcp не редиректился на /mcp/.
-@app.get("/mcp", include_in_schema=False)
-async def mcp_entry():
-    """MCP endpoint — GET возвращает информацию о сервере."""
-    from starlette.responses import JSONResponse
-    return JSONResponse({
-        "server": settings.mcp_server_name,
-        "transport": "streamable-http",
-        "stateless": True,
-    })
-
-# Mount — обёрнут в auth middleware (mount не проходит через @app.middleware)
-mcp_app = AuthASGIMiddleware(mcp.http_app(path="/", stateless_http=True))
-app.router.routes.append(
-    Mount("/mcp", app=mcp_app, redirect_slashes=False)
-)
+# Streamable HTTP с stateless_http=True — не требует initialize handshake.
+# opencode не шлёт SSE handshake (initialize), поэтому SSE не работает.
+# path="/" внутри sub-app, монтируем на /mcp.
+# GET/POST /mcp → 307 → /mcp/ → mount strips /mcp → / matches sub-app.
+app.mount("/mcp", AuthASGIMiddleware(mcp_http_app))
 
 
 if __name__ == "__main__":
