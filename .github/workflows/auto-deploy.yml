@@ -1,0 +1,26 @@
+name: Auto-deploy on main
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t memory-server:latest .
+
+      - name: Stop old container
+        run: docker rm -f athena-memory 2>/dev/null || true
+
+      - name: Start new container
+        run: |
+          docker run -d             --name athena-memory             --restart unless-stopped             --network host             -e DATABASE_URL='postgresql+asyncpg://postgres:postgres@localhost:5432/postgres'             -e REDIS_URL='redis://localhost:6379/0'             -e EMBEDDING_API_URL='http://10.0.0.21:8080/v1'             -e EMBEDDING_MODEL='qwen3-embedding-8b'             -e EMBEDDING_DIMENSION='8192'             memory-server:latest
+
+      - name: Verify health
+        run: |
+          sleep 5
+          curl -sf http://localhost:8000/health && echo ' OK' || echo ' FAILED'
