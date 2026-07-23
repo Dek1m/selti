@@ -1,7 +1,9 @@
 import logging
+from typing import Optional
 
 import httpx
 
+from memory_server.cache.redis_client import EmbeddingCache
 from memory_server.embedding.provider import EmbeddingProvider
 from memory_server.exceptions import EmbeddingError
 
@@ -17,12 +19,16 @@ class EmbeddingClient(EmbeddingProvider):
         api_key: str,
         model: str,
         dimension: int,
+        cache: Optional[EmbeddingCache] = None,
     ):
         self.api_url = api_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.dimension = dimension
         self._client: httpx.AsyncClient | None = None
+        self._cache = cache
+        self.cache_hits: int = 0
+        self.cache_misses: int = 0
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -66,9 +72,39 @@ class EmbeddingClient(EmbeddingProvider):
         return data["data"][0]["embedding"]
 
     async def embed(self, text: str) -> list[float]:
-        return await self._request_embedding(text)
+        if self._cache is not None:
+            cached = await self._cache.get(text)
+            if cached is not None:
+                self.cache_hits += 1
+                return cached
+            self.cache_misses += 1
+
+        embedding = await self._request_embedding(text)
+
+        if self._cache is not None:
+            await self._cache.set(text, embedding)
+
+        return embedding
 
     async def embed_many(self, texts: list[str]) -> list[list[float]]:
+        if self._cache is not None:
+            cached = await self._cache.mget(texts)
+            miss_indices = [i for i, v in enumerate(cached) if v is None]
+            miss_texts = [texts[i] for i in miss_indices]
+
+            if miss_texts:
+                self.cache_misses += len(miss_texts)
+                miss_embeddings = await self._batch_request(miss_texts)
+                await self._cache.mset(list(zip(miss_texts, miss_embeddings)))
+                for i, emb in zip(miss_indices, miss_embeddings):
+                    cached[i] = emb
+
+            self.cache_hits += len(texts) - len(miss_texts)
+            return cached
+        else:
+            return await self._batch_request(texts)
+
+    async def _batch_request(self, texts: list[str]) -> list[list[float]]:
         client = await self._get_client()
         response = await client.post(
             "/embeddings",

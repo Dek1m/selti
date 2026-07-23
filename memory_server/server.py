@@ -6,6 +6,7 @@ from contextvars import ContextVar
 
 from fastmcp import FastMCP
 
+from memory_server.cache.redis_client import EmbeddingCache
 from memory_server.config import settings
 from memory_server.db.pool import close_pool, create_pool
 from memory_server.embedding.client import EmbeddingClient
@@ -72,11 +73,14 @@ async def lifespan(server: FastMCP):
 
     metrics_task = asyncio.create_task(_pool_metrics_updater(pool))
 
+    embedding_cache = EmbeddingCache(redis_url=settings.redis_url)
+
     embedding_client = EmbeddingClient(
         api_url=settings.embedding_api_url,
         api_key=settings.embedding_api_key,
         model=settings.embedding_model,
         dimension=settings.embedding_dimension,
+        cache=embedding_cache,
     )
 
     repository = MemoryRepository(pool=pool)
@@ -87,17 +91,17 @@ async def lifespan(server: FastMCP):
     )
 
     logger.info(
-        "Memory server started: pool=%s, model=%s",
-        settings.database_url,
+        "Memory server started: model=%s",
         settings.embedding_model,
     )
 
     try:
-        yield {"service": service}
+        yield {"service": service, "cache": embedding_cache}
     finally:
         metrics_task.cancel()
         await metrics_task
         await embedding_client.aclose()
+        await embedding_cache.close()
         await close_pool(pool)
         logger.info("Memory server shutdown complete")
 

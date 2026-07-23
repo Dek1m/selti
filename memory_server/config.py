@@ -27,7 +27,9 @@ class Settings(BaseSettings):
         "project_meta": 0.90,
     }
 
-    redis_url: str = "redis://:${REDIS_PASSWORD}@redis:6379/0"
+    api_key: str = ""
+
+    redis_url: str = "redis://:@redis:6379/0"
 
     log_level: str = "INFO"
 
