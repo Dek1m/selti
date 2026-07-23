@@ -1,5 +1,3 @@
-import json
-
 import asyncpg
 from pgvector.asyncpg import register_vector
 
@@ -21,14 +19,6 @@ async def create_pool(
     async def init_conn(conn: asyncpg.Connection) -> None:
         """Инициализация каждого нового соединения."""
         await register_vector(conn)
-        # Регистрируем JSONB codec — asyncpg требует явной регистрации
-        # для Python dict -> PostgreSQL jsonb
-        await conn.set_type_codec(
-            "jsonb",
-            encoder=json.dumps,
-            decoder=json.loads,
-            schema="pg_catalog",
-        )
         # Таймаут на запрос — предохранитель от зависших запросов
         await conn.execute("SET statement_timeout = '30s'")
 
