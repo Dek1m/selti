@@ -29,3 +29,41 @@ SEARCH_RESULTS = Histogram(
 )
 
 MEMORY_COUNT = Gauge("athena_memory_count", "Total memories in DB", ["namespace"])
+
+# --- Метрики MCP tools ---
+MCP_TOOL_CALLS_TOTAL = Counter(
+    "athena_mcp_tool_calls_total",
+    "Total MCP tool calls",
+    ["tool", "status"],  # status: ok / error
+)
+
+MCP_TOOL_DURATION_SECONDS = Histogram(
+    "athena_mcp_tool_duration_seconds",
+    "MCP tool call duration in seconds",
+    ["tool"],
+    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
+)
+
+# --- Кеш эмбеддингов ---
+EMBEDDING_CACHE_HITS = Counter(
+    "athena_embedding_cache_hits_total",
+    "Total embedding cache hits",
+)
+
+EMBEDDING_CACHE_MISSES = Counter(
+    "athena_embedding_cache_misses_total",
+    "Total embedding cache misses",
+)
+
+# --- Дедупликация ---
+DEDUP_SKIPPED_TOTAL = Counter(
+    "athena_dedup_skipped_total",
+    "Total dedup skips by namespace and reason",
+    ["namespace", "reason"],  # reason: exact / semantic
+)
+
+DEDUP_INSERTED_TOTAL = Counter(
+    "athena_dedup_inserted_total",
+    "Total new memories inserted after dedup check",
+    ["namespace"],
+)

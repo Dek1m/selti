@@ -6,6 +6,7 @@ from enum import Enum
 from memory_server.config import Settings
 from memory_server.embedding.provider import EmbeddingProvider
 from memory_server.memory.repository import MemoryRepository
+from memory_server.metrics import DEDUP_SKIPPED_TOTAL, DEDUP_INSERTED_TOTAL
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ class DedupEngine:
                 "Exact dedup match: namespace=%s action=%s id=%s",
                 namespace, action.value, existing.id,
             )
+            DEDUP_SKIPPED_TOTAL.labels(namespace=namespace, reason="exact").inc()
             return DedupDecision(
                 action=action,
                 existing_id=existing.id,
@@ -77,6 +79,7 @@ class DedupEngine:
                 "Semantic dedup match: namespace=%s score=%.4f id=%s",
                 namespace, best.score, best.id,
             )
+            DEDUP_SKIPPED_TOTAL.labels(namespace=namespace, reason="semantic").inc()
             return DedupDecision(
                 action=DedupAction.SKIP,
                 existing_id=best.id,
@@ -84,6 +87,7 @@ class DedupEngine:
                 content_hash=content_hash,
             )
 
+        DEDUP_INSERTED_TOTAL.labels(namespace=namespace).inc()
         return DedupDecision(
             action=DedupAction.INSERT,
             content_hash=content_hash,

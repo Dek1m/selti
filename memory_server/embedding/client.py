@@ -6,6 +6,7 @@ import httpx
 from memory_server.cache.redis_client import EmbeddingCache
 from memory_server.embedding.provider import EmbeddingProvider
 from memory_server.exceptions import EmbeddingError
+from memory_server.metrics import EMBEDDING_CACHE_HITS, EMBEDDING_CACHE_MISSES
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +77,10 @@ class EmbeddingClient(EmbeddingProvider):
             cached = await self._cache.get(text)
             if cached is not None:
                 self.cache_hits += 1
+                EMBEDDING_CACHE_HITS.inc()
                 return cached
             self.cache_misses += 1
+            EMBEDDING_CACHE_MISSES.inc()
 
         embedding = await self._request_embedding(text)
 
@@ -94,12 +97,16 @@ class EmbeddingClient(EmbeddingProvider):
 
             if miss_texts:
                 self.cache_misses += len(miss_texts)
+                EMBEDDING_CACHE_MISSES.inc(len(miss_texts))
                 miss_embeddings = await self._batch_request(miss_texts)
                 await self._cache.mset(list(zip(miss_texts, miss_embeddings)))
                 for i, emb in zip(miss_indices, miss_embeddings):
                     cached[i] = emb
 
-            self.cache_hits += len(texts) - len(miss_texts)
+            hits = len(texts) - len(miss_texts)
+            self.cache_hits += hits
+            if hits:
+                EMBEDDING_CACHE_HITS.inc(hits)
             return cached
         else:
             return await self._batch_request(texts)

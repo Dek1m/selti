@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Any
 
 from fastmcp import Context
@@ -6,9 +7,25 @@ from fastmcp import Context
 from memory_server.config import Namespace
 from memory_server.exceptions import NotFoundError
 from memory_server.memory.dedup import DedupAction
+from memory_server.metrics import MCP_TOOL_CALLS_TOTAL, MCP_TOOL_DURATION_SECONDS
 from memory_server.server import mcp
 
 logger = logging.getLogger(__name__)
+
+
+async def _track_tool(tool_name: str, coro):
+    """Замерить и записать метрики для MCP tool."""
+    start = time.monotonic()
+    try:
+        result = await coro
+        MCP_TOOL_CALLS_TOTAL.labels(tool=tool_name, status="ok").inc()
+        return result
+    except Exception:
+        MCP_TOOL_CALLS_TOTAL.labels(tool=tool_name, status="error").inc()
+        raise
+    finally:
+        duration = time.monotonic() - start
+        MCP_TOOL_DURATION_SECONDS.labels(tool=tool_name).observe(duration)
 
 
 def _validate_namespace(namespace: str | None) -> None:
@@ -35,12 +52,12 @@ async def memory_store(
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
     try:
-        record, action = await service.store(
+        record, action = await _track_tool("memory_store", service.store(
             content=content,
             user_id=user_id,
             metadata=metadata,
             namespace=namespace,
-        )
+        ))
         result = record.model_dump(mode="json")
         result["_dedup_action"] = action.value
         return result
@@ -66,13 +83,13 @@ async def memory_search(
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
     try:
-        results = await service.search(
+        results = await _track_tool("memory_search", service.search(
             query=query,
             user_id=user_id,
             limit=limit,
             threshold=threshold,
             namespace=namespace,
-        )
+        ))
         return [r.model_dump(mode="json") for r in results]
     except Exception as e:
         logger.exception("Failed to search memories")
@@ -93,26 +110,29 @@ async def memory_ingest_batch(
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
 
-    results = []
-    for entry in entries:
-        _validate_namespace(entry.get("namespace"))
-        record, action = await service.store(
-            content=entry["content"],
-            user_id=user_id,
-            metadata=entry.get("metadata"),
-            namespace=entry.get("namespace"),
-        )
-        results.append({
-            "id": record.id,
-            "action": action.value,
-            "namespace": record.namespace,
-        })
+    async def _run():
+        results = []
+        for entry in entries:
+            _validate_namespace(entry.get("namespace"))
+            record, action = await service.store(
+                content=entry["content"],
+                user_id=user_id,
+                metadata=entry.get("metadata"),
+                namespace=entry.get("namespace"),
+            )
+            results.append({
+                "id": record.id,
+                "action": action.value,
+                "namespace": record.namespace,
+            })
 
-    summary: dict[str, int] = {"insert": 0, "skip": 0, "update": 0}
-    for r in results:
-        summary[r["action"]] += 1
+        summary: dict[str, int] = {"insert": 0, "skip": 0, "update": 0}
+        for r in results:
+            summary[r["action"]] += 1
 
-    return {"results": results, "summary": summary}
+        return {"results": results, "summary": summary}
+
+    return await _track_tool("memory_ingest_batch", _run())
 
 
 @mcp.tool()
@@ -124,7 +144,7 @@ async def memory_stats(
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
 
-    result = await service.get_stats(user_id)
+    result = await _track_tool("memory_stats", service.get_stats(user_id))
     return [item.model_dump(mode="json") for item in result]
 
 
@@ -142,13 +162,13 @@ async def memory_find_similar(
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
 
-    results = await service.search(
+    results = await _track_tool("memory_find_similar", service.search(
         query=content,
         user_id=user_id,
         limit=limit,
         threshold=threshold,
         namespace=namespace,
-    )
+    ))
     return [r.model_dump(mode="json") for r in results]
 
 
@@ -161,7 +181,7 @@ async def memory_get(
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
     try:
-        record = await service.get(memory_id=id)
+        record = await _track_tool("memory_get", service.get(memory_id=id))
         return record.model_dump(mode="json")
     except NotFoundError as e:
         raise ValueError(str(e)) from e
@@ -184,11 +204,11 @@ async def memory_update(
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
     try:
-        record = await service.update(
+        record = await _track_tool("memory_update", service.update(
             memory_id=id,
             content=content,
             metadata=metadata,
-        )
+        ))
         return record.model_dump(mode="json")
     except NotFoundError as e:
         raise ValueError(str(e)) from e
@@ -206,7 +226,7 @@ async def memory_delete(
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
     try:
-        success = await service.delete(memory_id=id)
+        success = await _track_tool("memory_delete", service.delete(memory_id=id))
         return {"success": success}
     except NotFoundError as e:
         raise ValueError(str(e)) from e
@@ -227,12 +247,12 @@ async def memory_list(
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
     try:
-        result = await service.list(
+        result = await _track_tool("memory_list", service.list(
             user_id=user_id,
             namespace=namespace,
             limit=limit,
             offset=offset,
-        )
+        ))
         return {
             "items": [r.model_dump(mode="json") for r in result.items],
             "total": result.total,
@@ -252,7 +272,7 @@ async def memory_forget(
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
     try:
-        deleted = await service.forget(user_id=user_id, namespace=namespace)
+        deleted = await _track_tool("memory_forget", service.forget(user_id=user_id, namespace=namespace))
         return {"deleted_count": deleted}
     except Exception as e:
         logger.exception("Failed to forget memories")
