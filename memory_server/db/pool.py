@@ -5,21 +5,18 @@ async def create_pool(
     dsn: str,
     min_size: int = 2,
     max_size: int = 20,
-    hnsw_ef_search: int = 40,
 ) -> asyncpg.Pool:
     """Создаёт пул соединений к PostgreSQL с pgvector.
 
-    Параметры:
-        hnsw_ef_search: качество поиска HNSW (по умолч. 40).
-            Для production с 4096-dim рекомендуется 80-120.
-            Влияние: ×2 к ef_search ≈ ×1.5 к времени запроса,
-            но recall растёт с 0.90 до 0.97+.
+    Используем точный поиск (без индекса), т.к. pgvector ограничивает
+    индексы 2000 измерениями, а у нас 4096-dim векторы.
+
+    Для датасета <100K записей точный поиск даёт latency ~50-500ms.
     """
     dsn = dsn.replace("postgresql+asyncpg://", "postgresql://")
 
     async def init_conn(conn: asyncpg.Connection) -> None:
         """Инициализация каждого нового соединения."""
-        await conn.execute(f"SET hnsw.ef_search = {hnsw_ef_search}")
         # Таймаут на запрос — предохранитель от зависших запросов
         await conn.execute("SET statement_timeout = '30s'")
 

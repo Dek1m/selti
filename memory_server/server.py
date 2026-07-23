@@ -13,6 +13,7 @@ from memory_server.embedding.client import EmbeddingClient
 from memory_server.memory.repository import MemoryRepository
 from memory_server.memory.service import MemoryService
 from memory_server.metrics import DB_POOL_SIZE, DB_POOL_AVAILABLE
+from migrations.run import run_migrations
 
 # Correlation ID через contextvars — пробрасывается из middleware __main__.py
 request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
@@ -70,6 +71,9 @@ async def lifespan(server: FastMCP):
 
     DB_POOL_SIZE.set(pool.get_size())
     DB_POOL_AVAILABLE.set(pool.get_idle_size())
+
+    # Применяем миграции БД при старте
+    await run_migrations()
 
     metrics_task = asyncio.create_task(_pool_metrics_updater(pool))
 

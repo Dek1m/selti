@@ -20,7 +20,7 @@ $$ LANGUAGE plpgsql;
 -- ════════════════════════════════════════════════════════════
 -- Таблица memories
 -- ════════════════════════════════════════════════════════════
--- embedding: vector(8192) — под qwen3-embedding-8b
+-- embedding: vector(4096) — под qwen3-embedding-8b
 -- metadata: JSONB — гибкие метаданные, индексируется через GIN при необходимости
 -- namespace: логическая изоляция данных (multi-tenant)
 -- ════════════════════════════════════════════════════════════
@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS memories (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id     TEXT NOT NULL,
     content     TEXT NOT NULL,
-    embedding   vector(8192),
+    embedding   vector(4096),
     metadata    JSONB DEFAULT '{}'::jsonb,
     namespace   TEXT NOT NULL DEFAULT 'default',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -43,21 +43,23 @@ CREATE INDEX IF NOT EXISTS idx_memories_namespace   ON memories (namespace);
 CREATE INDEX IF NOT EXISTS idx_memories_created_at  ON memories (created_at DESC);
 
 -- ════════════════════════════════════════════════════════════
--- HNSW — векторный индекс (cosine distance)
+-- Векторный индекс (пропущен — используем точный поиск)
 -- ════════════════════════════════════════════════════════════
--- Почему HNSW вместо IVFFlat:
---   - 8192-dim — IVFFlat даёт низкий recall (эффект проклятия размерности)
---   - HNSW стабильно держит recall 0.95+ при ef_search = 40-80
---   - build время дольше, но строится один раз
---   - Память: ~1.1x от размера векторов (для 8192-dim ~35KB на вектор)
+-- pgvector ограничивает индексы 2000 измерениями (из-за страницы 8KB).
+-- У нас 4096-dim, поэтому используем точный поиск (sequential scan).
+-- Оператор <=> корректно работает без индекса на любом количестве измерений.
 --
--- Параметры:
---   m = 16           — количество связей на узел (default 16, можно до 64)
---   ef_construction  = 200 — качество построения графа (по умолч. 40, для 8k-dim нужно выше)
-CREATE INDEX IF NOT EXISTS idx_memories_embedding_hnsw
-    ON memories
-    USING hnsw (embedding vector_cosine_ops)
-    WITH (m = 16, ef_construction = 200);
+-- Для датасета <100K записей точный поиск даёт latency ~50-500ms,
+-- что приемлемо для памяти-сервера.
+--
+-- КОГДА ДОБАВИТЬ ИНДЕКС:
+-- Если датасет вырастет >100K и latency станет критичной:
+--   Вариант A: Использовать halfvec(4096) + HNSW (потеря точности fp16)
+--     CREATE INDEX ON memories USING hnsw ((embedding::halfvec(4096)) halfvec_cosine_ops);
+--   Вариант B: Использовать binary_quantize + HNSW (битовый, до 64000 dim)
+--     CREATE INDEX ON memories USING hnsw ((binary_quantize(embedding)::bit(4096)) bit_hamming_ops);
+--     + точный re-rank на top-K результатах
+--   Вариант C: pgvectorscale (DiskANN) — без ограничения dim, но нужен extension
 
 -- ════════════════════════════════════════════════════════════
 -- Триггер автообновления updated_at
@@ -74,15 +76,14 @@ CREATE TRIGGER trg_memories_updated_at
 -- CREATE INDEX IF NOT EXISTS idx_memories_metadata ON memories USING gin (metadata jsonb_path_ops);
 
 -- ════════════════════════════════════════════════════════════
--- Функция для реранкинга (точный поиск после HNSW)
+-- Функция для приближённого поиска (через IVFFlat или без индекса)
 -- ════════════════════════════════════════════════════════════
--- Использовать для повышения точности:
+-- Использование:
 -- SELECT * FROM search_memories_approx('user_1', embedding, 0.7, 100);
--- Затем пересчитать расстояния точно
 -- ════════════════════════════════════════════════════════════
 CREATE OR REPLACE FUNCTION search_memories_approx(
     p_user_id TEXT,
-    p_embedding vector(8192),
+    p_embedding vector(4096),
     p_threshold FLOAT DEFAULT 0.7,
     p_limit INT DEFAULT 20
 )
@@ -115,4 +116,4 @@ $$;
 -- DROP TRIGGER IF EXISTS trg_memories_updated_at ON memories;
 -- DROP TABLE IF EXISTS memories CASCADE;
 -- DROP FUNCTION IF EXISTS update_updated_at_column();
--- DROP FUNCTION IF EXISTS search_memories_approx(vector(8192), float, int);
+-- DROP FUNCTION IF EXISTS search_memories_approx(vector(4096), float, int);
