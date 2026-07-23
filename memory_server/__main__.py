@@ -41,7 +41,7 @@ class AuthASGIMiddleware:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with mcp:
+    async with mcp._lifespan_manager():
         yield
 
 
@@ -115,7 +115,7 @@ async def metrics():
 
 
 # Mount MCP SSE transport — обёрнут в auth middleware (т.к. mount не проходит через @app.middleware)
-app.mount("/mcp", AuthASGIMiddleware(mcp.sse_app()))
+app.mount("/mcp", AuthASGIMiddleware(mcp.http_app(transport='sse')))
 
 
 if __name__ == "__main__":

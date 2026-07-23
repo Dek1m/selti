@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     embedding_api_url: str = "http://10.0.0.21:8080/v1"
     embedding_api_key: str = ""
     embedding_model: str = "qwen3-embedding-8b"
-    embedding_dimension: int = 8192
+    embedding_dimension: int = 4096
 
     mcp_server_name: str = "athena-memory"
     mcp_host: str = "0.0.0.0"
