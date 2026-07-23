@@ -60,8 +60,9 @@ def test_memory_record_serialization():
     assert dumped["content"] == "Hello"
     assert dumped["metadata"] == {"key": "val"}
     assert dumped["namespace"] == "ns"
-    assert dumped["created_at"] == "2025-06-15T12:00:00+00:00"
-    assert dumped["updated_at"] == "2025-06-15T12:00:00+00:00"
+    # Pydantic 2.x сериализует UTC timezone как 'Z'
+    assert dumped["created_at"] in ("2025-06-15T12:00:00+00:00", "2025-06-15T12:00:00Z")
+    assert dumped["updated_at"] in ("2025-06-15T12:00:00+00:00", "2025-06-15T12:00:00Z")
 
 
 def test_memory_input_create():

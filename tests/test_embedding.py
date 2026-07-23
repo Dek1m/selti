@@ -1,3 +1,5 @@
+import json
+
 import httpx
 import pytest
 
@@ -15,9 +17,23 @@ def client():
     )
 
 
+def _add_verify_response(httpx_mock, dimension=3):
+    """Add a response for the _verify_dimension call (happens on first embed)."""
+    httpx_mock.add_response(
+        url="http://test-embed:8080/v1/embeddings",
+        method="POST",
+        json={
+            "data": [{"index": 0, "embedding": [0.0] * dimension, "object": "embedding"}],
+            "model": "test-model",
+            "usage": {"prompt_tokens": 1, "total_tokens": 1},
+        },
+    )
+
+
 @pytest.mark.asyncio
 async def test_embed_returns_vector(httpx_mock, client):
     """embed should POST to /embeddings and return the embedding vector."""
+    _add_verify_response(httpx_mock, dimension=3)
     httpx_mock.add_response(
         url="http://test-embed:8080/v1/embeddings",
         method="POST",
@@ -31,13 +47,16 @@ async def test_embed_returns_vector(httpx_mock, client):
     vector = await client.embed("hello")
     assert vector == [0.1, 0.2, 0.3]
 
-    request = httpx_mock.get_request()
-    assert request.json() == {"model": "test-model", "input": "hello"}
+    # Filter the actual embed request (second one, after verify)
+    requests = httpx_mock.get_requests(method="POST", url="http://test-embed:8080/v1/embeddings")
+    actual_request = [r for r in requests if json.loads(r.content).get("input") == "hello"][0]
+    assert json.loads(actual_request.content) == {"model": "test-model", "input": "hello"}
 
 
 @pytest.mark.asyncio
 async def test_embed_many_returns_list_of_vectors(httpx_mock, client):
     """embed_many should return a list of embedding vectors sorted by index."""
+    _add_verify_response(httpx_mock, dimension=3)
     httpx_mock.add_response(
         url="http://test-embed:8080/v1/embeddings",
         method="POST",
@@ -65,13 +84,24 @@ async def test_verify_dimension_updates_on_mismatch(httpx_mock):
         dimension=999,  # intentionally wrong
     )
 
+    # verify call (dimension=999, actual=3 — will update)
     httpx_mock.add_response(
         url="http://test-embed:8080/v1/embeddings",
         method="POST",
         json={
             "data": [{"index": 0, "embedding": [0.1, 0.2, 0.3], "object": "embedding"}],
             "model": "test-model",
-            "usage": {"prompt_tokens": 2, "total_tokens": 2},
+            "usage": {"prompt_tokens": 1, "total_tokens": 1},
+        },
+    )
+    # actual embed call
+    httpx_mock.add_response(
+        url="http://test-embed:8080/v1/embeddings",
+        method="POST",
+        json={
+            "data": [{"index": 0, "embedding": [0.1, 0.2, 0.3], "object": "embedding"}],
+            "model": "test-model",
+            "usage": {"prompt_tokens": 1, "total_tokens": 1},
         },
     )
 
@@ -91,13 +121,14 @@ async def test_verify_dimension_unchanged_when_match(httpx_mock):
         dimension=3,  # correct
     )
 
+    _add_verify_response(httpx_mock, dimension=3)
     httpx_mock.add_response(
         url="http://test-embed:8080/v1/embeddings",
         method="POST",
         json={
             "data": [{"index": 0, "embedding": [0.1, 0.2, 0.3], "object": "embedding"}],
             "model": "test-model",
-            "usage": {"prompt_tokens": 2, "total_tokens": 2},
+            "usage": {"prompt_tokens": 1, "total_tokens": 1},
         },
     )
 
@@ -162,6 +193,7 @@ async def test_embed_without_api_key(httpx_mock):
         dimension=2,
     )
 
+    _add_verify_response(httpx_mock, dimension=2)
     httpx_mock.add_response(
         url="http://test-embed:8080/v1/embeddings",
         method="POST",
@@ -173,8 +205,9 @@ async def test_embed_without_api_key(httpx_mock):
     )
 
     await client.embed("hi")
-    request = httpx_mock.get_request()
-    assert "Authorization" not in request.headers
+    requests = httpx_mock.get_requests(method="POST", url="http://test-embed:8080/v1/embeddings")
+    actual_request = [r for r in requests if json.loads(r.content).get("input") == "hi"][0]
+    assert "Authorization" not in actual_request.headers
 
 
 @pytest.mark.asyncio
@@ -187,6 +220,7 @@ async def test_embed_with_api_key(httpx_mock):
         dimension=2,
     )
 
+    _add_verify_response(httpx_mock, dimension=2)
     httpx_mock.add_response(
         url="http://test-embed:8080/v1/embeddings",
         method="POST",
@@ -198,14 +232,16 @@ async def test_embed_with_api_key(httpx_mock):
     )
 
     await client.embed("hi")
-    request = httpx_mock.get_request()
-    assert request.headers["Authorization"] == "Bearer sk-secret"
+    requests = httpx_mock.get_requests(method="POST", url="http://test-embed:8080/v1/embeddings")
+    actual_request = [r for r in requests if json.loads(r.content).get("input") == "hi"][0]
+    assert actual_request.headers["Authorization"] == "Bearer sk-secret"
 
 
 @pytest.mark.asyncio
 async def test_aclose_clears_client(httpx_mock, client):
     """aclose should close the underlying httpx client and set it to None."""
-    # Force client initialisation
+    # Force client initialisation — needs 2 responses (verify + warm-up)
+    _add_verify_response(httpx_mock, dimension=3)
     httpx_mock.add_response(
         url="http://test-embed:8080/v1/embeddings",
         method="POST",

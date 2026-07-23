@@ -11,6 +11,7 @@ class MemoryRecord(BaseModel):
     namespace: str = "default"
     created_at: datetime
     updated_at: datetime
+    content_hash: str | None = None
 
 
 class MemoryInput(BaseModel):
@@ -18,6 +19,7 @@ class MemoryInput(BaseModel):
     user_id: str
     metadata: dict = Field(default_factory=dict)
     namespace: str = "default"
+    content_hash: str | None = None
 
 
 class SearchResult(BaseModel):

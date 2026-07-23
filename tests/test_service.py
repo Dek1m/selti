@@ -3,7 +3,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from memory_server.config import Settings
 from memory_server.exceptions import NotFoundError
+from memory_server.memory.dedup import DedupAction
 from memory_server.memory.service import MemoryService
 from memory_server.models import MemoryListResult, MemoryRecord, SearchResult
 
@@ -13,6 +15,7 @@ def service(mock_repository, mock_embedding_provider):
     return MemoryService(
         repository=mock_repository,
         embedding_provider=mock_embedding_provider,
+        config=Settings(dedup_enabled=False),
     )
 
 
@@ -34,13 +37,14 @@ class TestStore:
         service.repository.insert = AsyncMock(return_value="new-id")
         service.repository.get_by_id = AsyncMock(return_value=expected_record)
 
-        result = await service.store(
+        result, action = await service.store(
             content="Hello world",
             user_id="u1",
             metadata={"source": "test"},
             namespace="ns1",
         )
 
+        assert action == DedupAction.INSERT
         service.embedding.embed.assert_awaited_once_with("Hello world")
         service.repository.insert.assert_awaited_once_with(
             user_id="u1",
@@ -48,6 +52,7 @@ class TestStore:
             embedding=[0.1, 0.2, 0.3],
             metadata={"source": "test"},
             namespace="ns1",
+            content_hash=None,
         )
         service.repository.get_by_id.assert_awaited_once_with("new-id")
         assert result == expected_record
@@ -67,14 +72,16 @@ class TestStore:
             )
         )
 
-        await service.store(content="x", user_id="u1")
+        _, action = await service.store(content="x", user_id="u1")
 
+        assert action == DedupAction.INSERT
         service.repository.insert.assert_awaited_once_with(
             user_id="u1",
             content="x",
             embedding=[0.0, 0.0, 0.0],
             metadata={},
             namespace="default",
+            content_hash=None,
         )
 
     @pytest.mark.asyncio

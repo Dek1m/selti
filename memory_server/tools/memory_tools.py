@@ -4,6 +4,7 @@ from typing import Any
 from fastmcp import Context
 
 from memory_server.exceptions import NotFoundError
+from memory_server.memory.dedup import DedupAction
 from memory_server.server import mcp
 
 logger = logging.getLogger(__name__)
@@ -20,17 +21,20 @@ async def memory_store(
     """Store a new memory record.
 
     Generates an embedding for the content and persists it to the database.
+    Deduplication is applied automatically — returns existing record if a match is found.
     """
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
     try:
-        record = await service.store(
+        record, action = await service.store(
             content=content,
             user_id=user_id,
             metadata=metadata,
             namespace=namespace,
         )
-        return record.model_dump(mode="json")
+        result = record.model_dump(mode="json")
+        result["_dedup_action"] = action.value
+        return result
     except Exception as e:
         logger.exception("Failed to store memory")
         raise RuntimeError(str(e)) from e

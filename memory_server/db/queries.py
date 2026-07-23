@@ -1,13 +1,19 @@
 INSERT_MEMORY = """
-    INSERT INTO memories (user_id, content, embedding, metadata, namespace)
-    VALUES ($1, $2, $3::vector, $4::jsonb, $5)
+    INSERT INTO memories (user_id, content, embedding, metadata, namespace, content_hash)
+    VALUES ($1, $2, $3::vector, $4::jsonb, $5, $6)
     RETURNING id
 """
 
 SELECT_MEMORY_BY_ID = """
-    SELECT id, user_id, content, metadata, namespace, created_at, updated_at
+    SELECT id, user_id, content, metadata, namespace, created_at, updated_at, content_hash
     FROM memories
     WHERE id = $1
+"""
+
+SELECT_MEMORY_BY_CONTENT_HASH = """
+    SELECT id, user_id, content, metadata, namespace, created_at, updated_at, content_hash
+    FROM memories
+    WHERE namespace = $1 AND content_hash = $2
 """
 
 # HNSW search via SQL function (defined in 001_initial.sql).
@@ -33,7 +39,7 @@ UPDATE_MEMORY = """
         metadata = COALESCE($4::jsonb, metadata),
         updated_at = now()
     WHERE id = $1
-    RETURNING id, user_id, content, metadata, namespace, created_at, updated_at
+    RETURNING id, user_id, content, metadata, namespace, created_at, updated_at, content_hash
 """
 
 DELETE_MEMORY = """
@@ -42,7 +48,7 @@ DELETE_MEMORY = """
 """
 
 LIST_MEMORIES = """
-    SELECT id, user_id, content, metadata, namespace, created_at, updated_at
+    SELECT id, user_id, content, metadata, namespace, created_at, updated_at, content_hash
     FROM memories
     WHERE ($1::text IS NULL OR user_id = $1)
       AND ($2::text IS NULL OR namespace = $2)

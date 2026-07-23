@@ -1,7 +1,9 @@
 import logging
 
+from memory_server.config import Settings
 from memory_server.embedding.provider import EmbeddingProvider
 from memory_server.exceptions import NotFoundError
+from memory_server.memory.dedup import DedupAction, DedupEngine
 from memory_server.memory.repository import MemoryRepository
 from memory_server.models import MemoryListResult, MemoryRecord, SearchResult
 
@@ -15,9 +17,12 @@ class MemoryService:
         self,
         repository: MemoryRepository,
         embedding_provider: EmbeddingProvider,
+        config: Settings | None = None,
     ):
         self.repository = repository
         self.embedding = embedding_provider
+        self.config = config or Settings()
+        self.dedup = DedupEngine(repository, embedding_provider, self.config)
 
     async def store(
         self,
@@ -25,20 +30,45 @@ class MemoryService:
         user_id: str,
         metadata: dict | None = None,
         namespace: str | None = None,
-    ) -> MemoryRecord:
+    ) -> tuple[MemoryRecord, DedupAction]:
+        namespace = namespace or "default"
+        content_hash: str | None = None
+
+        if self.config.dedup_enabled:
+            decision = await self.dedup.check(content, user_id, namespace)
+            content_hash = decision.content_hash
+
+            if decision.action == DedupAction.SKIP:
+                record = await self.repository.get_by_id(decision.existing_id)
+                if record is None:
+                    raise RuntimeError(f"Failed to retrieve existing memory: {decision.existing_id}")
+                return record, DedupAction.SKIP
+
+            if decision.action == DedupAction.UPDATE:
+                record = await self.repository.get_by_id(decision.existing_id)
+                if record is None:
+                    raise RuntimeError(f"Failed to retrieve memory for update: {decision.existing_id}")
+                updated = await self.repository.update(
+                    memory_id=decision.existing_id,
+                    metadata={**record.metadata, **(metadata or {})},
+                )
+                if updated is None:
+                    raise RuntimeError(f"Failed to update memory: {decision.existing_id}")
+                return updated, DedupAction.UPDATE
+
         embedding = await self.embedding.embed(content)
         memory_id = await self.repository.insert(
             user_id=user_id,
             content=content,
             embedding=embedding,
             metadata=metadata or {},
-            namespace=namespace or "default",
+            namespace=namespace,
+            content_hash=content_hash,
         )
-        # Fetch the full record to return it
         record = await self.repository.get_by_id(memory_id)
         if record is None:
             raise RuntimeError(f"Failed to retrieve memory after insert: {memory_id}")
-        return record
+        return record, DedupAction.INSERT
 
     async def search(
         self,

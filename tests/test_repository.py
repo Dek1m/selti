@@ -40,6 +40,7 @@ class TestInsert:
             [0.1, 0.2, 0.3],
             {"source": "test"},
             "ns1",
+            None,
         )
 
 
@@ -56,6 +57,7 @@ class TestGetById:
                 "namespace": "default",
                 "created_at": now,
                 "updated_at": now,
+                "content_hash": None,
             }
         )
 
@@ -88,6 +90,7 @@ class TestGetById:
                 "namespace": "default",
                 "created_at": now,
                 "updated_at": now,
+                "content_hash": None,
             }
         )
 
@@ -172,6 +175,7 @@ class TestUpdate:
                 "namespace": "default",
                 "created_at": now,
                 "updated_at": now,
+                "content_hash": None,
             }
         )
 
@@ -238,6 +242,7 @@ class TestList:
                     "namespace": "default",
                     "created_at": now,
                     "updated_at": now,
+                    "content_hash": None,
                 },
             ]
         )

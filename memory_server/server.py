@@ -83,6 +83,7 @@ async def lifespan(server: FastMCP):
     service = MemoryService(
         repository=repository,
         embedding_provider=embedding_client,
+        config=settings,
     )
 
     logger.info(

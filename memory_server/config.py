@@ -17,6 +17,18 @@ class Settings(BaseSettings):
     search_default_limit: int = 10
     search_default_threshold: float = 0.7
 
+    dedup_enabled: bool = True
+    dedup_threshold: float = 0.95
+    dedup_thresholds: dict[str, float] = {
+        "default": 0.95,
+        "user_facts": 0.90,
+        "dialogue_insights": 0.85,
+        "code_knowledge": 0.95,
+        "project_meta": 0.90,
+    }
+
+    redis_url: str = "redis://:${REDIS_PASSWORD}@redis:6379/0"
+
     log_level: str = "INFO"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}

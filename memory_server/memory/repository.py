@@ -17,6 +17,7 @@ class MemoryRepository:
         embedding: list[float],
         metadata: dict,
         namespace: str,
+        content_hash: str | None = None,
     ) -> str:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -26,6 +27,7 @@ class MemoryRepository:
                 embedding,
                 metadata,
                 namespace,
+                content_hash,
             )
             return row["id"]
 
@@ -42,6 +44,31 @@ class MemoryRepository:
                 namespace=row["namespace"],
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
+                content_hash=row["content_hash"],
+            )
+
+    async def find_by_content_hash(
+        self,
+        namespace: str,
+        content_hash: str,
+    ) -> MemoryRecord | None:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                q.SELECT_MEMORY_BY_CONTENT_HASH,
+                namespace,
+                content_hash,
+            )
+            if row is None:
+                return None
+            return MemoryRecord(
+                id=str(row["id"]),
+                user_id=row["user_id"],
+                content=row["content"],
+                metadata=row["metadata"] or {},
+                namespace=row["namespace"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+                content_hash=row["content_hash"],
             )
 
     async def search(
@@ -96,6 +123,7 @@ class MemoryRepository:
                 namespace=row["namespace"],
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
+                content_hash=row["content_hash"],
             )
 
     async def delete(self, memory_id: str) -> bool:
@@ -122,6 +150,7 @@ class MemoryRepository:
                     namespace=row["namespace"],
                     created_at=row["created_at"],
                     updated_at=row["updated_at"],
+                    content_hash=row["content_hash"],
                 )
                 for row in rows
             ]
