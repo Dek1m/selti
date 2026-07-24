@@ -62,6 +62,10 @@ async def _pool_metrics_updater(pool):
 
 @asynccontextmanager
 async def lifespan(server: FastMCP):
+    # Сначала миграции — создают extension vector, таблицы, индексы
+    await run_migrations()
+
+    # Потом пул — register_vector() требует существующего vector type в БД
     dsn = settings.database_url.replace("postgresql+asyncpg://", "postgresql://")
     pool = await create_pool(
         dsn=dsn,
@@ -71,9 +75,6 @@ async def lifespan(server: FastMCP):
 
     DB_POOL_SIZE.set(pool.get_size())
     DB_POOL_AVAILABLE.set(pool.get_idle_size())
-
-    # Применяем миграции БД при старте
-    await run_migrations()
 
     metrics_task = asyncio.create_task(_pool_metrics_updater(pool))
 

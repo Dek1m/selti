@@ -13,7 +13,7 @@ class TestSettingsDefaults:
         """Should use defaults when no env vars are set."""
         with patch.dict(os.environ, {}, clear=True):
             s = Settings()  # type: ignore[call-arg]
-        assert s.database_url == "postgresql+asyncpg://athena:athena@localhost:5432/athena_memory"
+        assert s.database_url == "postgresql+asyncpg://athena:athena@localhost:5432/athene_memory"
         assert s.db_min_connections == 2
         assert s.db_max_connections == 20
         assert s.embedding_api_url == "http://10.0.0.21:8080/v1"

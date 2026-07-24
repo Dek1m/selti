@@ -6,7 +6,7 @@ Usage:
     python migrations/run.py --down   # Rollback last migration
 
 Environment:
-    DATABASE_URL — PostgreSQL connection string (default: postgresql://athena:athena@localhost:5432/athena_memory)
+    DATABASE_URL — PostgreSQL connection string (default: postgresql://athena:athena@localhost:5432/athene_memory)
 """
 
 import asyncio
@@ -19,7 +19,7 @@ import asyncpg
 logger = logging.getLogger(__name__)
 
 MIGRATIONS_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_DSN = "postgresql://athena:athena@localhost:5432/athena_memory"
+DEFAULT_DSN = "postgresql://athena:athena@localhost:5432/athene_memory"
 
 
 async def ensure_migrations_table(conn: asyncpg.Connection) -> None:

@@ -12,7 +12,7 @@ class Namespace(str, Enum):
 
 
 class Settings(BaseSettings):
-    database_url: str = "postgresql+asyncpg://athena:athena@localhost:5432/athena_memory"
+    database_url: str = "postgresql+asyncpg://athena:athena@localhost:5432/athene_memory"
     db_min_connections: int = 2
     db_max_connections: int = 20
 
