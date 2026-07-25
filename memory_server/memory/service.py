@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 import logging
 
 from memory_server.config import Settings
@@ -134,7 +135,7 @@ class MemoryService:
     async def recent(
         self,
         namespace: str | None = None,
-        since: str | None = None,
+        since: datetime | None = None,
         limit: int = 20,
     ) -> list[MemoryRecord]:
         return await self.repository.recent(

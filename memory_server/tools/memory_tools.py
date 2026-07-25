@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import logging
 import time
 from typing import Any
@@ -278,6 +280,8 @@ async def memory_recent(
     """
     _validate_namespace(namespace)
     assert ctx is not None
+    if since is not None:
+        since = datetime.fromisoformat(since)
     service = ctx.request_context.lifespan_context["service"]
     try:
         results = await _track_tool("memory_recent", service.recent(
