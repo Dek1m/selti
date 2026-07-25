@@ -69,6 +69,15 @@ FORGET_MEMORIES = """
       AND ($2::text IS NULL OR namespace = $2)
 """
 
+RECENT_MEMORIES = """
+    SELECT id, user_id, content, metadata, namespace, created_at, updated_at, content_hash
+    FROM memories
+    WHERE ($1::text IS NULL OR namespace = $1)
+      AND ($2::timestamptz IS NULL OR created_at >= $2)
+    ORDER BY created_at DESC
+    LIMIT $3
+"""
+
 MEMORY_STATS = """
     SELECT namespace, count(*) as count, max(updated_at) as last_updated
     FROM memories

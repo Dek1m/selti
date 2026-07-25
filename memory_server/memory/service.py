@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 
 from memory_server.config import Settings
@@ -127,6 +129,18 @@ class MemoryService:
             namespace=namespace,
             limit=limit,
             offset=offset,
+        )
+
+    async def recent(
+        self,
+        namespace: str | None = None,
+        since: str | None = None,
+        limit: int = 20,
+    ) -> list[MemoryRecord]:
+        return await self.repository.recent(
+            namespace=namespace,
+            since=since,
+            limit=limit,
         )
 
     async def forget(

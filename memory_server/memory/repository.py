@@ -159,6 +159,28 @@ class MemoryRepository:
             total = total_row[0]
             return MemoryListResult(items=items, total=total)
 
+    async def recent(
+        self,
+        namespace: str | None = None,
+        since: str | None = None,
+        limit: int = 20,
+    ) -> list[MemoryRecord]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(q.RECENT_MEMORIES, namespace, since, limit)
+            return [
+                MemoryRecord(
+                    id=str(row["id"]),
+                    user_id=row["user_id"],
+                    content=row["content"],
+                    metadata=row["metadata"] or {},
+                    namespace=row["namespace"],
+                    created_at=row["created_at"],
+                    updated_at=row["updated_at"],
+                    content_hash=row["content_hash"],
+                )
+                for row in rows
+            ]
+
     async def forget(
         self,
         user_id: str,

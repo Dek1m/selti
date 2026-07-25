@@ -263,6 +263,35 @@ async def memory_list(
 
 
 @mcp.tool()
+async def memory_recent(
+    namespace: str | None = None,
+    limit: int = 20,
+    since: str | None = None,
+    ctx: Context | None = None,
+) -> list[dict[str, Any]]:
+    """Get the most recent memory records.
+
+    Returns records ordered by creation time (newest first).
+    Useful for checking what happened recently — "what did we do today", "last 10 records", etc.
+    Pass 'since' as an ISO datetime string (e.g. '2026-07-25' or '2026-07-25T10:00:00')
+    to filter records created after a specific point in time.
+    """
+    _validate_namespace(namespace)
+    assert ctx is not None
+    service = ctx.request_context.lifespan_context["service"]
+    try:
+        results = await _track_tool("memory_recent", service.recent(
+            namespace=namespace,
+            since=since,
+            limit=limit,
+        ))
+        return [r.model_dump(mode="json") for r in results]
+    except Exception as e:
+        logger.exception("Failed to get recent memories")
+        raise RuntimeError(str(e)) from e
+
+
+@mcp.tool()
 async def memory_forget(
     user_id: str,
     namespace: str | None = None,
