@@ -69,7 +69,7 @@ async def memory_store(
 @mcp.tool()
 async def memory_search(
     query: str,
-    user_id: str,
+    user_id: str | None = None,
     limit: int = 10,
     threshold: float = 0.7,
     namespace: str | None = None,
@@ -137,7 +137,7 @@ async def memory_ingest_batch(
 
 @mcp.tool()
 async def memory_stats(
-    user_id: str,
+    user_id: str | None = None,
     ctx: Context | None = None,
 ) -> list[dict]:
     """Get memory statistics for a user — per-namespace counts and last updated."""
@@ -151,7 +151,7 @@ async def memory_stats(
 @mcp.tool()
 async def memory_find_similar(
     content: str,
-    user_id: str,
+    user_id: str | None = None,
     limit: int = 10,
     threshold: float = 0.7,
     namespace: str | None = None,

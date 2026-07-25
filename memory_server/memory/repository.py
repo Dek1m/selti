@@ -76,9 +76,9 @@ class MemoryRepository:
     async def search(
         self,
         query_embedding: list[float],
-        user_id: str,
-        limit: int,
-        threshold: float,
+        user_id: str | None = None,
+        limit: int = 10,
+        threshold: float = 0.7,
         namespace: str | None = None,
     ) -> list[SearchResult]:
         async with self.pool.acquire() as conn:
@@ -167,7 +167,7 @@ class MemoryRepository:
         async with self.pool.acquire() as conn:
             result = await conn.execute(q.FORGET_MEMORIES, user_id, namespace)
             return int(result.split()[-1])
-    async def get_stats(self, user_id: str) -> list[MemoryStatsItem]:
+    async def get_stats(self, user_id: str | None = None) -> list[MemoryStatsItem]:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(q.MEMORY_STATS, user_id)
             return [

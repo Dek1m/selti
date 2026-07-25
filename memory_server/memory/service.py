@@ -73,7 +73,7 @@ class MemoryService:
     async def search(
         self,
         query: str,
-        user_id: str,
+        user_id: str | None = None,
         limit: int = 10,
         threshold: float = 0.7,
         namespace: str | None = None,
@@ -139,5 +139,5 @@ class MemoryService:
             namespace=namespace,
         )
 
-    async def get_stats(self, user_id: str) -> list:
+    async def get_stats(self, user_id: str | None = None) -> list:
         return await self.repository.get_stats(user_id)

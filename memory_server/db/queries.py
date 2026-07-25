@@ -25,8 +25,9 @@ SEARCH_MEMORIES = """
     SELECT id, content, metadata,
            1 - (embedding <=> $1::vector) AS score
     FROM memories
-    WHERE user_id = $2
+    WHERE ($2::text IS NULL OR user_id = $2)
       AND ($3::text IS NULL OR namespace = $3)
+      AND is_archived = false
       AND 1 - (embedding <=> $1::vector) >= $4
     ORDER BY embedding <=> $1::vector
     LIMIT $5
@@ -71,7 +72,7 @@ FORGET_MEMORIES = """
 MEMORY_STATS = """
     SELECT namespace, count(*) as count, max(updated_at) as last_updated
     FROM memories
-    WHERE user_id = $1 AND is_archived = false
+    WHERE ($1::text IS NULL OR user_id = $1) AND is_archived = false
     GROUP BY namespace
     ORDER BY namespace
 """
