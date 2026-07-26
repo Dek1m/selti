@@ -1,5 +1,6 @@
 from datetime import datetime
 
+import json
 import logging
 import time
 from typing import Any
@@ -13,6 +14,28 @@ from memory_server.metrics import MCP_TOOL_CALLS_TOTAL, MCP_TOOL_DURATION_SECOND
 from memory_server.server import mcp
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_metadata(metadata: Any) -> dict | None:
+    """Coerce metadata to dict if it's a JSON string.
+
+    LLM agents sometimes serialize metadata as a string instead of an object.
+    This causes double-encoding via asyncpg's jsonb codec.
+    """
+    if metadata is None:
+        return None
+    if isinstance(metadata, dict):
+        return metadata
+    if isinstance(metadata, str):
+        try:
+            parsed = json.loads(metadata)
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+        logger.warning("metadata is a string but not valid JSON: %s", metadata[:200])
+        return None
+    return metadata
 
 
 async def _track_tool(tool_name: str, coro):
@@ -52,6 +75,7 @@ async def memory_store(
     """
     _validate_namespace(namespace)
     assert ctx is not None
+    metadata = _coerce_metadata(metadata)
     service = ctx.request_context.lifespan_context["service"]
     try:
         record, action = await _track_tool("memory_store", service.store(
@@ -119,7 +143,7 @@ async def memory_ingest_batch(
             record, action = await service.store(
                 content=entry["content"],
                 user_id=user_id,
-                metadata=entry.get("metadata"),
+                metadata=_coerce_metadata(entry.get("metadata")),
                 namespace=entry.get("namespace"),
             )
             results.append({
@@ -204,6 +228,7 @@ async def memory_update(
     If content is provided, a new embedding is generated.
     """
     assert ctx is not None
+    metadata = _coerce_metadata(metadata)
     service = ctx.request_context.lifespan_context["service"]
     try:
         record = await _track_tool("memory_update", service.update(
