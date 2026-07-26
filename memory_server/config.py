@@ -9,6 +9,7 @@ class Namespace(str, Enum):
     CODE_KNOWLEDGE = "code_knowledge"
     DIALOGUE_INSIGHTS = "dialogue_insights"
     PROJECT_META = "project_meta"
+    INFRASTRUCTURE = "infrastructure"
 
 
 class Settings(BaseSettings):
@@ -35,6 +36,7 @@ class Settings(BaseSettings):
         "dialogue_insights": 0.85,
         "code_knowledge": 0.95,
         "project_meta": 0.90,
+        "infrastructure": 0.95,
     }
 
     api_key: str = ""
