@@ -22,7 +22,7 @@ jobs:
             --name athena-memory \
             --restart unless-stopped \
             --network app_default \
-            -e DATABASE_URL='postgresql+asyncpg://postgres:postgres@postgres:5432/postgres' \
+            -e DATABASE_URL='postgresql+asyncpg://postgres:postgres@postgres:5432/athene_memory' \
             -e REDIS_URL='redis://redis:6379/0' \
             -e EMBEDDING_API_URL='http://10.0.0.21:8080/v1' \
             -e EMBEDDING_MODEL='qwen3-embedding-8b' \
