@@ -64,7 +64,7 @@ def _validate_namespace(namespace: str | None) -> None:
 async def memory_store(
     content: str,
     user_id: str,
-    metadata: dict | None = None,
+    metadata: str | dict | None = None,
     namespace: str | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
@@ -220,7 +220,7 @@ async def memory_get(
 async def memory_update(
     id: str,
     content: str | None = None,
-    metadata: dict | None = None,
+    metadata: str | dict | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Update an existing memory record.
