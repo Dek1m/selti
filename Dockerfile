@@ -29,6 +29,7 @@ ENV PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbi
 # Копируем код приложения
 COPY memory_server/ ./memory_server/
 COPY migrations/ ./migrations/
+COPY VERSION ./VERSION
 
 EXPOSE 8000
 
