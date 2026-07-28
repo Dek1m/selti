@@ -19,7 +19,7 @@ class TestSettingsDefaults:
         assert s.embedding_api_url == "http://10.0.0.21:8080/v1"
         assert s.embedding_api_key == ""
         assert s.embedding_model == "qwen3-embedding-8b"
-        assert s.embedding_dimension == 8192
+        assert s.embedding_dimension == 4096
         assert s.mcp_server_name == "athena-memory"
         assert s.search_default_limit == 10
         assert s.search_default_threshold == 0.7

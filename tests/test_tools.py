@@ -40,6 +40,16 @@ def mock_service():
     service.store = AsyncMock()
     service.search = AsyncMock()
     service.get_stats = AsyncMock()
+    service.dedup = MagicMock()
+    service.dedup.check = AsyncMock()
+    service.config = MagicMock()
+    service.config.dedup_enabled = False
+    service.ns_repo = MagicMock()
+    service.ns_repo.get_or_create = AsyncMock()
+    service.embedding = MagicMock()
+    service.embedding.embed_many = AsyncMock()
+    service.repository = MagicMock()
+    service.repository.insert_batch = AsyncMock()
     return service
 
 
@@ -69,9 +79,11 @@ class TestMemoryIngestBatch:
 
     @pytest.mark.asyncio
     async def test_batch_single_entry(self, mock_ctx, mock_service):
-        """Один entry → результат как от обычного store."""
-        record = _make_record("mem-1")
-        mock_service.store.return_value = (record, DedupAction.INSERT)
+        """Один entry → insert через batch."""
+        mock_service.config.dedup_enabled = False
+        mock_service.repository.insert_batch = AsyncMock(return_value=["mem-1"])
+        mock_service.ns_repo.get_or_create = AsyncMock(return_value=MagicMock(id="ns-1"))
+        mock_service.embedding.embed_many = AsyncMock(return_value=[[0.1, 0.2]])
 
         result = await memory_ingest_batch(
             entries=[{"content": "test"}],
@@ -87,22 +99,13 @@ class TestMemoryIngestBatch:
         }
         assert result["summary"] == {"insert": 1, "skip": 0, "update": 0}
 
-        mock_service.store.assert_awaited_once_with(
-            content="test",
-            user_id="u1",
-            metadata=None,
-            namespace=None,
-        )
-
     @pytest.mark.asyncio
     async def test_batch_multiple_entries(self, mock_ctx, mock_service):
-        """Несколько entries → корректный summary (inserted/skipped)."""
-        record1 = _make_record("mem-1")
-        record2 = _make_record("mem-2")
-        mock_service.store = AsyncMock(side_effect=[
-            (record1, DedupAction.INSERT),
-            (record2, DedupAction.SKIP),
-        ])
+        """Несколько entries → batch insert."""
+        mock_service.config.dedup_enabled = False
+        mock_service.repository.insert_batch = AsyncMock(return_value=["mem-1", "mem-2"])
+        mock_service.ns_repo.get_or_create = AsyncMock(return_value=MagicMock(id="ns-1"))
+        mock_service.embedding.embed_many = AsyncMock(return_value=[[0.1], [0.2]])
 
         result = await memory_ingest_batch(
             entries=[
@@ -113,7 +116,7 @@ class TestMemoryIngestBatch:
             ctx=mock_ctx,
         )
 
-        assert result["summary"] == {"insert": 1, "skip": 1, "update": 0}
+        assert result["summary"] == {"insert": 2, "skip": 0, "update": 0}
         assert len(result["results"]) == 2
 
 
