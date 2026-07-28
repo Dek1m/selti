@@ -5,7 +5,16 @@ from datetime import datetime
 import asyncpg
 
 from memory_server.db import queries as q
-from memory_server.models import MemoryListResult, MemoryRecord, MemoryStatsItem, SearchResult
+from memory_server.models import (
+    GraphStats,
+    MemoryListResult,
+    MemoryRecord,
+    MemoryStatsItem,
+    Relation,
+    RelationListResult,
+    SearchResult,
+    TraverseResult,
+)
 
 
 class MemoryRepository:
@@ -34,6 +43,28 @@ class MemoryRepository:
                 content_hash,
             )
             return row["id"]
+
+    async def insert_batch(
+        self,
+        user_ids: list[str],
+        contents: list[str],
+        embeddings: list[list[float]],
+        metadatas: list[dict],
+        namespaces: list[str],
+        content_hashes: list[str | None],
+    ) -> list[str]:
+        """Batch insert multiple memories in one SQL round-trip."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                q.INSERT_MEMORY_BATCH,
+                user_ids,
+                contents,
+                embeddings,
+                metadatas,
+                namespaces,
+                content_hashes,
+            )
+            return [str(row["id"]) for row in rows]
 
     async def get_by_id(self, memory_id: str) -> MemoryRecord | None:
         async with self.pool.acquire() as conn:
@@ -202,4 +233,148 @@ class MemoryRepository:
                 )
                 for row in rows
             ]
+
+    async def archive(self, memory_id: str) -> bool:
+        """Мягкое удаление: установить is_archived = true."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(q.ARCHIVE_MEMORY, memory_id)
+            return row is not None
+
+    # ── Relations ──
+
+    async def add_relation(
+        self,
+        source_id: str,
+        target_id: str | None = None,
+        target_name: str | None = None,
+        link_type: str = "related_to",
+        description: str | None = None,
+        weight: float = 1.0,
+        metadata: dict | None = None,
+    ) -> str:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                q.INSERT_RELATION,
+                source_id,
+                target_id,
+                target_name,
+                link_type,
+                description,
+                weight,
+                metadata or {},
+            )
+            return str(row["id"])
+
+    async def get_relations_by_source(
+        self, source_id: str, link_type: str | None = None
+    ) -> list[Relation]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(q.SELECT_RELATIONS_BY_SOURCE, source_id, link_type)
+            return [
+                Relation(
+                    id=str(row["id"]),
+                    source_id=str(row["source_id"]),
+                    target_id=str(row["target_id"]) if row["target_id"] else None,
+                    target_name=row["target_name"],
+                    link_type=row["link_type"],
+                    description=row["description"],
+                    weight=float(row["weight"]),
+                    metadata=row["metadata"] or {},
+                    created_at=row["created_at"],
+                )
+                for row in rows
+            ]
+
+    async def get_relations_by_target(
+        self, target_id: str, link_type: str | None = None
+    ) -> list[Relation]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(q.SELECT_RELATIONS_BY_TARGET, target_id, link_type)
+            return [
+                Relation(
+                    id=str(row["id"]),
+                    source_id=str(row["source_id"]),
+                    target_id=str(row["target_id"]) if row["target_id"] else None,
+                    target_name=row["target_name"],
+                    link_type=row["link_type"],
+                    description=row["description"],
+                    weight=float(row["weight"]),
+                    metadata=row["metadata"] or {},
+                    created_at=row["created_at"],
+                )
+                for row in rows
+            ]
+
+    async def delete_relation(
+        self, source_id: str, target_id: str, link_type: str
+    ) -> bool:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                q.DELETE_RELATION, source_id, target_id, link_type
+            )
+            return row is not None
+
+    async def delete_relations_by_source(self, source_id: str) -> int:
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(q.DELETE_RELATIONS_BY_SOURCE, source_id)
+            return int(result.split()[-1])
+
+    async def find_relations_between(
+        self, source_id: str, target_id: str
+    ) -> list[Relation]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(q.FIND_RELATIONS_BETWEEN, source_id, target_id)
+            return [
+                Relation(
+                    id=str(row["id"]),
+                    source_id=str(row["source_id"]),
+                    target_id=str(row["target_id"]) if row["target_id"] else None,
+                    target_name=row["target_name"],
+                    link_type=row["link_type"],
+                    description=row["description"],
+                    weight=float(row["weight"]),
+                    metadata=row["metadata"] or {},
+                    created_at=row["created_at"],
+                )
+                for row in rows
+            ]
+
+    async def traverse(
+        self, start_id: str, depth: int = 3, link_types: list[str] | None = None
+    ) -> list[dict]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(q.TRAVERSE_CTE, start_id, depth, link_types)
+            return [{"node_id": str(row["node_id"]), "depth": row["depth"]} for row in rows]
+
+    async def get_graph_stats(self) -> GraphStats:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(q.GRAPH_STATS)
+            total_granules = row["total_granules"]
+            total_relations = row["total_relations"]
+            linked_granules = row["linked_granules"]
+            orphans = row["orphans"]
+            avg = (total_relations * 2 / total_granules) if total_granules > 0 else 0.0
+
+            ns_rows = await conn.fetch(q.GRAPH_STATS_BY_NAMESPACE)
+            by_namespace = {
+                r["namespace"]: {
+                    "total": r["total"],
+                    "linked": r["linked"],
+                    "orphans": r["orphans"],
+                }
+                for r in ns_rows
+            }
+
+            lt_rows = await conn.fetch(q.GRAPH_STATS_BY_LINK_TYPE)
+            by_link_type = {r["link_type"]: r["cnt"] for r in lt_rows}
+
+            return GraphStats(
+                total_granules=total_granules,
+                total_relations=total_relations,
+                linked_granules=linked_granules,
+                orphans=orphans,
+                avg_connections=round(avg, 2),
+                by_namespace=by_namespace,
+                by_link_type=by_link_type,
+            )
 

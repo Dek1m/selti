@@ -23,6 +23,7 @@ class DedupDecision:
     existing_id: str | None = None
     existing_score: float | None = None
     content_hash: str | None = None
+    embedding: list[float] | None = None  # кэш эмбеддинга от dedup check
 
 
 class DedupEngine:
@@ -91,4 +92,5 @@ class DedupEngine:
         return DedupDecision(
             action=DedupAction.INSERT,
             content_hash=content_hash,
+            embedding=vector,
         )

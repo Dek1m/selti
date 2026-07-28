@@ -46,3 +46,52 @@ class MemoryStatsItem(BaseModel):
     namespace: str
     count: int
     last_updated: datetime | None = None
+
+
+# ── Relation models ──
+
+class Relation(BaseModel):
+    """Связь между двумя гранулами (ребро графа)."""
+    id: str
+    source_id: str
+    target_id: str | None = None
+    target_name: str | None = None
+    link_type: str
+    description: str | None = None
+    weight: float = 1.0
+    metadata: dict = Field(default_factory=dict)
+    created_at: datetime
+
+
+class RelationCreate(BaseModel):
+    """Данные для создания связи."""
+    source_id: str
+    target_id: str | None = None
+    target_name: str | None = None
+    link_type: str
+    description: str | None = None
+    weight: float = 1.0
+    metadata: dict = Field(default_factory=dict)
+
+
+class RelationListResult(BaseModel):
+    """Результат: входящие и исходящие связи."""
+    incoming: list[Relation]
+    outgoing: list[Relation]
+
+
+class TraverseResult(BaseModel):
+    """Результат обхода графа."""
+    nodes: list[dict]  # [{id, content, namespace, ...}]
+    edges: list[Relation]
+
+
+class GraphStats(BaseModel):
+    """Статистика графа."""
+    total_granules: int
+    total_relations: int
+    linked_granules: int
+    orphans: int
+    avg_connections: float
+    by_namespace: dict[str, dict]  # {namespace: {linked, orphans}}
+    by_link_type: dict[str, int]   # {link_type: count}
