@@ -9,6 +9,7 @@ class MemoryRecord(BaseModel):
     content: str
     metadata: dict = Field(default_factory=dict)
     namespace: str = "default"
+    importance: int = 3
     created_at: datetime
     updated_at: datetime
     content_hash: str | None = None
@@ -19,6 +20,7 @@ class MemoryInput(BaseModel):
     user_id: str
     metadata: dict = Field(default_factory=dict)
     namespace: str = "default"
+    importance: int = 3
     content_hash: str | None = None
 
 
@@ -26,6 +28,7 @@ class SearchResult(BaseModel):
     id: str
     content: str
     metadata: dict = Field(default_factory=dict)
+    importance: int = 3
     score: float
 
 

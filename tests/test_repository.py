@@ -43,6 +43,7 @@ class TestInsert:
             "ns1",
             "ns1-uuid-456",
             None,
+            3,
         )
 
 
@@ -57,6 +58,7 @@ class TestGetById:
                 "content": "data",
                 "metadata": {"k": "v"},
                 "namespace": "default",
+                "importance": 3,
                 "created_at": now,
                 "updated_at": now,
                 "content_hash": None,
@@ -90,6 +92,7 @@ class TestGetById:
                 "content": "c",
                 "metadata": None,
                 "namespace": "default",
+                "importance": 3,
                 "created_at": now,
                 "updated_at": now,
                 "content_hash": None,
@@ -110,12 +113,14 @@ class TestSearch:
                     "id": "1",
                     "content": "result a",
                     "metadata": {"score": 0.95},
+                    "importance": 4,
                     "score": 0.95,
                 },
                 {
                     "id": "2",
                     "content": "result b",
                     "metadata": {},
+                    "importance": 2,
                     "score": 0.87,
                 },
             ]
@@ -175,6 +180,7 @@ class TestUpdate:
                 "content": "new content",
                 "metadata": {"k": "v"},
                 "namespace": "default",
+                "importance": 3,
                 "created_at": now,
                 "updated_at": now,
                 "content_hash": None,
@@ -196,6 +202,7 @@ class TestUpdate:
             "new content",
             [0.5, 0.6, 0.7],
             {"k": "v"},
+            None,
         )
 
     @pytest.mark.asyncio
@@ -242,6 +249,7 @@ class TestList:
                     "content": "a",
                     "metadata": {},
                     "namespace": "default",
+                    "importance": 3,
                     "created_at": now,
                     "updated_at": now,
                     "content_hash": None,

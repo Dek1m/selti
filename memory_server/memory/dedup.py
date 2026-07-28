@@ -42,6 +42,7 @@ class DedupEngine:
         content: str,
         user_id: str,
         namespace: str = "default",
+        metadata: dict | None = None,
     ) -> DedupDecision:
         content_hash = hashlib.sha256(content.encode()).hexdigest()
 
@@ -75,18 +76,29 @@ class DedupEngine:
         )
 
         if results and results[0].score >= threshold:
-            best = results[0]
-            logger.info(
-                "Semantic dedup match: namespace=%s score=%.4f id=%s",
-                namespace, best.score, best.id,
-            )
-            DEDUP_SKIPPED_TOTAL.labels(namespace=namespace, reason="semantic").inc()
-            return DedupDecision(
-                action=DedupAction.SKIP,
-                existing_id=best.id,
-                existing_score=best.score,
-                content_hash=content_hash,
-            )
+            # Проверка entity_name: если разный — не дубль
+            incoming_entity = (metadata or {}).get("entity_name", "").strip().lower()
+            existing_entity = (results[0].metadata or {}).get("entity_name", "").strip().lower()
+
+            if incoming_entity and existing_entity and incoming_entity != existing_entity:
+                logger.info(
+                    "Semantic dedup skipped (different entity_name): incoming=%s existing=%s",
+                    incoming_entity, existing_entity,
+                )
+                # Не дубль — entity_name разный, гранулы дополняют друг друга
+            else:
+                best = results[0]
+                logger.info(
+                    "Semantic dedup match: namespace=%s score=%.4f id=%s",
+                    namespace, best.score, best.id,
+                )
+                DEDUP_SKIPPED_TOTAL.labels(namespace=namespace, reason="semantic").inc()
+                return DedupDecision(
+                    action=DedupAction.SKIP,
+                    existing_id=best.id,
+                    existing_score=best.score,
+                    content_hash=content_hash,
+                )
 
         DEDUP_INSERTED_TOTAL.labels(namespace=namespace).inc()
         return DedupDecision(

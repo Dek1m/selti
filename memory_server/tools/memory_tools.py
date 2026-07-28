@@ -60,6 +60,7 @@ async def memory_store(
     user_id: str,
     metadata: str | dict | None = None,
     namespace: str | None = None,
+    importance: int | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Store a new memory record.
@@ -76,6 +77,7 @@ async def memory_store(
             user_id=user_id,
             metadata=metadata,
             namespace=namespace,
+            importance=importance,
         ))
         result = record.model_dump(mode="json")
         result["_dedup_action"] = action.value
@@ -136,9 +138,10 @@ async def memory_ingest_batch(
         to_insert = []  # entries that need insertion
         for entry in entries:
             ns = entry.get("namespace", "default")
+            entry_metadata = _coerce_metadata(entry.get("metadata"))
 
             if service.config.dedup_enabled:
-                decision = await service.dedup.check(entry["content"], user_id, ns)
+                decision = await service.dedup.check(entry["content"], user_id, ns, metadata=entry_metadata)
                 if decision.action in (DedupAction.SKIP, DedupAction.UPDATE):
                     summary[decision.action.value] += 1
                     results.append({
@@ -150,8 +153,9 @@ async def memory_ingest_batch(
 
             to_insert.append({
                 "content": entry["content"],
-                "metadata": _coerce_metadata(entry.get("metadata")) or {},
+                "metadata": entry_metadata or {},
                 "namespace": ns,
+                "importance": entry.get("importance", 3),
                 "content_hash": decision.content_hash if service.config.dedup_enabled else None,
                 "embedding": decision.embedding if service.config.dedup_enabled else None,
             })
@@ -188,6 +192,7 @@ async def memory_ingest_batch(
                 metadatas_list = [item["metadata"] for item in to_insert]
                 namespaces_list = [item["namespace"] for item in to_insert]
                 content_hashes_list = [item["content_hash"] for item in to_insert]
+                importances_list = [item["importance"] for item in to_insert]
 
                 ids = await service.repository.insert_batch(
                     user_ids=user_ids,
@@ -197,6 +202,7 @@ async def memory_ingest_batch(
                     namespaces=namespaces_list,
                     namespace_ids=namespace_ids,
                     content_hashes=content_hashes_list,
+                    importances=importances_list,
                 )
 
                 for rid, item in zip(ids, to_insert):
@@ -271,6 +277,7 @@ async def memory_update(
     id: str,
     content: str | None = None,
     metadata: str | dict | None = None,
+    importance: int | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Update an existing memory record.
@@ -285,6 +292,7 @@ async def memory_update(
             memory_id=id,
             content=content,
             metadata=metadata,
+            importance=importance,
         ))
         return record.model_dump(mode="json")
     except NotFoundError as e:

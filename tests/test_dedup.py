@@ -232,3 +232,147 @@ class TestEdgeCases:
 
         assert decision.action == DedupAction.INSERT
         assert decision.content_hash == hashlib.sha256(content.encode()).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Entity name dedup (6 tests)
+# ---------------------------------------------------------------------------
+
+class TestEntityNameDedup:
+    @pytest.mark.asyncio
+    async def test_same_entity_name_is_dedup(self, dedup_engine, mock_pool):
+        """Обе гранулы с одинаковым entity_name → SKIP (как раньше)."""
+        dedup_engine.repository.find_by_content_hash = AsyncMock(return_value=None)
+        dedup_engine.embedding.embed = AsyncMock(return_value=[0.1, 0.2, 0.3])
+        dedup_engine.repository.search = AsyncMock(
+            return_value=[
+                SearchResult(
+                    id="existing-id",
+                    content="Similar content",
+                    metadata={"entity_name": "adr-importance"},
+                    score=0.96,
+                ),
+            ]
+        )
+
+        decision = await dedup_engine.check(
+            "Similar content", "u1", "default",
+            metadata={"entity_name": "adr-importance"},
+        )
+
+        assert decision.action == DedupAction.SKIP
+
+    @pytest.mark.asyncio
+    async def test_different_entity_name_is_not_dedup(self, dedup_engine, mock_pool):
+        """Разные entity_name → INSERT (не дубль)."""
+        dedup_engine.repository.find_by_content_hash = AsyncMock(return_value=None)
+        dedup_engine.embedding.embed = AsyncMock(return_value=[0.1, 0.2, 0.3])
+        dedup_engine.repository.search = AsyncMock(
+            return_value=[
+                SearchResult(
+                    id="existing-id",
+                    content="Similar content",
+                    metadata={"entity_name": "adr-importance"},
+                    score=0.96,
+                ),
+            ]
+        )
+
+        decision = await dedup_engine.check(
+            "Similar content", "u1", "default",
+            metadata={"entity_name": "rb-01-audit"},
+        )
+
+        assert decision.action == DedupAction.INSERT
+
+    @pytest.mark.asyncio
+    async def test_one_missing_entity_name_is_dedup(self, dedup_engine, mock_pool):
+        """У одной нет entity_name → SKIP (backward compat)."""
+        dedup_engine.repository.find_by_content_hash = AsyncMock(return_value=None)
+        dedup_engine.embedding.embed = AsyncMock(return_value=[0.1, 0.2, 0.3])
+        dedup_engine.repository.search = AsyncMock(
+            return_value=[
+                SearchResult(
+                    id="existing-id",
+                    content="Similar content",
+                    metadata={},
+                    score=0.96,
+                ),
+            ]
+        )
+
+        decision = await dedup_engine.check(
+            "Similar content", "u1", "default",
+            metadata={"entity_name": "new-entity"},
+        )
+
+        assert decision.action == DedupAction.SKIP
+
+    @pytest.mark.asyncio
+    async def test_both_missing_entity_name_is_dedup(self, dedup_engine, mock_pool):
+        """У обеих нет entity_name → SKIP (как раньше)."""
+        dedup_engine.repository.find_by_content_hash = AsyncMock(return_value=None)
+        dedup_engine.embedding.embed = AsyncMock(return_value=[0.1, 0.2, 0.3])
+        dedup_engine.repository.search = AsyncMock(
+            return_value=[
+                SearchResult(
+                    id="existing-id",
+                    content="Similar content",
+                    metadata={},
+                    score=0.96,
+                ),
+            ]
+        )
+
+        decision = await dedup_engine.check(
+            "Similar content", "u1", "default",
+            metadata={},
+        )
+
+        assert decision.action == DedupAction.SKIP
+
+    @pytest.mark.asyncio
+    async def test_different_entity_name_case_insensitive(self, dedup_engine, mock_pool):
+        """Разный регистр entity_name → SKIP (нормализация работает)."""
+        dedup_engine.repository.find_by_content_hash = AsyncMock(return_value=None)
+        dedup_engine.embedding.embed = AsyncMock(return_value=[0.1, 0.2, 0.3])
+        dedup_engine.repository.search = AsyncMock(
+            return_value=[
+                SearchResult(
+                    id="existing-id",
+                    content="Similar content",
+                    metadata={"entity_name": "DedupEngine"},
+                    score=0.96,
+                ),
+            ]
+        )
+
+        decision = await dedup_engine.check(
+            "Similar content", "u1", "default",
+            metadata={"entity_name": "dedupengine"},
+        )
+
+        assert decision.action == DedupAction.SKIP
+
+    @pytest.mark.asyncio
+    async def test_different_entity_name_with_whitespace(self, dedup_engine, mock_pool):
+        """Пробелы в entity_name → SKIP (нормализация работает)."""
+        dedup_engine.repository.find_by_content_hash = AsyncMock(return_value=None)
+        dedup_engine.embedding.embed = AsyncMock(return_value=[0.1, 0.2, 0.3])
+        dedup_engine.repository.search = AsyncMock(
+            return_value=[
+                SearchResult(
+                    id="existing-id",
+                    content="Similar content",
+                    metadata={"entity_name": "  DedupEngine  "},
+                    score=0.96,
+                ),
+            ]
+        )
+
+        decision = await dedup_engine.check(
+            "Similar content", "u1", "default",
+            metadata={"entity_name": "DedupEngine"},
+        )
+
+        assert decision.action == DedupAction.SKIP

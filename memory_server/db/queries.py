@@ -1,11 +1,11 @@
 INSERT_MEMORY = """
-    INSERT INTO memories (user_id, content, embedding, metadata, namespace, namespace_id, content_hash)
-    VALUES ($1, $2, $3::vector, $4::jsonb, $5, $6::uuid, $7)
+    INSERT INTO memories (user_id, content, embedding, metadata, namespace, namespace_id, content_hash, importance)
+    VALUES ($1, $2, $3::vector, $4::jsonb, $5, $6::uuid, $7, $8)
     RETURNING id
 """
 
 INSERT_MEMORY_BATCH = """
-    INSERT INTO memories (user_id, content, embedding, metadata, namespace, namespace_id, content_hash)
+    INSERT INTO memories (user_id, content, embedding, metadata, namespace, namespace_id, content_hash, importance)
     SELECT
         unnest($1::text[]),
         unnest($2::text[]),
@@ -13,18 +13,19 @@ INSERT_MEMORY_BATCH = """
         unnest($4::jsonb[]),
         unnest($5::text[]),
         unnest($6::uuid[]),
-        unnest($7::text[])
+        unnest($7::text[]),
+        unnest($8::int[])
     RETURNING id
 """
 
 SELECT_MEMORY_BY_ID = """
-    SELECT id, user_id, content, metadata, namespace, created_at, updated_at, content_hash
+    SELECT id, user_id, content, metadata, namespace, importance, created_at, updated_at, content_hash
     FROM memories
     WHERE id = $1
 """
 
 SELECT_MEMORY_BY_CONTENT_HASH = """
-    SELECT id, user_id, content, metadata, namespace, created_at, updated_at, content_hash
+    SELECT id, user_id, content, metadata, namespace, importance, created_at, updated_at, content_hash
     FROM memories
     WHERE namespace = $1 AND content_hash = $2
 """
@@ -35,7 +36,7 @@ SELECT_MEMORY_BY_CONTENT_HASH = """
 # (используется как финальный фильтр).
 # ef_search выставляется на пуле соединений (см. pool.py).
 SEARCH_MEMORIES = """
-    SELECT id, content, metadata,
+    SELECT id, content, metadata, importance,
            1 - (embedding <=> $1::vector) AS score
     FROM memories
     WHERE ($2::text IS NULL OR user_id = $2)
@@ -51,9 +52,10 @@ UPDATE_MEMORY = """
     SET content = COALESCE($2, content),
         embedding = COALESCE($3::vector, embedding),
         metadata = COALESCE($4::jsonb, metadata),
+        importance = COALESCE($5, importance),
         updated_at = now()
     WHERE id = $1
-    RETURNING id, user_id, content, metadata, namespace, created_at, updated_at, content_hash
+    RETURNING id, user_id, content, metadata, namespace, importance, created_at, updated_at, content_hash
 """
 
 DELETE_MEMORY = """
@@ -62,7 +64,7 @@ DELETE_MEMORY = """
 """
 
 LIST_MEMORIES = """
-    SELECT id, user_id, content, metadata, namespace, created_at, updated_at, content_hash
+    SELECT id, user_id, content, metadata, namespace, importance, created_at, updated_at, content_hash
     FROM memories
     WHERE ($1::text IS NULL OR user_id = $1)
       AND ($2::text IS NULL OR namespace = $2)
@@ -84,7 +86,7 @@ FORGET_MEMORIES = """
 """
 
 RECENT_MEMORIES = """
-    SELECT id, user_id, content, metadata, namespace, created_at, updated_at, content_hash
+    SELECT id, user_id, content, metadata, namespace, importance, created_at, updated_at, content_hash
     FROM memories
     WHERE ($1::text IS NULL OR namespace = $1)
       AND ($2::timestamptz IS NULL OR created_at >= $2)

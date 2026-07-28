@@ -56,6 +56,7 @@ class TestStore:
             namespace="ns1",
             namespace_id="00000000-0000-0000-0000-bfed25f845e5",
             content_hash=None,
+            importance=3,
         )
         service.repository.get_by_id.assert_awaited_once_with("new-id")
         assert result == expected_record
@@ -86,6 +87,7 @@ class TestStore:
             namespace="default",
             namespace_id="00000000-0000-0000-0000-000000000001",
             content_hash=None,
+            importance=3,
         )
 
     @pytest.mark.asyncio
@@ -174,6 +176,7 @@ class TestUpdate:
             content="updated",
             embedding=[0.9, 0.8, 0.7],
             metadata={"k": "v"},
+            importance=None,
         )
         assert result == record
 
@@ -197,6 +200,7 @@ class TestUpdate:
             content=None,
             embedding=None,
             metadata={"k": "v"},
+            importance=None,
         )
         assert result == record
 

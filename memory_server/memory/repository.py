@@ -32,6 +32,7 @@ class MemoryRepository:
         namespace: str,
         namespace_id: str,
         content_hash: str | None = None,
+        importance: int = 3,
     ) -> str:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -43,6 +44,7 @@ class MemoryRepository:
                 namespace,
                 namespace_id,
                 content_hash,
+                importance,
             )
             return row["id"]
 
@@ -55,8 +57,11 @@ class MemoryRepository:
         namespaces: list[str],
         namespace_ids: list[str],
         content_hashes: list[str | None],
+        importances: list[int] | None = None,
     ) -> list[str]:
         """Batch insert multiple memories in one SQL round-trip."""
+        if importances is None:
+            importances = [3] * len(user_ids)
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 q.INSERT_MEMORY_BATCH,
@@ -67,6 +72,7 @@ class MemoryRepository:
                 namespaces,
                 namespace_ids,
                 content_hashes,
+                importances,
             )
             return [str(row["id"]) for row in rows]
 
@@ -81,6 +87,7 @@ class MemoryRepository:
                 content=row["content"],
                 metadata=row["metadata"] or {},
                 namespace=row["namespace"],
+                importance=row["importance"],
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
                 content_hash=row["content_hash"],
@@ -105,6 +112,7 @@ class MemoryRepository:
                 content=row["content"],
                 metadata=row["metadata"] or {},
                 namespace=row["namespace"],
+                importance=row["importance"],
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
                 content_hash=row["content_hash"],
@@ -132,6 +140,7 @@ class MemoryRepository:
                     id=str(row["id"]),
                     content=row["content"],
                     metadata=row["metadata"] or {},
+                    importance=row["importance"],
                     score=float(row["score"]),
                 )
                 for row in rows
@@ -143,6 +152,7 @@ class MemoryRepository:
         content: str | None = None,
         embedding: list[float] | None = None,
         metadata: dict | None = None,
+        importance: int | None = None,
     ) -> MemoryRecord | None:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -151,6 +161,7 @@ class MemoryRepository:
                 content,
                 embedding,
                 metadata,
+                importance,
             )
             if row is None:
                 return None
@@ -160,6 +171,7 @@ class MemoryRepository:
                 content=row["content"],
                 metadata=row["metadata"] or {},
                 namespace=row["namespace"],
+                importance=row["importance"],
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
                 content_hash=row["content_hash"],
@@ -187,6 +199,7 @@ class MemoryRepository:
                     content=row["content"],
                     metadata=row["metadata"] or {},
                     namespace=row["namespace"],
+                    importance=row["importance"],
                     created_at=row["created_at"],
                     updated_at=row["updated_at"],
                     content_hash=row["content_hash"],
@@ -211,6 +224,7 @@ class MemoryRepository:
                     content=row["content"],
                     metadata=row["metadata"] or {},
                     namespace=row["namespace"],
+                    importance=row["importance"],
                     created_at=row["created_at"],
                     updated_at=row["updated_at"],
                     content_hash=row["content_hash"],

@@ -44,6 +44,7 @@ class MemoryService:
         user_id: str,
         metadata: dict | None = None,
         namespace: str | None = None,
+        importance: int | None = None,
     ) -> tuple[MemoryRecord, DedupAction]:
         namespace = namespace or "default"
         ns_record = await self.ns_repo.get_or_create(namespace)
@@ -51,7 +52,7 @@ class MemoryService:
         embedding: list[float] | None = None
 
         if self.config.dedup_enabled:
-            decision = await self.dedup.check(content, user_id, namespace)
+            decision = await self.dedup.check(content, user_id, namespace, metadata=metadata)
             content_hash = decision.content_hash
             embedding = decision.embedding  # кэш эмбеддинга от dedup
 
@@ -84,6 +85,7 @@ class MemoryService:
             namespace=namespace,
             namespace_id=ns_record.id,
             content_hash=content_hash,
+            importance=importance or 3,
         )
         record = await self.repository.get_by_id(memory_id)
         if record is None:
@@ -118,6 +120,7 @@ class MemoryService:
         memory_id: str,
         content: str | None = None,
         metadata: dict | None = None,
+        importance: int | None = None,
     ) -> MemoryRecord:
         embedding = None
         if content is not None:
@@ -127,6 +130,7 @@ class MemoryService:
             content=content,
             embedding=embedding,
             metadata=metadata,
+            importance=importance,
         )
         if record is None:
             raise NotFoundError(memory_id)
