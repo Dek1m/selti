@@ -221,6 +221,7 @@ class TestBatchInsert:
             embeddings=[[0.1, 0.2], [0.3, 0.4]],
             metadatas=[{"k": "v"}, {}],
             namespaces=["ns1", "ns2"],
+            namespace_ids=["ns1-uuid", "ns2-uuid"],
             content_hashes=[None, None],
         )
 

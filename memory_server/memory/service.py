@@ -7,6 +7,7 @@ from memory_server.config import Settings
 from memory_server.embedding.provider import EmbeddingProvider
 from memory_server.exceptions import NotFoundError
 from memory_server.memory.dedup import DedupAction, DedupEngine
+from memory_server.memory.namespace_repository import NamespaceRepository
 from memory_server.memory.repository import MemoryRepository
 from memory_server.models import (
     GraphStats,
@@ -28,10 +29,12 @@ class MemoryService:
         self,
         repository: MemoryRepository,
         embedding_provider: EmbeddingProvider,
+        namespace_repository: NamespaceRepository,
         config: Settings | None = None,
     ):
         self.repository = repository
         self.embedding = embedding_provider
+        self.ns_repo = namespace_repository
         self.config = config or Settings()
         self.dedup = DedupEngine(repository, embedding_provider, self.config)
 
@@ -43,6 +46,7 @@ class MemoryService:
         namespace: str | None = None,
     ) -> tuple[MemoryRecord, DedupAction]:
         namespace = namespace or "default"
+        ns_record = await self.ns_repo.get_or_create(namespace)
         content_hash: str | None = None
         embedding: list[float] | None = None
 
@@ -78,6 +82,7 @@ class MemoryService:
             embedding=embedding,
             metadata=metadata or {},
             namespace=namespace,
+            namespace_id=ns_record.id,
             content_hash=content_hash,
         )
         record = await self.repository.get_by_id(memory_id)

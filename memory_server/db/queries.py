@@ -1,18 +1,19 @@
 INSERT_MEMORY = """
-    INSERT INTO memories (user_id, content, embedding, metadata, namespace, content_hash)
-    VALUES ($1, $2, $3::vector, $4::jsonb, $5, $6)
+    INSERT INTO memories (user_id, content, embedding, metadata, namespace, namespace_id, content_hash)
+    VALUES ($1, $2, $3::vector, $4::jsonb, $5, $6::uuid, $7)
     RETURNING id
 """
 
 INSERT_MEMORY_BATCH = """
-    INSERT INTO memories (user_id, content, embedding, metadata, namespace, content_hash)
+    INSERT INTO memories (user_id, content, embedding, metadata, namespace, namespace_id, content_hash)
     SELECT
         unnest($1::text[]),
         unnest($2::text[]),
         unnest($3::vector[])::vector,
         unnest($4::jsonb[]),
         unnest($5::text[]),
-        unnest($6::text[])
+        unnest($6::uuid[]),
+        unnest($7::text[])
     RETURNING id
 """
 

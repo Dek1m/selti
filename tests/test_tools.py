@@ -3,11 +3,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from memory_server.config import Namespace
 from memory_server.memory.dedup import DedupAction
 from memory_server.models import MemoryRecord, MemoryStatsItem, SearchResult
 from memory_server.tools.memory_tools import (
-    _validate_namespace,
     memory_find_similar,
     memory_ingest_batch,
     memory_stats,
@@ -51,30 +49,6 @@ def mock_ctx(mock_service):
     ctx.request_context = MagicMock()
     ctx.request_context.lifespan_context = {"service": mock_service}
     return ctx
-
-
-# ---------------------------------------------------------------------------
-# Namespace validation
-# ---------------------------------------------------------------------------
-
-
-class TestNamespaceValidation:
-    def test_valid_namespace(self):
-        """Валидный namespace проходит без ошибок."""
-        _validate_namespace("default")
-        _validate_namespace("user_facts")
-        _validate_namespace("code_knowledge")
-        _validate_namespace("dialogue_insights")
-        _validate_namespace("project_meta")
-
-    def test_invalid_namespace_raises(self):
-        """Невалидный namespace выбрасывает ValueError."""
-        with pytest.raises(ValueError, match="Invalid namespace"):
-            _validate_namespace("i_do_not_exist")
-
-    def test_none_namespace_passes(self):
-        """None (дефолт) проходит без ошибок."""
-        _validate_namespace(None)
 
 
 # ---------------------------------------------------------------------------
@@ -141,16 +115,6 @@ class TestMemoryIngestBatch:
 
         assert result["summary"] == {"insert": 1, "skip": 1, "update": 0}
         assert len(result["results"]) == 2
-
-    @pytest.mark.asyncio
-    async def test_batch_invalid_namespace_raises(self, mock_ctx):
-        """С невалидным namespace → ошибка ValueError."""
-        with pytest.raises(ValueError, match="Invalid namespace"):
-            await memory_ingest_batch(
-                entries=[{"content": "test", "namespace": "bad_ns"}],
-                user_id="u1",
-                ctx=mock_ctx,
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -228,14 +192,3 @@ class TestMemoryFindSimilar:
             threshold=0.7,
             namespace=None,
         )
-
-    @pytest.mark.asyncio
-    async def test_find_similar_invalid_namespace(self, mock_ctx):
-        """С невалидным namespace → ошибка ValueError."""
-        with pytest.raises(ValueError, match="Invalid namespace"):
-            await memory_find_similar(
-                content="test",
-                user_id="u1",
-                namespace="bad_ns",
-                ctx=mock_ctx,
-            )

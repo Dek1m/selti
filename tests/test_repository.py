@@ -30,6 +30,7 @@ class TestInsert:
             embedding=[0.1, 0.2, 0.3],
             metadata={"source": "test"},
             namespace="ns1",
+            namespace_id="ns1-uuid-456",
         )
 
         assert result == "new-uuid-123"
@@ -40,6 +41,7 @@ class TestInsert:
             [0.1, 0.2, 0.3],
             {"source": "test"},
             "ns1",
+            "ns1-uuid-456",
             None,
         )
 

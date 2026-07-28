@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from memory_server.config import Settings
+from memory_server.memory.namespace_repository import NamespaceRepository
 from memory_server.memory.repository import MemoryRepository
 from memory_server.memory.service import MemoryService
 
@@ -48,11 +49,48 @@ def mock_embedding_provider():
 
 
 @pytest.fixture
-def mock_service(mock_repository, mock_embedding_provider):
+def mock_namespace_repository(mock_pool):
+    """Fixture that returns a NamespaceRepository backed by a mock pool."""
+    from unittest.mock import AsyncMock
+    from memory_server.memory.namespace_repository import NamespaceRecord
+
+    repo = NamespaceRepository(pool=mock_pool)
+    # Pre-populate cache with default namespace for tests
+    default_ns = NamespaceRecord(
+        id="00000000-0000-0000-0000-000000000001",
+        uid="default",
+        name="Default",
+        description="",
+    )
+    repo._cache["default"] = default_ns
+    # Also mock get_or_create to return the default namespace for any uid
+    async def mock_get_or_create(uid: str, name: str | None = None):
+        if uid in repo._cache:
+            return repo._cache[uid]
+        # Auto-register with a deterministic ID
+        import hashlib
+        uid_hash = hashlib.md5(uid.encode()).hexdigest()[:12]
+        ns_id = f"00000000-0000-0000-0000-{uid_hash}"
+        rec = NamespaceRecord(
+            id=ns_id,
+            uid=uid,
+            name=name or uid.replace("_", " ").title(),
+            description="",
+        )
+        repo._cache[uid] = rec
+        return rec
+
+    repo.get_or_create = mock_get_or_create
+    return repo
+
+
+@pytest.fixture
+def mock_service(mock_repository, mock_embedding_provider, mock_namespace_repository):
     """Fixture that returns a MemoryService with mocked deps."""
     service = MemoryService(
         repository=mock_repository,
         embedding_provider=mock_embedding_provider,
+        namespace_repository=mock_namespace_repository,
         config=Settings(dedup_enabled=False),
     )
     return service

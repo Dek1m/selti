@@ -30,6 +30,7 @@ class MemoryRepository:
         embedding: list[float],
         metadata: dict,
         namespace: str,
+        namespace_id: str,
         content_hash: str | None = None,
     ) -> str:
         async with self.pool.acquire() as conn:
@@ -40,6 +41,7 @@ class MemoryRepository:
                 embedding,
                 metadata,
                 namespace,
+                namespace_id,
                 content_hash,
             )
             return row["id"]
@@ -51,6 +53,7 @@ class MemoryRepository:
         embeddings: list[list[float]],
         metadatas: list[dict],
         namespaces: list[str],
+        namespace_ids: list[str],
         content_hashes: list[str | None],
     ) -> list[str]:
         """Batch insert multiple memories in one SQL round-trip."""
@@ -62,6 +65,7 @@ class MemoryRepository:
                 embeddings,
                 metadatas,
                 namespaces,
+                namespace_ids,
                 content_hashes,
             )
             return [str(row["id"]) for row in rows]

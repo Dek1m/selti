@@ -10,6 +10,7 @@ from memory_server.cache.redis_client import EmbeddingCache
 from memory_server.config import settings
 from memory_server.db.pool import close_pool, create_pool
 from memory_server.embedding.client import EmbeddingClient
+from memory_server.memory.namespace_repository import NamespaceRepository
 from memory_server.memory.repository import MemoryRepository
 from memory_server.memory.service import MemoryService
 from memory_server.metrics import DB_POOL_SIZE, DB_POOL_AVAILABLE
@@ -89,9 +90,11 @@ async def lifespan(server: FastMCP):
     )
 
     repository = MemoryRepository(pool=pool)
+    ns_repo = NamespaceRepository(pool=pool)
     service = MemoryService(
         repository=repository,
         embedding_provider=embedding_client,
+        namespace_repository=ns_repo,
         config=settings,
     )
 
@@ -101,7 +104,7 @@ async def lifespan(server: FastMCP):
     )
 
     try:
-        yield {"service": service, "cache": embedding_cache}
+        yield {"service": service, "cache": embedding_cache, "ns_repo": ns_repo}
     finally:
         metrics_task.cancel()
         await metrics_task

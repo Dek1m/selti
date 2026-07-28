@@ -7,7 +7,6 @@ from typing import Any
 
 from fastmcp import Context
 
-from memory_server.config import Namespace
 from memory_server.exceptions import NotFoundError
 from memory_server.memory.dedup import DedupAction
 from memory_server.metrics import MCP_TOOL_CALLS_TOTAL, MCP_TOOL_DURATION_SECONDS
@@ -53,12 +52,6 @@ async def _track_tool(tool_name: str, coro):
         MCP_TOOL_DURATION_SECONDS.labels(tool=tool_name).observe(duration)
 
 
-def _validate_namespace(namespace: str | None) -> None:
-    if namespace is not None and namespace not in [ns.value for ns in Namespace]:
-        raise ValueError(
-            f"Invalid namespace: {namespace}. Allowed: {[ns.value for ns in Namespace]}"
-        )
-
 
 @mcp.tool()
 async def memory_store(
@@ -73,7 +66,6 @@ async def memory_store(
     Generates an embedding for the content and persists it to the database.
     Deduplication is applied automatically — returns existing record if a match is found.
     """
-    _validate_namespace(namespace)
     assert ctx is not None
     metadata = _coerce_metadata(metadata)
     service = ctx.request_context.lifespan_context["service"]
@@ -105,7 +97,6 @@ async def memory_search(
 
     Returns memories matching the query, ordered by relevance score.
     """
-    _validate_namespace(namespace)
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
     try:
@@ -143,7 +134,6 @@ async def memory_ingest_batch(
         # Phase 1: Dedup check for each entry
         to_insert = []  # entries that need insertion
         for entry in entries:
-            _validate_namespace(entry.get("namespace"))
             ns = entry.get("namespace", "default")
 
             if service.config.dedup_enabled:
@@ -183,7 +173,13 @@ async def memory_ingest_batch(
                 for idx, emb in zip(indices_to_embed, embeddings):
                     to_insert[idx]["embedding"] = emb
 
-            # Phase 3: Batch SQL insert
+            # Phase 3: Resolve namespace_ids
+            namespace_ids = []
+            for item in to_insert:
+                ns_record = await service.ns_repo.get_or_create(item["namespace"])
+                namespace_ids.append(ns_record.id)
+
+            # Phase 4: Batch SQL insert
             if to_insert:
                 user_ids = [user_id] * len(to_insert)
                 contents = [item["content"] for item in to_insert]
@@ -198,6 +194,7 @@ async def memory_ingest_batch(
                     embeddings=embeddings_list,
                     metadatas=metadatas_list,
                     namespaces=namespaces_list,
+                    namespace_ids=namespace_ids,
                     content_hashes=content_hashes_list,
                 )
 
@@ -237,7 +234,6 @@ async def memory_find_similar(
     ctx: Context | None = None,
 ) -> list[dict]:
     """Find semantically similar memories without storing."""
-    _validate_namespace(namespace)
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
 
@@ -356,7 +352,6 @@ async def memory_recent(
     Pass 'since' as an ISO datetime string (e.g. '2026-07-25' or '2026-07-25T10:00:00')
     to filter records created after a specific point in time.
     """
-    _validate_namespace(namespace)
     assert ctx is not None
     if since is not None:
         since = datetime.fromisoformat(since)

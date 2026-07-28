@@ -6,15 +6,17 @@ import pytest
 from memory_server.config import Settings
 from memory_server.exceptions import NotFoundError
 from memory_server.memory.dedup import DedupAction
+from memory_server.memory.namespace_repository import NamespaceRepository
 from memory_server.memory.service import MemoryService
 from memory_server.models import MemoryListResult, MemoryRecord, SearchResult
 
 
 @pytest.fixture
-def service(mock_repository, mock_embedding_provider):
+def service(mock_repository, mock_embedding_provider, mock_namespace_repository):
     return MemoryService(
         repository=mock_repository,
         embedding_provider=mock_embedding_provider,
+        namespace_repository=mock_namespace_repository,
         config=Settings(dedup_enabled=False),
     )
 
@@ -52,6 +54,7 @@ class TestStore:
             embedding=[0.1, 0.2, 0.3],
             metadata={"source": "test"},
             namespace="ns1",
+            namespace_id="00000000-0000-0000-0000-bfed25f845e5",
             content_hash=None,
         )
         service.repository.get_by_id.assert_awaited_once_with("new-id")
@@ -81,6 +84,7 @@ class TestStore:
             embedding=[0.0, 0.0, 0.0],
             metadata={},
             namespace="default",
+            namespace_id="00000000-0000-0000-0000-000000000001",
             content_hash=None,
         )
 
