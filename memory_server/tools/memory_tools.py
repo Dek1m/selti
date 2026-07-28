@@ -7,6 +7,7 @@ from typing import Any
 
 from fastmcp import Context
 
+from memory_server.config import settings
 from memory_server.exceptions import NotFoundError
 from memory_server.memory.dedup import DedupAction
 from memory_server.metrics import MCP_TOOL_CALLS_TOTAL, MCP_TOOL_DURATION_SECONDS
