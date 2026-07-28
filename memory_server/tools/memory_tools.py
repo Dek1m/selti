@@ -555,3 +555,25 @@ async def memory_version(
         "server": settings.mcp_server_name,
         "model": settings.embedding_model,
     }
+
+
+@mcp.tool()
+async def memory_namespaces(
+    ctx: Context | None = None,
+) -> list[dict[str, Any]]:
+    """Получить список всех namespace из реестра.
+
+    Возвращает uid, name и description каждого namespace.
+    Используй для динамического определения допустимых namespace.
+    """
+    assert ctx is not None
+    service = ctx.request_context.lifespan_context["service"]
+    try:
+        namespaces = await _track_tool("memory_namespaces", service.ns_repo.list_all())
+        return [
+            {"uid": ns.uid, "name": ns.name, "description": ns.description}
+            for ns in namespaces
+        ]
+    except Exception as e:
+        logger.exception("Failed to list namespaces")
+        raise RuntimeError(str(e)) from e
