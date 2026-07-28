@@ -154,7 +154,7 @@ GRAPH_STATS = """
     linked_ids AS (
         SELECT source_id AS id FROM linked_sources
         UNION
-        SELECT id FROM linked_targets
+        SELECT target_id AS id FROM linked_targets
     ),
     orphan_count AS (
         SELECT count(*) AS cnt
