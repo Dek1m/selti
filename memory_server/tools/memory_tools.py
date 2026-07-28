@@ -538,3 +538,19 @@ async def memory_graph_stats(
     except Exception as e:
         logger.exception("Failed to get graph stats")
         raise RuntimeError(str(e)) from e
+
+
+@mcp.tool()
+async def memory_version(
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Версия athena-memory сервера."""
+    from pathlib import Path
+
+    version_file = Path(__file__).parent.parent.parent / "VERSION"
+    version = version_file.read_text().strip() if version_file.exists() else "unknown"
+    return {
+        "version": version,
+        "server": settings.mcp_server_name,
+        "model": settings.embedding_model,
+    }
