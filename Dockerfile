@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir --user -r requirements.txt
 # ============================================================
 # Stage 2: runtime — минимальный образ
 # ============================================================
-FROM python:3.12-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 WORKDIR /app
 
