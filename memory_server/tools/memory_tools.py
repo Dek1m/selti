@@ -71,6 +71,8 @@ async def memory_store(
     assert ctx is not None
     metadata = _coerce_metadata(metadata)
     service = ctx.request_context.lifespan_context["service"]
+    logger.info("memory_store: content_len=%d namespace=%s user_id=%s importance=%s",
+                len(content), namespace, user_id, importance)
     try:
         record, action = await _track_tool("memory_store", service.store(
             content=content,
@@ -81,6 +83,8 @@ async def memory_store(
         ))
         result = record.model_dump(mode="json")
         result["_dedup_action"] = action.value
+        logger.info("memory_store: done id=%s dedup_action=%s namespace=%s",
+                    record.id, action.value, record.namespace)
         return result
     except Exception as e:
         logger.exception("Failed to store memory")
@@ -102,6 +106,8 @@ async def memory_search(
     """
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
+    logger.info("memory_search: query=%s namespace=%s limit=%d threshold=%.2f user_id=%s",
+                query[:200], namespace, limit, threshold, user_id)
     try:
         results = await _track_tool("memory_search", service.search(
             query=query,
@@ -110,6 +116,7 @@ async def memory_search(
             threshold=threshold,
             namespace=namespace,
         ))
+        logger.info("memory_search: done count=%d", len(results))
         return [r.model_dump(mode="json") for r in results]
     except Exception as e:
         logger.exception("Failed to search memories")
@@ -134,6 +141,17 @@ async def memory_ingest_batch(
         summary: dict[str, int] = {"insert": 0, "skip": 0, "update": 0}
         results = []
 
+        logger.info("memory_ingest_batch: received %d entries, user_id=%s",
+                     len(entries), user_id)
+        for i, entry in enumerate(entries):
+            title_preview = (entry.get("metadata") or {}).get("title", "N/A")[:60]
+            logger.info("  entry[%d]: namespace=%s, importance=%s, title=%s, content_len=%d",
+                         i,
+                         entry.get("namespace", "default"),
+                         entry.get("importance", 3),
+                         title_preview,
+                         len(entry.get("content", "")))
+
         # Phase 1: Dedup check for each entry
         to_insert = []  # entries that need insertion
         for entry in entries:
@@ -142,6 +160,8 @@ async def memory_ingest_batch(
 
             if service.config.dedup_enabled:
                 decision = await service.dedup.check(entry["content"], user_id, ns, metadata=entry_metadata)
+                logger.info("  dedup: namespace=%s action=%s existing_id=%s score=%s",
+                             ns, decision.action.value, decision.existing_id, decision.existing_score)
                 if decision.action in (DedupAction.SKIP, DedupAction.UPDATE):
                     summary[decision.action.value] += 1
                     results.append({
@@ -160,6 +180,9 @@ async def memory_ingest_batch(
                 "embedding": decision.embedding if service.config.dedup_enabled else None,
             })
 
+        logger.info("  phase1 complete: %d to_insert, %d skipped, %d updated",
+                     len(to_insert), summary["skip"], summary["update"])
+
         # Phase 2: Batch embed (if any entries to insert)
         if to_insert:
             from memory_server.exceptions import EmbeddingError
@@ -169,20 +192,33 @@ async def memory_ingest_batch(
             indices_to_embed = []
             for i, item in enumerate(to_insert):
                 if item["embedding"] is not None:
-                    continue  # already cached from dedup
+                    logger.info("  embed[%d]: cached from dedup (len=%d)", i, len(item["embedding"]))
+                    continue
                 texts_to_embed.append(item["content"])
                 indices_to_embed.append(i)
 
+            logger.info("  phase2: %d texts to embed, %d cached", len(texts_to_embed), len(to_insert) - len(texts_to_embed))
+
             if texts_to_embed:
-                embeddings = await service.embedding.embed_many(texts_to_embed)
-                for idx, emb in zip(indices_to_embed, embeddings):
-                    to_insert[idx]["embedding"] = emb
+                try:
+                    embeddings = await service.embedding.embed_many(texts_to_embed)
+                    logger.info("  embed_many: got %d embeddings, dim=%d", len(embeddings), len(embeddings[0]) if embeddings else 0)
+                    for idx, emb in zip(indices_to_embed, embeddings):
+                        to_insert[idx]["embedding"] = emb
+                except Exception as e:
+                    logger.exception("Embedding failed for %d texts", len(texts_to_embed))
+                    raise
 
             # Phase 3: Resolve namespace_ids
             namespace_ids = []
             for item in to_insert:
-                ns_record = await service.ns_repo.get_or_create(item["namespace"])
-                namespace_ids.append(ns_record.id)
+                try:
+                    ns_record = await service.ns_repo.get_or_create(item["namespace"])
+                    namespace_ids.append(ns_record.id)
+                    logger.info("  ns_resolve: namespace=%s -> id=%s", item["namespace"], ns_record.id)
+                except Exception as e:
+                    logger.exception("Failed to resolve namespace: %s", item["namespace"])
+                    raise
 
             # Phase 4: Batch SQL insert
             if to_insert:
@@ -194,16 +230,29 @@ async def memory_ingest_batch(
                 content_hashes_list = [item["content_hash"] for item in to_insert]
                 importances_list = [item["importance"] for item in to_insert]
 
-                ids = await service.repository.insert_batch(
-                    user_ids=user_ids,
-                    contents=contents,
-                    embeddings=embeddings_list,
-                    metadatas=metadatas_list,
-                    namespaces=namespaces_list,
-                    namespace_ids=namespace_ids,
-                    content_hashes=content_hashes_list,
-                    importances=importances_list,
-                )
+                logger.info("  phase4: insert_batch %d entries, user_id=%s", len(to_insert), user_id)
+                logger.info("    embeddings_list type=%s len=%d", type(embeddings_list).__name__, len(embeddings_list))
+                if embeddings_list:
+                    logger.info("    embeddings_list[0] type=%s len=%d first_3=%s",
+                                 type(embeddings_list[0]).__name__,
+                                 len(embeddings_list[0]) if hasattr(embeddings_list[0], '__len__') else '?',
+                                 str(embeddings_list[0][:3]) if hasattr(embeddings_list[0], '__getitem__') else '?')
+
+                try:
+                    ids = await service.repository.insert_batch(
+                        user_ids=user_ids,
+                        contents=contents,
+                        embeddings=embeddings_list,
+                        metadatas=metadatas_list,
+                        namespaces=namespaces_list,
+                        namespace_ids=namespace_ids,
+                        content_hashes=content_hashes_list,
+                        importances=importances_list,
+                    )
+                    logger.info("  insert_batch success: %d ids returned", len(ids))
+                except Exception as e:
+                    logger.exception("insert_batch FAILED: %s", str(e)[:500])
+                    raise
 
                 for rid, item in zip(ids, to_insert):
                     summary["insert"] += 1
@@ -213,6 +262,7 @@ async def memory_ingest_batch(
                         "namespace": item["namespace"],
                     })
 
+        logger.info("memory_ingest_batch: complete summary=%s", summary)
         return {"results": results, "summary": summary}
 
     return await _track_tool("memory_ingest_batch", _run())
@@ -226,8 +276,9 @@ async def memory_stats(
     """Get memory statistics for a user — per-namespace counts and last updated."""
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
-
+    logger.info("memory_stats: user_id=%s", user_id)
     result = await _track_tool("memory_stats", service.get_stats(user_id))
+    logger.info("memory_stats: done namespaces=%d", len(result))
     return [item.model_dump(mode="json") for item in result]
 
 
@@ -243,7 +294,8 @@ async def memory_find_similar(
     """Find semantically similar memories without storing."""
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
-
+    logger.info("memory_find_similar: content_len=%d namespace=%s limit=%d threshold=%.2f user_id=%s",
+                len(content), namespace, limit, threshold, user_id)
     results = await _track_tool("memory_find_similar", service.search(
         query=content,
         user_id=user_id,
@@ -251,6 +303,7 @@ async def memory_find_similar(
         threshold=threshold,
         namespace=namespace,
     ))
+    logger.info("memory_find_similar: done count=%d", len(results))
     return [r.model_dump(mode="json") for r in results]
 
 
@@ -262,10 +315,13 @@ async def memory_get(
     """Retrieve a single memory record by its ID."""
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
+    logger.info("memory_get: id=%s", id)
     try:
         record = await _track_tool("memory_get", service.get(memory_id=id))
+        logger.info("memory_get: done found=true id=%s namespace=%s", record.id, record.namespace)
         return record.model_dump(mode="json")
     except NotFoundError as e:
+        logger.info("memory_get: done found=false id=%s", id)
         raise ValueError(str(e)) from e
     except Exception as e:
         logger.exception("Failed to get memory")
@@ -287,6 +343,8 @@ async def memory_update(
     assert ctx is not None
     metadata = _coerce_metadata(metadata)
     service = ctx.request_context.lifespan_context["service"]
+    logger.info("memory_update: id=%s has_content=%s has_metadata=%s importance=%s",
+                id, content is not None, metadata is not None, importance)
     try:
         record = await _track_tool("memory_update", service.update(
             memory_id=id,
@@ -294,8 +352,10 @@ async def memory_update(
             metadata=metadata,
             importance=importance,
         ))
+        logger.info("memory_update: done id=%s namespace=%s", record.id, record.namespace)
         return record.model_dump(mode="json")
     except NotFoundError as e:
+        logger.info("memory_update: not found id=%s", id)
         raise ValueError(str(e)) from e
     except Exception as e:
         logger.exception("Failed to update memory")
@@ -310,10 +370,13 @@ async def memory_delete(
     """Delete a memory record by its ID."""
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
+    logger.info("memory_delete: id=%s", id)
     try:
         success = await _track_tool("memory_delete", service.delete(memory_id=id))
+        logger.info("memory_delete: done id=%s success=%s", id, success)
         return {"success": success}
     except NotFoundError as e:
+        logger.info("memory_delete: not found id=%s", id)
         raise ValueError(str(e)) from e
     except Exception as e:
         logger.exception("Failed to delete memory")
@@ -331,6 +394,8 @@ async def memory_list(
     """List memory records with optional filtering and pagination."""
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
+    logger.info("memory_list: namespace=%s limit=%d offset=%d user_id=%s",
+                namespace, limit, offset, user_id)
     try:
         result = await _track_tool("memory_list", service.list(
             user_id=user_id,
@@ -338,6 +403,7 @@ async def memory_list(
             limit=limit,
             offset=offset,
         ))
+        logger.info("memory_list: done total=%d items=%d", result.total, len(result.items))
         return {
             "items": [r.model_dump(mode="json") for r in result.items],
             "total": result.total,
@@ -365,12 +431,14 @@ async def memory_recent(
     if since is not None:
         since = datetime.fromisoformat(since)
     service = ctx.request_context.lifespan_context["service"]
+    logger.info("memory_recent: namespace=%s limit=%d since=%s", namespace, limit, since)
     try:
         results = await _track_tool("memory_recent", service.recent(
             namespace=namespace,
             since=since,
             limit=limit,
         ))
+        logger.info("memory_recent: done count=%d", len(results))
         return [r.model_dump(mode="json") for r in results]
     except Exception as e:
         logger.exception("Failed to get recent memories")
@@ -386,8 +454,10 @@ async def memory_forget(
     """Delete all memories for a user, optionally filtered by namespace."""
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
+    logger.info("memory_forget: user_id=%s namespace=%s", user_id, namespace)
     try:
         deleted = await _track_tool("memory_forget", service.forget(user_id=user_id, namespace=namespace))
+        logger.info("memory_forget: done deleted_count=%d", deleted)
         return {"deleted_count": deleted}
     except Exception as e:
         logger.exception("Failed to forget memories")
@@ -406,10 +476,13 @@ async def memory_archive(
     """
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
+    logger.info("memory_archive: id=%s", id)
     try:
         success = await _track_tool("memory_archive", service.archive(memory_id=id))
+        logger.info("memory_archive: done id=%s success=%s", id, success)
         return {"success": success}
     except NotFoundError as e:
+        logger.info("memory_archive: not found id=%s", id)
         raise ValueError(str(e)) from e
     except Exception as e:
         logger.exception("Failed to archive memory")
@@ -437,6 +510,8 @@ async def memory_link(
     """
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
+    logger.info("memory_link: source=%s target=%s type=%s weight=%.2f",
+                source_id, target_id, link_type, weight)
     try:
         rel_id = await _track_tool("memory_link", service.add_relation(
             source_id=source_id,
@@ -445,8 +520,10 @@ async def memory_link(
             description=description,
             weight=weight,
         ))
+        logger.info("memory_link: done relation_id=%s", rel_id)
         return {"ok": True, "relation_id": rel_id}
     except NotFoundError as e:
+        logger.info("memory_link: not found granule: %s", e)
         raise ValueError(str(e)) from e
     except Exception as e:
         logger.exception("Failed to create link")
@@ -463,12 +540,14 @@ async def memory_unlink(
     """Удалить связь между двумя гранулами."""
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
+    logger.info("memory_unlink: source=%s target=%s type=%s", source_id, target_id, link_type)
     try:
         deleted = await _track_tool("memory_unlink", service.delete_relation(
             source_id=source_id,
             target_id=target_id,
             link_type=link_type,
         ))
+        logger.info("memory_unlink: done success=%s", deleted)
         return {"ok": deleted}
     except Exception as e:
         logger.exception("Failed to delete link")
@@ -487,16 +566,20 @@ async def memory_get_relations(
     """
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
+    logger.info("memory_get_relations: id=%s link_type=%s", id, link_type)
     try:
         result = await _track_tool("memory_get_relations", service.get_relations(
             memory_id=id,
             link_type=link_type,
         ))
+        logger.info("memory_get_relations: done incoming=%d outgoing=%d",
+                    len(result.incoming), len(result.outgoing))
         return {
             "incoming": [r.model_dump(mode="json") for r in result.incoming],
             "outgoing": [r.model_dump(mode="json") for r in result.outgoing],
         }
     except NotFoundError as e:
+        logger.info("memory_get_relations: not found id=%s", id)
         raise ValueError(str(e)) from e
     except Exception as e:
         logger.exception("Failed to get relations")
@@ -517,17 +600,22 @@ async def memory_traverse(
     """
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
+    logger.info("memory_traverse: start_id=%s depth=%d link_types=%s",
+                start_id, depth, link_types)
     try:
         result = await _track_tool("memory_traverse", service.traverse(
             start_id=start_id,
             depth=depth,
             link_types=link_types,
         ))
+        logger.info("memory_traverse: done nodes=%d edges=%d",
+                    len(result.nodes), len(result.edges))
         return {
             "nodes": result.nodes,
             "edges": [e.model_dump(mode="json") for e in result.edges],
         }
     except NotFoundError as e:
+        logger.info("memory_traverse: start not found id=%s", start_id)
         raise ValueError(str(e)) from e
     except Exception as e:
         logger.exception("Failed to traverse graph")
@@ -541,8 +629,11 @@ async def memory_graph_stats(
     """Статистика графа знаний: связность, сироты, кластеры по namespace и типам связей."""
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
+    logger.info("memory_graph_stats: called")
     try:
         stats = await _track_tool("memory_graph_stats", service.get_graph_stats())
+        logger.info("memory_graph_stats: done nodes=%d edges=%d orphans=%d",
+                    stats.total_nodes, stats.total_edges, stats.orphans)
         return stats.model_dump(mode="json")
     except Exception as e:
         logger.exception("Failed to get graph stats")
@@ -558,6 +649,8 @@ async def memory_version(
 
     version_file = Path(__file__).parent.parent.parent / "VERSION"
     version = version_file.read_text().strip() if version_file.exists() else "unknown"
+    logger.info("memory_version: version=%s server=%s model=%s",
+                version, settings.mcp_server_name, settings.embedding_model)
     return {
         "version": version,
         "server": settings.mcp_server_name,
@@ -576,8 +669,10 @@ async def memory_namespaces(
     """
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
+    logger.info("memory_namespaces: called")
     try:
         namespaces = await _track_tool("memory_namespaces", service.ns_repo.list_all())
+        logger.info("memory_namespaces: done count=%d", len(namespaces))
         return [
             {"uid": ns.uid, "name": ns.name, "description": ns.description}
             for ns in namespaces

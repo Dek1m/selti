@@ -47,6 +47,7 @@ class DedupEngine:
         content_hash = hashlib.sha256(content.encode()).hexdigest()
 
         if not self.config.dedup_enabled:
+            logger.info("Dedup disabled — force INSERT: namespace=%s hash=%s", namespace, content_hash[:16])
             return DedupDecision(action=DedupAction.INSERT, content_hash=content_hash)
 
         # Exact dedup
@@ -101,6 +102,7 @@ class DedupEngine:
                 )
 
         DEDUP_INSERTED_TOTAL.labels(namespace=namespace).inc()
+        logger.info("Dedup INSERT: namespace=%s hash=%s", namespace, content_hash[:16])
         return DedupDecision(
             action=DedupAction.INSERT,
             content_hash=content_hash,
