@@ -48,7 +48,7 @@ class MemoryRepository:
             )
             return row["id"]
 
-async def insert_batch(
+    async def insert_batch(
         self,
         user_ids: list[str],
         contents: list[str],
