@@ -48,18 +48,22 @@ class MemoryRepository:
             )
             return row["id"]
 
-    async def insert_batch(
+async def insert_batch(
         self,
         user_ids: list[str],
         contents: list[str],
-        embeddings: list[list[float]],
+        embeddings: list[str],  # text[] — pgvector casts to vector via SQL
         metadatas: list[dict],
         namespaces: list[str],
         namespace_ids: list[str],
         content_hashes: list[str | None],
         importances: list[int] | None = None,
     ) -> list[str]:
-        """Batch insert multiple memories in one SQL round-trip."""
+        """Batch insert multiple memories in one SQL round-trip.
+        
+        embeddings are passed as text[] and cast to vector via ::vector in SQL
+        to avoid asyncpg's lack of vector[] array codec support.
+        """
         if importances is None:
             importances = [3] * len(user_ids)
         async with self.pool.acquire() as conn:

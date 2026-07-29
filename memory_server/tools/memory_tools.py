@@ -224,7 +224,7 @@ async def memory_ingest_batch(
             if to_insert:
                 user_ids = [user_id] * len(to_insert)
                 contents = [item["content"] for item in to_insert]
-                embeddings_list = [item["embedding"] for item in to_insert]
+                embeddings_list = [str(item["embedding"]) for item in to_insert]  # text[] -> ::vector
                 metadatas_list = [item["metadata"] for item in to_insert]
                 namespaces_list = [item["namespace"] for item in to_insert]
                 content_hashes_list = [item["content_hash"] for item in to_insert]

@@ -9,7 +9,7 @@ INSERT_MEMORY_BATCH = """
     SELECT
         unnest($1::text[]),
         unnest($2::text[]),
-        unnest($3::vector[])::vector,
+        unnest($3::text[])::vector,
         unnest($4::jsonb[]),
         unnest($5::text[]),
         unnest($6::uuid[]),
