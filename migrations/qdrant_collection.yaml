@@ -1,0 +1,134 @@
+# ============================================================
+# qdrant_collection.yaml — Конфигурация коллекции memories для Qdrant
+# ============================================================
+# Версия: v1.0
+# Описание: Хранение векторных эмбеддингов (4096-dim, qwen3-embedding-8b)
+#           Миграция из PostgreSQL + pgvector
+# ============================================================
+
+collection_name: memories
+
+vectors:
+  size: 4096
+  distance: COSINE
+  on_disk: true
+  # 4096 × float32 × 1.2M ≈ 19.7 GB → on_disk обязателен
+
+hnsw_config:
+  m: 16                    # Рёбер в графе (default: 16)
+  ef_construct: 100        # Candidate pool при построении (default: 100)
+  full_scan_threshold: 10000  # Порог для brute-force fallback
+
+optimizers_config:
+  deleted_threshold: 0.2   # Запуск оптимизации при 20% удалённых
+  indexing_threshold: 20   # % сегментов для HNSW индексации
+  flush_interval_sec: 30   # Периодичность flush на диск
+  max_optimization_threads: 2
+  segments_count: 2        # Количество сегментов на shard
+
+replication_factor: 1      # Single-node
+
+# ── Payload Indexes ──
+# Ускоряют фильтрацию при vector search
+payload_schema:
+  namespace:
+    type: keyword           # Точное совпадение (enum-like)
+    # Queries: namespace = "code_knowledge"
+  user_id:
+    type: keyword           # Multi-tenant фильтрация
+    # Queries: user_id = "user_123"
+  importance:
+    type: integer           # Range queries
+    # Queries: importance >= 4
+
+# ── Payload Schema ──
+# Что хранится в payload каждой точки:
+payload_fields:
+  user_id:
+    type: string
+    description: "ID пользователя (multi-tenant)"
+  content:
+    type: string
+    description: "Полный текст гранулы (для отображения в результатах)"
+  namespace:
+    type: string
+    description: "Логическая изоляция данных"
+  metadata:
+    type: object
+    description: "Произвольные метаданные (JSONB)"
+  importance:
+    type: integer
+    description: "Важность 1-5 (default: 3)"
+  content_hash:
+    type: string
+    description: "SHA-256 хеш контента (для dedup)"
+  created_at:
+    type: string
+    description: "ISO datetime создания"
+  updated_at:
+    type: string
+    description: "ISO datetime обновления"
+
+# ── Примеры запросов ──
+examples:
+  search_with_filters:
+    description: "Поиск по вектору с фильтрацией по namespace и user_id"
+    code: |
+      results = client.search(
+          collection_name="memories",
+          query_vector=[0.1, 0.2, ...],  # 4096 dim
+          query_filter=Filter(
+              must=[
+                  FieldCondition(key="namespace", match=MatchValue(value="code_knowledge")),
+                  FieldCondition(key="user_id", match=MatchValue(value="user_123")),
+              ]
+          ),
+          limit=10,
+          score_threshold=0.7,
+      )
+
+  search_by_namespace_only:
+    description: "Поиск по всем пользователям в namespace"
+    code: |
+      results = client.search(
+          collection_name="memories",
+          query_vector=query_embedding,
+          query_filter=Filter(
+              must=[
+                  FieldCondition(key="namespace", match=MatchValue(value="infrastructure")),
+              ]
+          ),
+          limit=20,
+      )
+
+  upsert_point:
+    description: "Вставка/обновление точки"
+    code: |
+      client.upsert(
+          collection_name="memories",
+          points=[
+              PointStruct(
+                  id="550e8400-e29b-41d4-a716-446655440000",
+                  vector=[0.1, 0.2, ...],  # 4096 dim
+                  payload={
+                      "user_id": "user_123",
+                      "content": "Текст гранулы",
+                      "namespace": "code_knowledge",
+                      "metadata": {"entity_type": "function"},
+                      "importance": 4,
+                  },
+              )
+          ],
+      )
+
+  delete_by_filter:
+    description: "Удаление всех точек namespace"
+    code: |
+      client.delete(
+          collection_name="memories",
+          points_selector=FilterSelector(
+              filter=Filter(
+                  must=[FieldCondition(key="namespace", match=MatchValue(value="deprecated"))]
+              )
+          ),
+      )

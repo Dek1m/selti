@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     embedding_model: str = "qwen3-embedding-8b"
     embedding_dimension: int = 4096
 
+    # ── Qdrant: векторное хранилище ──
+    qdrant_url: str = "http://localhost:6333"
+    qdrant_collection: str = "memories"
+    qdrant_api_key: str = ""  # для Qdrant Cloud (опционально)
+    qdrant_enabled: bool = True  # False = fallback на pgvector
+
     mcp_server_name: str = "athena-memory"
     mcp_host: str = "0.0.0.0"
     mcp_port: int = 8000
