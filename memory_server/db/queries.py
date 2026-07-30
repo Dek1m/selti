@@ -1,20 +1,19 @@
 INSERT_MEMORY = """
-    INSERT INTO memories (user_id, content, embedding, metadata, namespace, namespace_id, content_hash, importance)
-    VALUES ($1, $2, $3::vector, $4::jsonb, $5, $6::uuid, $7, $8)
+    INSERT INTO memories (user_id, content, metadata, namespace, namespace_id, content_hash, importance)
+    VALUES ($1, $2, $3::jsonb, $4, $5::uuid, $6, $7)
     RETURNING id
 """
 
 INSERT_MEMORY_BATCH = """
-    INSERT INTO memories (user_id, content, embedding, metadata, namespace, namespace_id, content_hash, importance)
+    INSERT INTO memories (user_id, content, metadata, namespace, namespace_id, content_hash, importance)
     SELECT
         unnest($1::text[]),
         unnest($2::text[]),
-        unnest($3::text[])::vector,
-        unnest($4::jsonb[]),
-        unnest($5::text[]),
-        unnest($6::uuid[]),
-        unnest($7::text[]),
-        unnest($8::int[])
+        unnest($3::jsonb[]),
+        unnest($4::text[]),
+        unnest($5::uuid[]),
+        unnest($6::text[]),
+        unnest($7::int[])
     RETURNING id
 """
 
@@ -30,29 +29,15 @@ SELECT_MEMORY_BY_CONTENT_HASH = """
     WHERE namespace = $1 AND content_hash = $2
 """
 
-# HNSW search via SQL function (defined in 001_initial.sql).
-# Порог отсечения применяется в SQL для точности,
-# но HNSW всё равно может возвращать результаты чуть ниже порога
-# (используется как финальный фильтр).
-# ef_search выставляется на пуле соединений (см. pool.py).
-SEARCH_MEMORIES = """
-    SELECT id, content, metadata, importance,
-           1 - (embedding <=> $1::vector) AS score
-    FROM memories
-    WHERE ($2::text IS NULL OR user_id = $2)
-      AND ($3::text IS NULL OR namespace = $3)
-      AND is_archived = false
-      AND 1 - (embedding <=> $1::vector) >= $4
-    ORDER BY embedding <=> $1::vector
-    LIMIT $5
-"""
+# Векторный поиск теперь через Qdrant (memory_server/vector/qdrant_store.py).
+# pgvector sequential scan удалён — см. Phase 3 миграции.
+SEARCH_MEMORIES = None  # replaced by QdrantVectorStore.search()
 
 UPDATE_MEMORY = """
     UPDATE memories
     SET content = COALESCE($2, content),
-        embedding = COALESCE($3::vector, embedding),
-        metadata = COALESCE($4::jsonb, metadata),
-        importance = COALESCE($5, importance),
+        metadata = COALESCE($3::jsonb, metadata),
+        importance = COALESCE($4, importance),
         updated_at = now()
     WHERE id = $1
     RETURNING id, user_id, content, metadata, namespace, importance, created_at, updated_at, content_hash

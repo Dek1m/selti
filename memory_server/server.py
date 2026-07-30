@@ -11,7 +11,8 @@ from memory_server.config import settings
 from memory_server.db.pool import close_pool, create_pool
 from memory_server.embedding.client import EmbeddingClient
 from memory_server.memory.namespace_repository import NamespaceRepository
-from memory_server.memory.repository import MemoryRepository
+from memory_server.memory.repository_qdrant import MemoryRepository
+from memory_server.vector import create_qdrant_client
 from memory_server.memory.service import MemoryService
 from memory_server.metrics import DB_POOL_SIZE, DB_POOL_AVAILABLE
 from migrations.run import run_migrations
@@ -89,7 +90,10 @@ async def lifespan(server: FastMCP):
         cache=embedding_cache,
     )
 
-    repository = MemoryRepository(pool=pool)
+    qdrant_client = await create_qdrant_client(settings)
+    repository = MemoryRepository(pool=pool, qdrant=qdrant_client, qdrant_collection=settings.qdrant_collection)
+    if qdrant_client:
+        logger.info("Qdrant connected: url=%s collection=%s", settings.qdrant_url, settings.qdrant_collection)
     ns_repo = NamespaceRepository(pool=pool)
     service = MemoryService(
         repository=repository,
@@ -110,6 +114,8 @@ async def lifespan(server: FastMCP):
         await metrics_task
         await embedding_client.aclose()
         await embedding_cache.close()
+        if qdrant_client:
+            qdrant_client.close()
         await close_pool(pool)
         logger.info("Memory server shutdown complete")
 

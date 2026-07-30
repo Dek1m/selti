@@ -2,7 +2,6 @@ import json
 import logging
 
 import asyncpg
-from pgvector.asyncpg import register_vector
 
 logger = logging.getLogger(__name__)
 
@@ -12,20 +11,11 @@ async def create_pool(
     min_size: int = 2,
     max_size: int = 20,
 ) -> asyncpg.Pool:
-    """Создаёт пул соединений к PostgreSQL с pgvector.
-
-    Используем точный поиск (без индекса), т.к. pgvector ограничивает
-    индексы 2000 измерениями, а у нас 4096-dim векторы.
-
-    Для датасета <100K записей точный поиск даёт latency ~50-500ms.
-    """
+    """Создаёт пул соединений к PostgreSQL."""
     dsn = dsn.replace("postgresql+asyncpg://", "postgresql://")
 
     async def init_conn(conn: asyncpg.Connection) -> None:
         """Инициализация каждого нового соединения."""
-        await register_vector(conn)
-        # Регистрируем JSONB codec — asyncpg требует явной регистрации
-        # для Python dict -> PostgreSQL jsonb
         await conn.set_type_codec(
             "jsonb",
             encoder=json.dumps,
