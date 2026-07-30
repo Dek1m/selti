@@ -121,3 +121,4 @@ mcp = FastMCP(
 
 # Import tools to register them (decorators execute on import)
 import memory_server.tools.memory_tools  # noqa: F401, E402
+import memory_server.tools.hash_tools  # noqa: F401, E402

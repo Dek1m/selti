@@ -235,3 +235,44 @@ ARCHIVE_MEMORY = """
     WHERE id = $1 AND is_archived = false
     RETURNING id
 """
+
+
+# ── Resource Hashes queries ──
+
+UPSERT_RESOURCE_HASH = """
+    INSERT INTO resource_hashes (source_type, source_id, content_hash, size_bytes, metadata)
+    VALUES ($1, $2, $3, $4, $5::jsonb)
+    ON CONFLICT (source_type, source_id)
+    DO UPDATE SET
+        content_hash = EXCLUDED.content_hash,
+        size_bytes = EXCLUDED.size_bytes,
+        metadata = EXCLUDED.metadata,
+        updated_at = CASE
+            WHEN resource_hashes.content_hash IS DISTINCT FROM EXCLUDED.content_hash
+            THEN now()
+            ELSE resource_hashes.updated_at
+        END
+    RETURNING id, created_at, updated_at
+"""
+
+SELECT_RESOURCE_HASH = """
+    SELECT id, source_type, source_id, content_hash, size_bytes, metadata, created_at, updated_at
+    FROM resource_hashes
+    WHERE source_type = $1 AND source_id = $2
+"""
+
+LIST_RESOURCE_HASHES = """
+    SELECT id, source_type, source_id, content_hash, size_bytes, metadata, created_at, updated_at
+    FROM resource_hashes
+    WHERE ($1::text IS NULL OR source_type = $1)
+      AND ($2::timestamptz IS NULL OR updated_at >= $2)
+      AND ($3::text IS NULL OR metadata->>'project_id' = $3)
+    ORDER BY updated_at DESC
+    LIMIT $4 OFFSET $5
+"""
+
+DELETE_RESOURCE_HASH = """
+    DELETE FROM resource_hashes
+    WHERE source_type = $1 AND source_id = $2
+    RETURNING id
+"""
