@@ -750,8 +750,8 @@ async def memory_graph_stats(
 
     try:
         stats = await _track_tool("memory_graph_stats", _graph_stats_with_steps())
-        logger.info("memory_graph_stats: done nodes=%d edges=%d orphans=%d",
-                    stats.total_nodes, stats.total_edges, stats.orphans)
+        logger.info("memory_graph_stats: done granules=%d relations=%d orphans=%d",
+                    stats.total_granules, stats.total_relations, stats.orphans)
         return stats.model_dump(mode="json")
     except Exception as e:
         logger.exception("Failed to get graph stats")

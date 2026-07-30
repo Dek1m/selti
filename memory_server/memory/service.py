@@ -317,6 +317,6 @@ class MemoryService:
         """Статистика графа знаний."""
         logger.info("get_graph_stats: called")
         result = await self.repository.get_graph_stats()
-        logger.info("get_graph_stats: done nodes=%d edges=%d orphans=%d",
-                    result.total_nodes, result.total_edges, result.orphans)
+        logger.info("get_graph_stats: done granules=%d relations=%d orphans=%d",
+                    result.total_granules, result.total_relations, result.orphans)
         return result
