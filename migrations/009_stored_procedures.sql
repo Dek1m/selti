@@ -23,9 +23,9 @@ CREATE OR REPLACE FUNCTION memory_upsert(
     p_user_id       TEXT,
     p_content       TEXT,
     p_embedding     vector(4096),
+    p_namespace_id  UUID,
     p_metadata      JSONB   DEFAULT '{}'::jsonb,
     p_namespace     TEXT    DEFAULT 'default',
-    p_namespace_id  UUID,
     p_content_hash  TEXT    DEFAULT NULL,
     p_importance    INT     DEFAULT 3
 )

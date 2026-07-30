@@ -31,6 +31,10 @@ ALTER TABLE memories DROP COLUMN IF EXISTS embedding;
 -- 3. Удаляем extension pgvector
 -- ════════════════════════════════════════════════════════════
 -- Без колонки vector extension не нужен
+DROP FUNCTION IF EXISTS memory_upsert(text,text,vector,uuid,jsonb,text,text,integer);
+DROP FUNCTION IF EXISTS memory_search_hnsw(vector,text,text,double precision,integer);
+DROP FUNCTION IF EXISTS search_memories_approx(text,vector,double precision,integer);
+DROP FUNCTION IF EXISTS search_memories_approx(text,vector,double precision,integer,text);
 DROP EXTENSION IF EXISTS vector;
 
 -- ════════════════════════════════════════════════════════════

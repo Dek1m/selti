@@ -122,11 +122,11 @@ class MemoryRepository:
         self,
         user_ids: list[str],
         contents: list[str],
-        embeddings: list[list[float]] | list[str] | None = None,
-        metadatas: list[dict],
         namespaces: list[str],
         namespace_ids: list[str],
         content_hashes: list[str | None],
+        embeddings: list[list[float]] | list[str] | None = None,
+        metadatas: list[dict] | None = None,
         importances: list[int] | None = None,
     ) -> list[str]:
         """Batch insert. Вектора → Qdrant, метаданные → PG."""
@@ -227,20 +227,20 @@ class MemoryRepository:
 
             search_filter = qm.Filter(must=must_conditions) if must_conditions else None
 
-            qdrant_results = self.qdrant.search(
+            qdrant_results = self.qdrant.query_points(
                 collection_name=self.qdrant_collection,
-                query_vector=query_embedding,
+                query=query_embedding,
                 query_filter=search_filter,
                 limit=limit,
                 score_threshold=threshold,
             )
 
-            if not qdrant_results:
+            if not qdrant_results.points:
                 return []
 
             # Извлекаем IDs и scores
-            ids = [r.id for r in qdrant_results]
-            scores = {r.id: r.score for r in qdrant_results}
+            ids = [r.id for r in qdrant_results.points]
+            scores = {r.id: r.score for r in qdrant_results.points}
 
             # ── PostgreSQL: fetch metadata по IDs ──
             async with self.pool.acquire() as conn:
