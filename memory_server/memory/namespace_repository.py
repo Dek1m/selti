@@ -72,7 +72,7 @@ class NamespaceRepository:
                     uid,
                     display_name,
                 )
-                logger.info("Auto-registered namespace: %s (uid=%s)", display_name, uid)
+                logger.info("Auto-registered namespace", extra={"name": display_name, "uid": uid})
 
             rec = NamespaceRecord(
                 id=str(row["id"]),

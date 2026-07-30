@@ -47,8 +47,10 @@ class MemoryService:
         importance: int | None = None,
     ) -> tuple[MemoryRecord, DedupAction]:
         namespace = namespace or "default"
-        logger.info("store: content_len=%d user_id=%s namespace=%s importance=%s",
-                    len(content), user_id, namespace, importance)
+        logger.info("store: START", extra={
+            "content_len": len(content), "user_id": user_id,
+            "namespace": namespace, "importance": importance,
+        })
         ns_record = await self.ns_repo.get_or_create(namespace)
         content_hash: str | None = None
         embedding: list[float] | None = None
@@ -57,14 +59,17 @@ class MemoryService:
             decision = await self.dedup.check(content, user_id, namespace, metadata=metadata)
             content_hash = decision.content_hash
             embedding = decision.embedding  # кэш эмбеддинга от dedup
-            logger.info("store: dedup decision=%s existing_id=%s score=%s",
-                        decision.action.value, decision.existing_id, decision.existing_score)
+            logger.info("store: dedup decision", extra={
+                "action": decision.action.value,
+                "existing_id": decision.existing_id,
+                "score": decision.existing_score,
+            })
 
             if decision.action == DedupAction.SKIP:
                 record = await self.repository.get_by_id(decision.existing_id)
                 if record is None:
                     raise RuntimeError(f"Failed to retrieve existing memory: {decision.existing_id}")
-                logger.info("store: SKIP existing_id=%s", decision.existing_id)
+                logger.info("store: SKIP", extra={"existing_id": decision.existing_id})
                 return record, DedupAction.SKIP
 
             if decision.action == DedupAction.UPDATE:
@@ -77,7 +82,7 @@ class MemoryService:
                 )
                 if updated is None:
                     raise RuntimeError(f"Failed to update memory: {decision.existing_id}")
-                logger.info("store: UPDATE existing_id=%s", decision.existing_id)
+                logger.info("store: UPDATE", extra={"existing_id": decision.existing_id})
                 return updated, DedupAction.UPDATE
 
         # Используем кэшированный эмбеддинг, или генерируем новый
@@ -96,7 +101,16 @@ class MemoryService:
         record = await self.repository.get_by_id(memory_id)
         if record is None:
             raise RuntimeError(f"Failed to retrieve memory after insert: {memory_id}")
-        logger.info("store: INSERT id=%s namespace=%s", record.id, namespace)
+
+        # Sync metadata.links → relations если есть links
+        if metadata and "links" in metadata:
+            try:
+                synced = await self.repository.sync_links_to_relations(memory_id)
+                logger.info("store: sync_links", extra={"synced": synced, "id": memory_id})
+            except Exception as e:
+                logger.exception("store: sync_links FAILED (non-fatal)", extra={"id": memory_id})
+
+        logger.info("store: INSERT", extra={"id": record.id, "namespace": namespace})
         return record, DedupAction.INSERT
 
     async def search(
@@ -107,8 +121,10 @@ class MemoryService:
         threshold: float = 0.7,
         namespace: str | None = None,
     ) -> list[SearchResult]:
-        logger.info("search: query=%s namespace=%s limit=%d threshold=%.2f user_id=%s",
-                    query[:200], namespace, limit, threshold, user_id)
+        logger.info("search: START", extra={
+            "query": query[:200], "namespace": namespace,
+            "limit": limit, "threshold": threshold, "user_id": user_id,
+        })
         query_embedding = await self.embedding.embed(query)
         results = await self.repository.search(
             query_embedding=query_embedding,
@@ -117,16 +133,16 @@ class MemoryService:
             threshold=threshold,
             namespace=namespace,
         )
-        logger.info("search: done count=%d", len(results))
+        logger.info("search: done", extra={"count": len(results)})
         return results
 
     async def get(self, memory_id: str) -> MemoryRecord:
-        logger.info("get: id=%s", memory_id)
+        logger.info("get", extra={"id": memory_id})
         record = await self.repository.get_by_id(memory_id)
         if record is None:
-            logger.info("get: not found id=%s", memory_id)
+            logger.info("get: not found", extra={"id": memory_id})
             raise NotFoundError(memory_id)
-        logger.info("get: found id=%s namespace=%s", record.id, record.namespace)
+        logger.info("get: found", extra={"id": record.id, "namespace": record.namespace})
         return record
 
     async def update(
@@ -136,8 +152,10 @@ class MemoryService:
         metadata: dict | None = None,
         importance: int | None = None,
     ) -> MemoryRecord:
-        logger.info("update: id=%s has_content=%s has_metadata=%s importance=%s",
-                    memory_id, content is not None, metadata is not None, importance)
+        logger.info("update: START", extra={
+            "id": memory_id, "has_content": content is not None,
+            "has_metadata": metadata is not None, "importance": importance,
+        })
         embedding = None
         if content is not None:
             embedding = await self.embedding.embed(content)
@@ -149,15 +167,24 @@ class MemoryService:
             importance=importance,
         )
         if record is None:
-            logger.info("update: not found id=%s", memory_id)
+            logger.info("update: not found", extra={"id": memory_id})
             raise NotFoundError(memory_id)
-        logger.info("update: done id=%s namespace=%s", record.id, record.namespace)
+
+        # Sync metadata.links → relations если metadata обновились
+        if metadata is not None and "links" in metadata:
+            try:
+                synced = await self.repository.sync_links_to_relations(memory_id)
+                logger.info("update: sync_links", extra={"synced": synced, "id": memory_id})
+            except Exception as e:
+                logger.exception("update: sync_links FAILED (non-fatal)", extra={"id": memory_id})
+
+        logger.info("update: done", extra={"id": record.id, "namespace": record.namespace})
         return record
 
     async def delete(self, memory_id: str) -> bool:
-        logger.info("delete: id=%s", memory_id)
+        logger.info("delete", extra={"id": memory_id})
         result = await self.repository.delete(memory_id)
-        logger.info("delete: done id=%s success=%s", memory_id, result)
+        logger.info("delete: done", extra={"id": memory_id, "success": result})
         return result
 
     async def list(
@@ -167,15 +194,17 @@ class MemoryService:
         limit: int = 50,
         offset: int = 0,
     ) -> MemoryListResult:
-        logger.info("list: namespace=%s limit=%d offset=%d user_id=%s",
-                    namespace, limit, offset, user_id)
+        logger.info("list", extra={
+            "namespace": namespace, "limit": limit,
+            "offset": offset, "user_id": user_id,
+        })
         result = await self.repository.list(
             user_id=user_id,
             namespace=namespace,
             limit=limit,
             offset=offset,
         )
-        logger.info("list: done total=%d items=%d", result.total, len(result.items))
+        logger.info("list: done", extra={"total": result.total, "items": len(result.items)})
         return result
 
     async def recent(
@@ -184,13 +213,13 @@ class MemoryService:
         since: datetime | None = None,
         limit: int = 20,
     ) -> list[MemoryRecord]:
-        logger.info("recent: namespace=%s limit=%d since=%s", namespace, limit, since)
+        logger.info("recent", extra={"namespace": namespace, "limit": limit, "since": str(since)})
         results = await self.repository.recent(
             namespace=namespace,
             since=since,
             limit=limit,
         )
-        logger.info("recent: done count=%d", len(results))
+        logger.info("recent: done", extra={"count": len(results)})
         return results
 
     async def forget(
@@ -198,29 +227,29 @@ class MemoryService:
         user_id: str,
         namespace: str | None = None,
     ) -> int:
-        logger.info("forget: user_id=%s namespace=%s", user_id, namespace)
+        logger.info("forget", extra={"user_id": user_id, "namespace": namespace})
         count = await self.repository.forget(
             user_id=user_id,
             namespace=namespace,
         )
-        logger.info("forget: done deleted_count=%d", count)
+        logger.info("forget: done", extra={"deleted_count": count})
         return count
 
     async def get_stats(self, user_id: str | None = None) -> list:
-        logger.info("get_stats: user_id=%s", user_id)
+        logger.info("get_stats", extra={"user_id": user_id})
         result = await self.repository.get_stats(user_id)
-        logger.info("get_stats: done namespaces=%d", len(result))
+        logger.info("get_stats: done", extra={"namespaces": len(result)})
         return result
 
     async def archive(self, memory_id: str) -> bool:
         """Мягкое удаление: установить is_archived = true."""
-        logger.info("archive: id=%s", memory_id)
+        logger.info("archive", extra={"id": memory_id})
         record = await self.repository.get_by_id(memory_id)
         if record is None:
-            logger.info("archive: not found id=%s", memory_id)
+            logger.info("archive: not found", extra={"id": memory_id})
             raise NotFoundError(memory_id)
         result = await self.repository.archive(memory_id)
-        logger.info("archive: done id=%s success=%s", memory_id, result)
+        logger.info("archive: done", extra={"id": memory_id, "success": result})
         return result
 
     # ── Relations ──
@@ -236,8 +265,10 @@ class MemoryService:
         metadata: dict | None = None,
     ) -> str:
         """Создать связь между гранулами."""
-        logger.info("add_relation: source=%s target=%s type=%s weight=%.2f",
-                    source_id, target_id, link_type, weight)
+        logger.info("add_relation", extra={
+            "source": source_id, "target": target_id,
+            "type": link_type, "weight": weight,
+        })
         # Валидация: source_id должен существовать
         source = await self.repository.get_by_id(source_id)
         if source is None:
@@ -256,33 +287,37 @@ class MemoryService:
             weight=weight,
             metadata=metadata,
         )
-        logger.info("add_relation: done relation_id=%s", rel_id)
+        logger.info("add_relation: done", extra={"relation_id": rel_id})
         return rel_id
 
     async def get_relations(
         self, memory_id: str, link_type: str | None = None
     ) -> RelationListResult:
         """Получить входящие и исходящие связи гранулы."""
-        logger.info("get_relations: id=%s link_type=%s", memory_id, link_type)
+        logger.info("get_relations", extra={"id": memory_id, "link_type": link_type})
         outgoing = await self.repository.get_relations_by_source(memory_id, link_type)
         incoming = await self.repository.get_relations_by_target(memory_id, link_type)
-        logger.info("get_relations: done incoming=%d outgoing=%d", len(incoming), len(outgoing))
+        logger.info("get_relations: done", extra={"incoming": len(incoming), "outgoing": len(outgoing)})
         return RelationListResult(incoming=incoming, outgoing=outgoing)
 
     async def delete_relation(
         self, source_id: str, target_id: str, link_type: str
     ) -> bool:
         """Удалить связь."""
-        logger.info("delete_relation: source=%s target=%s type=%s", source_id, target_id, link_type)
+        logger.info("delete_relation", extra={
+            "source": source_id, "target": target_id, "type": link_type,
+        })
         result = await self.repository.delete_relation(source_id, target_id, link_type)
-        logger.info("delete_relation: done success=%s", result)
+        logger.info("delete_relation: done", extra={"success": result})
         return result
 
     async def traverse(
         self, start_id: str, depth: int = 3, link_types: list[str] | None = None
     ) -> TraverseResult:
         """Обход графа от начальной ноды."""
-        logger.info("traverse: start_id=%s depth=%d link_types=%s", start_id, depth, link_types)
+        logger.info("traverse", extra={
+            "start_id": start_id, "depth": depth, "link_types": link_types,
+        })
         # Валидация: start_id должен существовать
         start = await self.repository.get_by_id(start_id)
         if start is None:
@@ -310,13 +345,16 @@ class MemoryService:
                 all_edges.extend(
                     e for e in edges if e.target_id and e.target_id in node_ids
                 )
-        logger.info("traverse: done nodes=%d edges=%d", len(nodes), len(all_edges))
+        logger.info("traverse: done", extra={"nodes": len(nodes), "edges": len(all_edges)})
         return TraverseResult(nodes=nodes, edges=all_edges)
 
     async def get_graph_stats(self) -> GraphStats:
         """Статистика графа знаний."""
-        logger.info("get_graph_stats: called")
+        logger.info("get_graph_stats")
         result = await self.repository.get_graph_stats()
-        logger.info("get_graph_stats: done granules=%d relations=%d orphans=%d",
-                    result.total_granules, result.total_relations, result.orphans)
+        logger.info("get_graph_stats: done", extra={
+            "granules": result.total_granules,
+            "relations": result.total_relations,
+            "orphans": result.orphans,
+        })
         return result

@@ -27,7 +27,7 @@ class EmbeddingCache:
                 socket_timeout=REDIS_TIMEOUT,
                 socket_connect_timeout=REDIS_TIMEOUT,
             )
-            logger.info("EmbeddingCache: connected to %s", self.redis_url)
+            logger.info("EmbeddingCache connected", extra={"url": self.redis_url})
         return self._client
 
     def _make_key(self, text: str) -> str:

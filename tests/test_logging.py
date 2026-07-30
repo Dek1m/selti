@@ -1,25 +1,23 @@
-"""Тесты для структурированного JSON-логирования.
+"""Тесты для POSIX-форматтера логирования Argenta Team.
 
-Проверяем JSONFormatter из memory_server.server:
-- Базовое форматирование с timestamp, level, logger, message
-- Опциональные поля: request_id, duration_ms, exception
-- Приоритет request_id из contextvars над атрибутом record
+Формат: [ISO8601-UTC] [LEVEL] [service-name] message {"key": "value"}
+POSIX-совместим: grep, jq, awk работают без проблем.
 """
 
 import json
 import logging
+import re
 import sys
 
-from memory_server.server import JSONFormatter, request_id_var
+from memory_server.logger import PosixFormatter, SERVICE_NAME
 
 
-class TestJSONFormatter:
-    """Проверка JSONFormatter."""
+class TestPosixFormatter:
+    """Проверка PosixFormatter."""
 
     def setup_method(self):
-        self.formatter = JSONFormatter()
+        self.formatter = PosixFormatter()
         self.logger = logging.getLogger("test_logger")
-        # Убираем已有的 хендлеры, чтобы не засорять вывод
         self.logger.handlers.clear()
         self.logger.setLevel(logging.DEBUG)
 
@@ -30,7 +28,6 @@ class TestJSONFormatter:
         exc_info: tuple | None = None,
         extra: dict | None = None,
     ) -> logging.LogRecord:
-        """Создать LogRecord с заданными параметрами."""
         record = self.logger.makeRecord(
             name=self.logger.name,
             level=level,
@@ -43,41 +40,43 @@ class TestJSONFormatter:
         )
         return record
 
-    # ── Базовые поля ──────────────────────────────────────────────
+    # ── Базовый формат ────────────────────────────────────────────
 
-    def test_basic_fields_present(self):
-        """В JSON-логе должны быть timestamp, level, logger, message."""
+    def test_format_matches_spec(self):
+        """Формат: [ISO8601] [LEVEL] [service] message."""
         record = self._make_record("hello world")
         output = self.formatter.format(record)
-        data = json.loads(output)
+        pattern = r"^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\] \[INFO\] \[.*\] hello world$"
+        assert re.match(pattern, output), f"Format mismatch: {output}"
 
-        assert "timestamp" in data
-        assert data["level"] == "INFO"
-        assert data["logger"] == "test_logger"
-        assert data["message"] == "hello world"
-
-    def test_timestamp_is_iso_format(self):
-        """timestamp должен быть в формате ISO (YYYY-MM-DD HH:MM:SS,mmm)."""
+    def test_timestamp_is_iso_utc(self):
+        """Timestamp в формате ISO 8601 UTC с миллисекундами."""
         record = self._make_record("x")
         output = self.formatter.format(record)
-        data = json.loads(output)
-
-        # Пример: 2025-06-15 12:00:00,123
-        assert isinstance(data["timestamp"], str)
-        assert len(data["timestamp"]) >= 19  # минимум "2025-06-15 12:00:00"
+        ts_match = re.match(r"^\[([^\]]+)\]", output)
+        assert ts_match
+        ts = ts_match.group(1)
+        assert ts.endswith("Z"), f"Timestamp not UTC: {ts}"
+        assert len(ts) == 24, f"Timestamp length wrong: {ts}"  # 2026-07-30T18:00:00.000Z
 
     def test_level_reflects_severity(self):
-        """Уровень логирования должен соответствовать record.levelname."""
+        """Уровень логирования соответствует record.levelname."""
         record = self._make_record("debug", level=logging.DEBUG)
-        data = json.loads(self.formatter.format(record))
-        assert data["level"] == "DEBUG"
+        output = self.formatter.format(record)
+        assert "[DEBUG]" in output
 
         record = self._make_record("error", level=logging.ERROR)
-        data = json.loads(self.formatter.format(record))
-        assert data["level"] == "ERROR"
+        output = self.formatter.format(record)
+        assert "[ERROR]" in output
+
+    def test_service_name_in_brackets(self):
+        """Имя сервиса в квадратных скобках."""
+        record = self._make_record("test")
+        output = self.formatter.format(record)
+        assert f"[{SERVICE_NAME}]" in output
 
     def test_message_with_args(self):
-        """Сообщение должно быть отформатировано с аргументами."""
+        """Сообщение форматируется с аргументами."""
         record = self.logger.makeRecord(
             name=self.logger.name,
             level=logging.INFO,
@@ -87,100 +86,97 @@ class TestJSONFormatter:
             args=(42, "test"),
             exc_info=None,
         )
-        data = json.loads(self.formatter.format(record))
-        assert data["message"] == "count=42, name=test"
+        output = self.formatter.format(record)
+        assert "count=42, name=test" in output
 
-    # ── Опциональные поля ─────────────────────────────────────────
+    # ── JSON-мета ─────────────────────────────────────────────────
 
-    def test_request_id_from_extra(self):
-        """Если у record есть атрибут request_id, он должен попасть в JSON."""
-        record = self._make_record("with extra")
-        record.request_id = "req-abc-123"
-        data = json.loads(self.formatter.format(record))
-        assert data["request_id"] == "req-abc-123"
-
-    def test_duration_ms_from_extra(self):
-        """Если у record есть атрибут duration_ms, он должен попасть в JSON."""
-        record = self._make_record("timed")
+    def test_json_meta_from_extra(self):
+        """Extra-атрибуты попадают в JSON-мету."""
+        record = self._make_record("with meta")
         record.duration_ms = 150.5
-        data = json.loads(self.formatter.format(record))
-        assert data["duration_ms"] == 150.5
+        record.request_id = "req-abc-123"
+        output = self.formatter.format(record)
 
-    def test_duration_ms_is_absent_when_not_set(self):
-        """Если duration_ms не задан, поле не должно быть в JSON."""
-        record = self._make_record("no duration")
-        data = json.loads(self.formatter.format(record))
-        assert "duration_ms" not in data
+        # JSON-мета идёт после сообщения
+        meta_match = re.search(r"(\{.*\})$", output)
+        assert meta_match, f"No JSON meta found: {output}"
+        meta = json.loads(meta_match.group(1))
+        assert meta["duration_ms"] == 150.5
+        assert meta["request_id"] == "req-abc-123"
 
-    def test_exception_field_present_on_error(self):
-        """При наличии исключения в JSON должно быть поле exception."""
+    def test_no_meta_when_no_extra(self):
+        """Без extra-атриIBUTов JSON-мета не добавляется."""
+        record = self._make_record("no meta")
+        output = self.formatter.format(record)
+        assert not re.search(r"\{.*\}$", output), f"Unexpected JSON meta: {output}"
+
+    def test_all_extra_fields_in_meta(self):
+        """В JSON-мету попадают все extra-поля (включая кастомные)."""
+        record = self._make_record("filtered")
+        record.duration_ms = 100
+        record.custom_key = "appears"
+        output = self.formatter.format(record)
+
+        meta_match = re.search(r"(\{.*\})$", output)
+        assert meta_match
+        meta = json.loads(meta_match.group(1))
+        assert "duration_ms" in meta
+        assert meta["custom_key"] == "appears"
+
+    def test_builtin_logrecord_attrs_excluded(self):
+        """Встроенные атрибуты LogRecord (name, levelno, etc.) НЕ попадают в JSON."""
+        record = self._make_record("clean")
+        output = self.formatter.format(record)
+
+        meta_match = re.search(r"(\{.*\})$", output)
+        if meta_match:
+            meta = json.loads(meta_match.group(1))
+            assert "name" not in meta
+            assert "levelno" not in meta
+            assert "pathname" not in meta
+
+    # ── Исключения ────────────────────────────────────────────────
+
+    def test_exception_included_on_error(self):
+        """При исключении stack trace добавляется после лога."""
         try:
             raise ValueError("something went wrong")
         except ValueError:
             record = self._make_record("error", level=logging.ERROR, exc_info=sys.exc_info())
 
-        data = json.loads(self.formatter.format(record))
-        assert "exception" in data
-        assert "ValueError" in data["exception"]
-        assert "something went wrong" in data["exception"]
-
-    def test_no_exception_field_on_normal_log(self):
-        """Без исключения поле exception не должно появляться."""
-        record = self._make_record("info msg")
-        data = json.loads(self.formatter.format(record))
-        assert "exception" not in data
-
-    def test_request_id_is_absent_when_not_set(self):
-        """Если request_id не задан, поле не должно быть в JSON."""
-        record = self._make_record("no request id")
-        data = json.loads(self.formatter.format(record))
-        assert "request_id" not in data
-
-    # ── ContextVar request_id ──────────────────────────────────────
-
-    def test_request_id_from_contextvar(self):
-        """request_id_var из contextvars должен попадать в JSON."""
-        token = request_id_var.set("ctx-req-456")
-        try:
-            record = self._make_record("from ctx")
-            data = json.loads(self.formatter.format(record))
-            assert data["request_id"] == "ctx-req-456"
-        finally:
-            request_id_var.reset(token)
-
-    def test_contextvar_takes_precedence_over_extra(self):
-        """ContextVar request_id имеет приоритет над атрибутом record."""
-        token = request_id_var.set("from-ctx")
-        try:
-            record = self._make_record("precedence")
-            record.request_id = "from-extra"
-            data = json.loads(self.formatter.format(record))
-            # В форматтере сначала проверяется request_id_var.get(None)
-            assert data["request_id"] == "from-ctx"
-        finally:
-            request_id_var.reset(token)
-
-    def test_contextvar_reset_removes_request_id(self):
-        """После сброса contextvar, request_id не должен появляться."""
-        token = request_id_var.set("temp-id")
-        request_id_var.reset(token)
-
-        record = self._make_record("after reset")
-        data = json.loads(self.formatter.format(record))
-        assert "request_id" not in data
-
-    # ── Сериализация ──────────────────────────────────────────────
-
-    def test_ensure_ascii_false(self):
-        """JSONFormatter использует ensure_ascii=False для поддержки Unicode."""
-        record = self._make_record("привет")
         output = self.formatter.format(record)
-        data = json.loads(output)
-        assert data["message"] == "привет"
+        assert "ValueError" in output
+        assert "something went wrong" in output
+        # Stack trace идёт на следующей строке
+        assert "\n" in output
+
+    def test_no_exception_on_normal_log(self):
+        """Без исключения stack trace не добавляется."""
+        record = self._make_record("info msg")
+        output = self.formatter.format(record)
+        assert "\n" not in output
+
+    # ── POSIX-совместимость ───────────────────────────────────────
+
+    def test_grep_compatible(self):
+        """Логи можно фильтровать через grep."""
+        record = self._make_record("test message")
+        output = self.formatter.format(record)
+        assert "[INFO]" in output
+        assert "[test message" in output or "test message" in output
+
+    def test_unicode_supported(self):
+        """Поддержка Unicode в сообщениях."""
+        record = self._make_record("привет мир")
+        output = self.formatter.format(record)
+        assert "привет мир" in output
 
     def test_json_is_valid(self):
-        """Вывод должен быть валидным JSON."""
-        record = self._make_record("тест")
+        """JSON-мета — валидный JSON."""
+        record = self._make_record("test")
+        record.duration_ms = 42
         output = self.formatter.format(record)
-        # Не должно быть исключения
-        json.loads(output)
+        meta_match = re.search(r"(\{.*\})$", output)
+        assert meta_match
+        json.loads(meta_match.group(1))  # Не должно быть исключения

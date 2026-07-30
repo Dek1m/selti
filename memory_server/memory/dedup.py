@@ -47,17 +47,18 @@ class DedupEngine:
         content_hash = hashlib.sha256(content.encode()).hexdigest()
 
         if not self.config.dedup_enabled:
-            logger.info("Dedup disabled — force INSERT: namespace=%s hash=%s", namespace, content_hash[:16])
+            logger.info("Dedup disabled — force INSERT", extra={
+                "namespace": namespace, "hash": content_hash[:16],
+            })
             return DedupDecision(action=DedupAction.INSERT, content_hash=content_hash)
 
         # Exact dedup
         existing = await self.repository.find_by_content_hash(namespace, content_hash)
         if existing is not None:
             action = DedupAction.UPDATE if namespace == "user_facts" else DedupAction.SKIP
-            logger.info(
-                "Exact dedup match: namespace=%s action=%s id=%s",
-                namespace, action.value, existing.id,
-            )
+            logger.info("Exact dedup match", extra={
+                "namespace": namespace, "action": action.value, "id": existing.id,
+            })
             DEDUP_SKIPPED_TOTAL.labels(namespace=namespace, reason="exact").inc()
             return DedupDecision(
                 action=action,
@@ -82,17 +83,15 @@ class DedupEngine:
             existing_entity = (results[0].metadata or {}).get("entity_name", "").strip().lower()
 
             if incoming_entity and existing_entity and incoming_entity != existing_entity:
-                logger.info(
-                    "Semantic dedup skipped (different entity_name): incoming=%s existing=%s",
-                    incoming_entity, existing_entity,
-                )
+                logger.info("Semantic dedup skipped (different entity_name)", extra={
+                    "incoming": incoming_entity, "existing": existing_entity,
+                })
                 # Не дубль — entity_name разный, гранулы дополняют друг друга
             else:
                 best = results[0]
-                logger.info(
-                    "Semantic dedup match: namespace=%s score=%.4f id=%s",
-                    namespace, best.score, best.id,
-                )
+                logger.info("Semantic dedup match", extra={
+                    "namespace": namespace, "score": best.score, "id": best.id,
+                })
                 DEDUP_SKIPPED_TOTAL.labels(namespace=namespace, reason="semantic").inc()
                 return DedupDecision(
                     action=DedupAction.SKIP,
@@ -102,7 +101,7 @@ class DedupEngine:
                 )
 
         DEDUP_INSERTED_TOTAL.labels(namespace=namespace).inc()
-        logger.info("Dedup INSERT: namespace=%s hash=%s", namespace, content_hash[:16])
+        logger.info("Dedup INSERT", extra={"namespace": namespace, "hash": content_hash[:16]})
         return DedupDecision(
             action=DedupAction.INSERT,
             content_hash=content_hash,

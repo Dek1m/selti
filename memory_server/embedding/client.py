@@ -50,8 +50,8 @@ class EmbeddingClient(EmbeddingProvider):
         actual = len(test_embedding)
         if actual != self.dimension:
             logger.warning(
-                "Embedding dimension mismatch: configured=%d, actual=%d. Using actual=%d.",
-                self.dimension, actual, actual,
+                "Embedding dimension mismatch",
+                extra={"configured": self.dimension, "actual": actual},
             )
             self.dimension = actual
 

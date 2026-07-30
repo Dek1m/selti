@@ -400,3 +400,31 @@ class MemoryRepository:
                 by_link_type=by_link_type,
             )
 
+    # ── Sync: metadata.links → relations ──
+
+    async def sync_links_to_relations(self, memory_id: str) -> int:
+        """Синхронизировать metadata.links → relations для одной гранулы.
+
+        Удаляет только metadata-based связи (с пометкой synced_from),
+        сохраняя ручные связи через memory_link.
+        Возвращает количество созданных связей.
+        """
+        async with self.pool.acquire() as conn:
+            # Удаляем только metadata-based связи
+            await conn.execute(q.DELETE_SYNCED_RELATIONS, memory_id)
+            # Вставляем актуальные из metadata.links
+            rows = await conn.fetch(q.BACKFILL_RELATIONS_FROM_METADATA, memory_id)
+            return len(rows)
+
+    async def sync_links_batch(self, memory_ids: list[str]) -> int:
+        """Batch-синхронизация metadata.links → relations для списка гранул.
+
+        DELETE + INSERT в одном SQL-раунд-трипе.
+        Возвращает количество созданных связей.
+        """
+        if not memory_ids:
+            return 0
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(q.SYNC_LINKS_BATCH, memory_ids)
+            return len(rows)
+

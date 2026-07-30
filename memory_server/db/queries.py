@@ -261,3 +261,96 @@ DELETE_RESOURCE_HASH = """
     WHERE source_type = $1 AND source_id = $2
     RETURNING id
 """
+
+
+# ── Backfill: metadata.links → relations ──
+
+BACKFILL_RELATIONS_FROM_METADATA = """
+    WITH source_links AS (
+        SELECT
+            m.id AS source_id,
+            link->>'type' AS link_type,
+            link->>'target' AS target_str,
+            link->>'description' AS description,
+            CASE
+                WHEN link->>'target' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                THEN (link->>'target')::uuid
+                ELSE NULL
+            END AS target_id
+        FROM memories m,
+             jsonb_array_elements(m.metadata->'links') AS link
+        WHERE m.id = $1
+          AND m.metadata->'links' IS NOT NULL
+          AND jsonb_array_length(m.metadata->'links') > 0
+    )
+    INSERT INTO relations (source_id, target_id, target_name, link_type, description, weight, metadata)
+    SELECT
+        sl.source_id,
+        sl.target_id,
+        CASE WHEN sl.target_id IS NULL THEN sl.target_str ELSE NULL END,
+        sl.link_type,
+        sl.description,
+        1.0,
+        '{"synced_from": "metadata.links"}'::jsonb
+    FROM source_links sl
+    WHERE sl.link_type IS NOT NULL
+      AND (sl.target_id IS NULL OR EXISTS (SELECT 1 FROM memories WHERE id = sl.target_id))
+    ON CONFLICT (source_id, target_id, link_type) WHERE target_id IS NOT NULL
+    DO UPDATE SET
+        description = EXCLUDED.description,
+        weight = EXCLUDED.weight
+    RETURNING id
+"""
+
+# Удалить metadata-based связи для гранулы (source_id = $1)
+# Удаляются связи с пометкой synced_from = 'metadata.links'
+# Ручные связи (без пометки) сохраняются
+DELETE_SYNCED_RELATIONS = """
+    DELETE FROM relations
+    WHERE source_id = $1
+      AND metadata->>'synced_from' = 'metadata.links'
+"""
+
+SYNC_LINKS_BATCH = """
+    WITH source_links AS (
+        SELECT
+            m.id AS source_id,
+            link->>'type' AS link_type,
+            link->>'target' AS target_str,
+            link->>'description' AS description,
+            CASE
+                WHEN link->>'target' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                THEN (link->>'target')::uuid
+                ELSE NULL
+            END AS target_id
+        FROM memories m,
+             jsonb_array_elements(m.metadata->'links') AS link
+        WHERE m.id = ANY($1::uuid[])
+          AND m.metadata->'links' IS NOT NULL
+          AND jsonb_array_length(m.metadata->'links') > 0
+    ),
+    deleted AS (
+        DELETE FROM relations
+        WHERE source_id = ANY($1::uuid[])
+          AND metadata->>'synced_from' = 'metadata.links'
+        RETURNING id
+    )
+    INSERT INTO relations (source_id, target_id, target_name, link_type, description, weight, metadata)
+    SELECT
+        sl.source_id,
+        sl.target_id,
+        CASE WHEN sl.target_id IS NULL THEN sl.target_str ELSE NULL END,
+        sl.link_type,
+        sl.description,
+        1.0,
+        '{"synced_from": "metadata.links"}'::jsonb
+    FROM source_links sl
+    WHERE sl.link_type IS NOT NULL
+      AND (sl.target_id IS NULL OR EXISTS (SELECT 1 FROM memories WHERE id = sl.target_id))
+    ON CONFLICT (source_id, target_id, link_type) WHERE target_id IS NOT NULL
+    DO UPDATE SET
+        description = EXCLUDED.description,
+        weight = EXCLUDED.weight,
+        metadata = EXCLUDED.metadata
+    RETURNING id
+"""

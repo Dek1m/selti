@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -10,6 +9,7 @@ from memory_server.cache.redis_client import EmbeddingCache
 from memory_server.config import settings
 from memory_server.db.pool import close_pool, create_pool
 from memory_server.embedding.client import EmbeddingClient
+from memory_server.logger import setup_logging
 from memory_server.memory.namespace_repository import NamespaceRepository
 from memory_server.memory.repository_qdrant import MemoryRepository
 from memory_server.vector import create_qdrant_client
@@ -20,33 +20,8 @@ from migrations.run import run_migrations
 # Correlation ID через contextvars — пробрасывается из middleware __main__.py
 request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
 
-
-class JSONFormatter(logging.Formatter):
-    """Структурированный JSON-формат для логов."""
-
-    def format(self, record: logging.LogRecord) -> str:
-        log_data = {
-            "timestamp": self.formatTime(record),
-            "level": record.levelname,
-            "logger": record.name,
-            "message": record.getMessage(),
-        }
-        request_id = request_id_var.get(None) or getattr(record, "request_id", None)
-        if request_id:
-            log_data["request_id"] = request_id
-        if hasattr(record, "duration_ms"):
-            log_data["duration_ms"] = record.duration_ms
-        if record.exc_info and record.exc_info[0]:
-            log_data["exception"] = self.formatException(record.exc_info)
-        return json.dumps(log_data, ensure_ascii=False)
-
-
-_handler = logging.StreamHandler()
-_handler.setFormatter(JSONFormatter())
-logging.basicConfig(
-    level=getattr(logging, settings.log_level.upper(), logging.INFO),
-    handlers=[_handler],
-)
+# Инициализация логирования по стандарту Argenta Team
+setup_logging(level=settings.log_level)
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +68,7 @@ async def lifespan(server: FastMCP):
     qdrant_client = await create_qdrant_client(settings)
     repository = MemoryRepository(pool=pool, qdrant=qdrant_client, qdrant_collection=settings.qdrant_collection)
     if qdrant_client:
-        logger.info("Qdrant connected: url=%s collection=%s", settings.qdrant_url, settings.qdrant_collection)
+        logger.info("Qdrant connected", extra={"url": settings.qdrant_url, "collection": settings.qdrant_collection})
     ns_repo = NamespaceRepository(pool=pool)
     service = MemoryService(
         repository=repository,
@@ -102,10 +77,7 @@ async def lifespan(server: FastMCP):
         config=settings,
     )
 
-    logger.info(
-        "Memory server started: model=%s",
-        settings.embedding_model,
-    )
+    logger.info("Memory server started", extra={"model": settings.embedding_model})
 
     try:
         yield {"service": service, "cache": embedding_cache, "ns_repo": ns_repo}

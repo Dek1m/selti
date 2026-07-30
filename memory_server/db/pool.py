@@ -35,8 +35,12 @@ async def create_pool(
         # Таймаут на получение соединения из пула
         timeout=15.0,
     )
-    logger.info("create_pool: min=%d max=%d acquire_timeout=15.0s statement_timeout=45s",
-                min_size, max_size)
+    logger.info("create_pool", extra={
+        "min": min_size,
+        "max": max_size,
+        "acquire_timeout": 15.0,
+        "statement_timeout": "45s",
+    })
     return pool
 
 

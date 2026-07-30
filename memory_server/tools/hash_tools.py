@@ -28,7 +28,7 @@ WRITE_AUTHORIZED_AGENTS = {"memory-granulator", "akame", "admin"}
 async def _track_tool(tool_name: str, coro, *, timeout: float | None = TOOL_TIMEOUT_SECONDS):
     """Замерить и записать метрики для MCP tool с таймаутом."""
     start = time.monotonic()
-    logger.info("_track_tool: START tool=%s timeout=%s", tool_name, timeout)
+    logger.info("tool: START", extra={"tool": tool_name, "timeout": timeout})
     try:
         if timeout is not None:
             result = await asyncio.wait_for(coro, timeout=timeout)
@@ -37,24 +37,25 @@ async def _track_tool(tool_name: str, coro, *, timeout: float | None = TOOL_TIME
         duration = time.monotonic() - start
         MCP_TOOL_CALLS_TOTAL.labels(tool=tool_name, status="ok").inc()
         MCP_TOOL_DURATION_SECONDS.labels(tool=tool_name).observe(duration)
-        logger.info("_track_tool: DONE tool=%s duration=%.3fs", tool_name, duration)
+        logger.info("tool: DONE", extra={"tool": tool_name, "duration_ms": round(duration * 1000, 1)})
         return result
     except asyncio.TimeoutError:
         duration = time.monotonic() - start
         MCP_TOOL_CALLS_TOTAL.labels(tool=tool_name, status="timeout").inc()
         MCP_TOOL_DURATION_SECONDS.labels(tool=tool_name).observe(duration)
-        logger.error("_track_tool: TIMEOUT tool=%s duration=%.3fs timeout=%.1fs",
-                     tool_name, duration, timeout)
+        logger.error("tool: TIMEOUT", extra={
+            "tool": tool_name, "duration_ms": round(duration * 1000, 1), "timeout": timeout,
+        })
         raise TimeoutError(f"Tool '{tool_name}' timed out after {timeout}s") from None
     except Exception:
         duration = time.monotonic() - start
         MCP_TOOL_CALLS_TOTAL.labels(tool=tool_name, status="error").inc()
         MCP_TOOL_DURATION_SECONDS.labels(tool=tool_name).observe(duration)
-        logger.error("_track_tool: ERROR tool=%s duration=%.3fs", tool_name, duration)
+        logger.error("tool: ERROR", extra={"tool": tool_name, "duration_ms": round(duration * 1000, 1)})
         raise
     finally:
         duration = time.monotonic() - start
-        logger.info("_track_tool: FINALLY tool=%s total_duration=%.3fs", tool_name, duration)
+        logger.info("tool: FINALLY", extra={"tool": tool_name, "total_duration_ms": round(duration * 1000, 1)})
 
 
 def _validate_hash(content_hash: str) -> None:
@@ -89,7 +90,7 @@ async def hash_upsert(
 ) -> dict[str, Any]:
     """Store or update a content hash for change detection.
     Used by akame verifier to skip unchanged sessions/files."""
-    logger.info("hash_upsert: source_type=%s source_id=%s", source_type, source_id)
+    logger.info("hash_upsert", extra={"source_type": source_type, "source_id": source_id})
 
     # ACL + валидация
     _check_write_auth(ctx)
@@ -110,8 +111,10 @@ async def hash_upsert(
             size_bytes=size_bytes,
             metadata=metadata,
         ))
-        logger.info("hash_upsert: done id=%s created_at=%s updated_at=%s",
-                     result["id"], result["created_at"], result["updated_at"])
+        logger.info("hash_upsert: done", extra={
+            "id": result["id"], "created_at": str(result["created_at"]),
+            "updated_at": str(result["updated_at"]),
+        })
         return result
     except Exception as e:
         logger.exception("Failed to upsert hash")
@@ -125,7 +128,7 @@ async def hash_get(
     ctx: Context | None = None,
 ) -> dict[str, Any] | None:
     """Get stored hash for a specific source."""
-    logger.info("hash_get: source_type=%s source_id=%s", source_type, source_id)
+    logger.info("hash_get", extra={"source_type": source_type, "source_id": source_id})
 
     from memory_server.memory.hash_repository import HashRepository
 
@@ -135,7 +138,7 @@ async def hash_get(
     try:
         result = await _track_tool("hash_get", repo.get(source_type, source_id))
         if result:
-            logger.info("hash_get: found id=%s hash=%s", result["id"], result["content_hash"][:16])
+            logger.info("hash_get: found", extra={"id": result["id"], "hash": result["content_hash"][:16]})
         else:
             logger.info("hash_get: not found")
         return result
@@ -154,8 +157,10 @@ async def hash_list(
     ctx: Context | None = None,
 ) -> list[dict[str, Any]]:
     """List stored hashes with filters."""
-    logger.info("hash_list: source_type=%s updated_since=%s project=%s limit=%d",
-                source_type, updated_since, project, limit)
+    logger.info("hash_list", extra={
+        "source_type": source_type, "updated_since": updated_since,
+        "project": project, "limit": limit,
+    })
 
     from datetime import datetime
     from memory_server.memory.hash_repository import HashRepository
@@ -175,7 +180,7 @@ async def hash_list(
             limit=limit,
             offset=offset,
         ))
-        logger.info("hash_list: done count=%d", len(results))
+        logger.info("hash_list: done", extra={"count": len(results)})
         return results
     except Exception as e:
         logger.exception("Failed to list hashes")
@@ -189,9 +194,10 @@ async def hash_delete(
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Delete a stored hash record."""
-    logger.warning("hash_delete: source_type=%s source_id=%s agent=%s",
-                   source_type, source_id,
-                   getattr(getattr(getattr(ctx, "session", None), "client_info", None), "name", "unknown") if ctx else "unknown")
+    agent = getattr(getattr(getattr(ctx, "session", None), "client_info", None), "name", "unknown") if ctx else "unknown"
+    logger.warning("hash_delete", extra={
+        "source_type": source_type, "source_id": source_id, "agent": agent,
+    })
 
     # ACL
     _check_write_auth(ctx)
@@ -203,7 +209,7 @@ async def hash_delete(
 
     try:
         deleted_id = await _track_tool("hash_delete", repo.delete(source_type, source_id))
-        logger.warning("hash_delete: done deleted_id=%s", deleted_id)
+        logger.warning("hash_delete: done", extra={"deleted_id": deleted_id})
         return {"id": deleted_id, "success": deleted_id is not None}
     except Exception as e:
         logger.exception("Failed to delete hash")
