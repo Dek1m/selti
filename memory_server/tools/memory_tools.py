@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 
 import json
@@ -14,6 +15,28 @@ from memory_server.metrics import MCP_TOOL_CALLS_TOTAL, MCP_TOOL_DURATION_SECOND
 from memory_server.server import mcp
 
 logger = logging.getLogger(__name__)
+
+# Таймаут на каждый тул — 60 секунд
+TOOL_TIMEOUT_SECONDS = 60
+
+
+class _StepTimer:
+    """Контекстный менеджер для замера под-операций внутри тулов."""
+
+    def __init__(self, step_name: str):
+        self.step_name = step_name
+        self.start: float = 0
+
+    async def __aenter__(self):
+        self.start = time.monotonic()
+        logger.info("_step: START %s", self.step_name)
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        duration = time.monotonic() - self.start
+        status = "ERROR" if exc_type else "OK"
+        logger.info("_step: %s %s duration=%.3fs", status, self.step_name, duration)
+        return False
 
 
 def _coerce_metadata(metadata: Any) -> dict | None:
@@ -38,19 +61,36 @@ def _coerce_metadata(metadata: Any) -> dict | None:
     return metadata
 
 
-async def _track_tool(tool_name: str, coro):
-    """Замерить и записать метрики для MCP tool."""
+async def _track_tool(tool_name: str, coro, *, timeout: float | None = TOOL_TIMEOUT_SECONDS):
+    """Замерить и записать метрики для MCP tool с таймаутом."""
     start = time.monotonic()
+    logger.info("_track_tool: START tool=%s timeout=%s", tool_name, timeout)
     try:
-        result = await coro
+        if timeout is not None:
+            result = await asyncio.wait_for(coro, timeout=timeout)
+        else:
+            result = await coro
+        duration = time.monotonic() - start
         MCP_TOOL_CALLS_TOTAL.labels(tool=tool_name, status="ok").inc()
+        MCP_TOOL_DURATION_SECONDS.labels(tool=tool_name).observe(duration)
+        logger.info("_track_tool: DONE tool=%s duration=%.3fs", tool_name, duration)
         return result
+    except asyncio.TimeoutError:
+        duration = time.monotonic() - start
+        MCP_TOOL_CALLS_TOTAL.labels(tool=tool_name, status="timeout").inc()
+        MCP_TOOL_DURATION_SECONDS.labels(tool=tool_name).observe(duration)
+        logger.error("_track_tool: TIMEOUT tool=%s duration=%.3fs timeout=%.1fs",
+                     tool_name, duration, timeout)
+        raise TimeoutError(f"Tool '{tool_name}' timed out after {timeout}s") from None
     except Exception:
+        duration = time.monotonic() - start
         MCP_TOOL_CALLS_TOTAL.labels(tool=tool_name, status="error").inc()
+        MCP_TOOL_DURATION_SECONDS.labels(tool=tool_name).observe(duration)
+        logger.error("_track_tool: ERROR tool=%s duration=%.3fs", tool_name, duration)
         raise
     finally:
         duration = time.monotonic() - start
-        MCP_TOOL_DURATION_SECONDS.labels(tool=tool_name).observe(duration)
+        logger.info("_track_tool: FINALLY tool=%s total_duration=%.3fs", tool_name, duration)
 
 
 
@@ -108,14 +148,22 @@ async def memory_search(
     service = ctx.request_context.lifespan_context["service"]
     logger.info("memory_search: query=%s namespace=%s limit=%d threshold=%.2f user_id=%s",
                 query[:200], namespace, limit, threshold, user_id)
+
+    async def _search_with_steps():
+        async with _StepTimer("memory_search/step1/embed"):
+            query_embedding = await service.embedding.embed(query)
+        async with _StepTimer("memory_search/step2/sql_search"):
+            results = await service.repository.search(
+                query_embedding=query_embedding,
+                user_id=user_id,
+                limit=limit,
+                threshold=threshold,
+                namespace=namespace,
+            )
+        return results
+
     try:
-        results = await _track_tool("memory_search", service.search(
-            query=query,
-            user_id=user_id,
-            limit=limit,
-            threshold=threshold,
-            namespace=namespace,
-        ))
+        results = await _track_tool("memory_search", _search_with_steps())
         logger.info("memory_search: done count=%d", len(results))
         return [r.model_dump(mode="json") for r in results]
     except Exception as e:
@@ -277,7 +325,13 @@ async def memory_stats(
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
     logger.info("memory_stats: user_id=%s", user_id)
-    result = await _track_tool("memory_stats", service.get_stats(user_id))
+
+    async def _stats_with_steps():
+        async with _StepTimer("memory_stats/sql_stats"):
+            result = await service.repository.get_stats(user_id)
+        return result
+
+    result = await _track_tool("memory_stats", _stats_with_steps())
     logger.info("memory_stats: done namespaces=%d", len(result))
     return [item.model_dump(mode="json") for item in result]
 
@@ -296,13 +350,21 @@ async def memory_find_similar(
     service = ctx.request_context.lifespan_context["service"]
     logger.info("memory_find_similar: content_len=%d namespace=%s limit=%d threshold=%.2f user_id=%s",
                 len(content), namespace, limit, threshold, user_id)
-    results = await _track_tool("memory_find_similar", service.search(
-        query=content,
-        user_id=user_id,
-        limit=limit,
-        threshold=threshold,
-        namespace=namespace,
-    ))
+
+    async def _find_with_steps():
+        async with _StepTimer("find_similar/step1/embed"):
+            query_embedding = await service.embedding.embed(content)
+        async with _StepTimer("find_similar/step2/sql_search"):
+            results = await service.repository.search(
+                query_embedding=query_embedding,
+                user_id=user_id,
+                limit=limit,
+                threshold=threshold,
+                namespace=namespace,
+            )
+        return results
+
+    results = await _track_tool("memory_find_similar", _find_with_steps())
     logger.info("memory_find_similar: done count=%d", len(results))
     return [r.model_dump(mode="json") for r in results]
 
@@ -316,8 +378,16 @@ async def memory_get(
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
     logger.info("memory_get: id=%s", id)
+
+    async def _get_with_steps():
+        async with _StepTimer("memory_get/sql_get"):
+            record = await service.repository.get_by_id(id)
+        if record is None:
+            raise NotFoundError(id)
+        return record
+
     try:
-        record = await _track_tool("memory_get", service.get(memory_id=id))
+        record = await _track_tool("memory_get", _get_with_steps())
         logger.info("memory_get: done found=true id=%s namespace=%s", record.id, record.namespace)
         return record.model_dump(mode="json")
     except NotFoundError as e:
@@ -396,13 +466,19 @@ async def memory_list(
     service = ctx.request_context.lifespan_context["service"]
     logger.info("memory_list: namespace=%s limit=%d offset=%d user_id=%s",
                 namespace, limit, offset, user_id)
+
+    async def _list_with_steps():
+        async with _StepTimer("memory_list/sql_list"):
+            result = await service.repository.list(
+                user_id=user_id,
+                namespace=namespace,
+                limit=limit,
+                offset=offset,
+            )
+        return result
+
     try:
-        result = await _track_tool("memory_list", service.list(
-            user_id=user_id,
-            namespace=namespace,
-            limit=limit,
-            offset=offset,
-        ))
+        result = await _track_tool("memory_list", _list_with_steps())
         logger.info("memory_list: done total=%d items=%d", result.total, len(result.items))
         return {
             "items": [r.model_dump(mode="json") for r in result.items],
@@ -432,12 +508,18 @@ async def memory_recent(
         since = datetime.fromisoformat(since)
     service = ctx.request_context.lifespan_context["service"]
     logger.info("memory_recent: namespace=%s limit=%d since=%s", namespace, limit, since)
+
+    async def _recent_with_steps():
+        async with _StepTimer("memory_recent/sql_recent"):
+            results = await service.repository.recent(
+                namespace=namespace,
+                since=since,
+                limit=limit,
+            )
+        return results
+
     try:
-        results = await _track_tool("memory_recent", service.recent(
-            namespace=namespace,
-            since=since,
-            limit=limit,
-        ))
+        results = await _track_tool("memory_recent", _recent_with_steps())
         logger.info("memory_recent: done count=%d", len(results))
         return [r.model_dump(mode="json") for r in results]
     except Exception as e:
@@ -567,16 +649,21 @@ async def memory_get_relations(
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
     logger.info("memory_get_relations: id=%s link_type=%s", id, link_type)
+
+    async def _relations_with_steps():
+        async with _StepTimer("get_relations/sql_outgoing"):
+            outgoing = await service.repository.get_relations_by_source(id, link_type)
+        async with _StepTimer("get_relations/sql_incoming"):
+            incoming = await service.repository.get_relations_by_target(id, link_type)
+        return {"incoming": incoming, "outgoing": outgoing}
+
     try:
-        result = await _track_tool("memory_get_relations", service.get_relations(
-            memory_id=id,
-            link_type=link_type,
-        ))
+        result = await _track_tool("memory_get_relations", _relations_with_steps())
         logger.info("memory_get_relations: done incoming=%d outgoing=%d",
-                    len(result.incoming), len(result.outgoing))
+                    len(result["incoming"]), len(result["outgoing"]))
         return {
-            "incoming": [r.model_dump(mode="json") for r in result.incoming],
-            "outgoing": [r.model_dump(mode="json") for r in result.outgoing],
+            "incoming": [r.model_dump(mode="json") for r in result["incoming"]],
+            "outgoing": [r.model_dump(mode="json") for r in result["outgoing"]],
         }
     except NotFoundError as e:
         logger.info("memory_get_relations: not found id=%s", id)
@@ -602,17 +689,42 @@ async def memory_traverse(
     service = ctx.request_context.lifespan_context["service"]
     logger.info("memory_traverse: start_id=%s depth=%d link_types=%s",
                 start_id, depth, link_types)
+
+    async def _traverse_with_steps():
+        async with _StepTimer("traverse/step1/validate"):
+            start = await service.repository.get_by_id(start_id)
+            if start is None:
+                raise NotFoundError(f"Start granule: {start_id}")
+        async with _StepTimer("traverse/step2/cte_walk"):
+            nodes_raw = await service.repository.traverse(start_id, depth, link_types)
+        async with _StepTimer("traverse/step3/load_nodes_and_edges"):
+            nodes = []
+            all_edges = []
+            node_ids = {nd["node_id"] for nd in nodes_raw}
+            for n in nodes_raw:
+                record = await service.repository.get_by_id(n["node_id"])
+                if record:
+                    nodes.append({
+                        "id": record.id,
+                        "content": record.content[:200],
+                        "namespace": record.namespace,
+                        "depth": n["depth"],
+                    })
+                    edges = await service.repository.get_relations_by_source(
+                        n["node_id"], link_type=None,
+                    )
+                    all_edges.extend(
+                        e for e in edges if e.target_id and e.target_id in node_ids
+                    )
+        return {"nodes": nodes, "edges": all_edges}
+
     try:
-        result = await _track_tool("memory_traverse", service.traverse(
-            start_id=start_id,
-            depth=depth,
-            link_types=link_types,
-        ))
+        result = await _track_tool("memory_traverse", _traverse_with_steps())
         logger.info("memory_traverse: done nodes=%d edges=%d",
-                    len(result.nodes), len(result.edges))
+                    len(result["nodes"]), len(result["edges"]))
         return {
-            "nodes": result.nodes,
-            "edges": [e.model_dump(mode="json") for e in result.edges],
+            "nodes": result["nodes"],
+            "edges": [e.model_dump(mode="json") for e in result["edges"]],
         }
     except NotFoundError as e:
         logger.info("memory_traverse: start not found id=%s", start_id)
@@ -630,8 +742,14 @@ async def memory_graph_stats(
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
     logger.info("memory_graph_stats: called")
+
+    async def _graph_stats_with_steps():
+        async with _StepTimer("graph_stats/sql_stats"):
+            result = await service.repository.get_graph_stats()
+        return result
+
     try:
-        stats = await _track_tool("memory_graph_stats", service.get_graph_stats())
+        stats = await _track_tool("memory_graph_stats", _graph_stats_with_steps())
         logger.info("memory_graph_stats: done nodes=%d edges=%d orphans=%d",
                     stats.total_nodes, stats.total_edges, stats.orphans)
         return stats.model_dump(mode="json")
@@ -670,8 +788,14 @@ async def memory_namespaces(
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
     logger.info("memory_namespaces: called")
+
+    async def _namespaces_with_steps():
+        async with _StepTimer("namespaces/sql_list"):
+            namespaces = await service.ns_repo.list_all()
+        return namespaces
+
     try:
-        namespaces = await _track_tool("memory_namespaces", service.ns_repo.list_all())
+        namespaces = await _track_tool("memory_namespaces", _namespaces_with_steps())
         logger.info("memory_namespaces: done count=%d", len(namespaces))
         return [
             {"uid": ns.uid, "name": ns.name, "description": ns.description}

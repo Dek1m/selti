@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -17,23 +18,43 @@ HASH_REGEX = re.compile(r"^[a-f0-9]{64}$")
 # Лимит metadata: 64KB
 METADATA_MAX_SIZE = 65536
 
+# Таймаут на каждый тул — 60 секунд
+TOOL_TIMEOUT_SECONDS = 60
+
 # ACL: authorized agents for write operations
 WRITE_AUTHORIZED_AGENTS = {"memory-granulator", "akame", "admin"}
 
 
-async def _track_tool(tool_name: str, coro):
-    """Замерить и записать метрики для MCP tool."""
+async def _track_tool(tool_name: str, coro, *, timeout: float | None = TOOL_TIMEOUT_SECONDS):
+    """Замерить и записать метрики для MCP tool с таймаутом."""
     start = time.monotonic()
+    logger.info("_track_tool: START tool=%s timeout=%s", tool_name, timeout)
     try:
-        result = await coro
+        if timeout is not None:
+            result = await asyncio.wait_for(coro, timeout=timeout)
+        else:
+            result = await coro
+        duration = time.monotonic() - start
         MCP_TOOL_CALLS_TOTAL.labels(tool=tool_name, status="ok").inc()
+        MCP_TOOL_DURATION_SECONDS.labels(tool=tool_name).observe(duration)
+        logger.info("_track_tool: DONE tool=%s duration=%.3fs", tool_name, duration)
         return result
+    except asyncio.TimeoutError:
+        duration = time.monotonic() - start
+        MCP_TOOL_CALLS_TOTAL.labels(tool=tool_name, status="timeout").inc()
+        MCP_TOOL_DURATION_SECONDS.labels(tool=tool_name).observe(duration)
+        logger.error("_track_tool: TIMEOUT tool=%s duration=%.3fs timeout=%.1fs",
+                     tool_name, duration, timeout)
+        raise TimeoutError(f"Tool '{tool_name}' timed out after {timeout}s") from None
     except Exception:
+        duration = time.monotonic() - start
         MCP_TOOL_CALLS_TOTAL.labels(tool=tool_name, status="error").inc()
+        MCP_TOOL_DURATION_SECONDS.labels(tool=tool_name).observe(duration)
+        logger.error("_track_tool: ERROR tool=%s duration=%.3fs", tool_name, duration)
         raise
     finally:
         duration = time.monotonic() - start
-        MCP_TOOL_DURATION_SECONDS.labels(tool=tool_name).observe(duration)
+        logger.info("_track_tool: FINALLY tool=%s total_duration=%.3fs", tool_name, duration)
 
 
 def _validate_hash(content_hash: str) -> None:

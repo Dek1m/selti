@@ -7,6 +7,9 @@ import redis.asyncio as aioredis
 
 logger = logging.getLogger(__name__)
 
+# Таймаут на Redis операции — 10 секунд
+REDIS_TIMEOUT = 10.0
+
 
 class EmbeddingCache:
     """Redis-кеш для эмбеддингов. Ключ: sha256(text), значение: JSON-массив float."""
@@ -21,7 +24,10 @@ class EmbeddingCache:
             self._client = aioredis.from_url(
                 self.redis_url,
                 decode_responses=True,
+                socket_timeout=REDIS_TIMEOUT,
+                socket_connect_timeout=REDIS_TIMEOUT,
             )
+            logger.info("EmbeddingCache: connected to %s", self.redis_url)
         return self._client
 
     def _make_key(self, text: str) -> str:

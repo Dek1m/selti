@@ -129,12 +129,12 @@ class TestMemoryStats:
     @pytest.mark.asyncio
     async def test_stats_empty(self, mock_ctx, mock_service):
         """Пустая статистика → пустой список."""
-        mock_service.get_stats.return_value = []
+        mock_service.repository.get_stats = AsyncMock(return_value=[])
 
         result = await memory_stats(user_id="u1", ctx=mock_ctx)
 
         assert result == []
-        mock_service.get_stats.assert_awaited_once_with("u1")
+        mock_service.repository.get_stats.assert_awaited_once_with("u1")
 
     @pytest.mark.asyncio
     async def test_stats_with_data(self, mock_ctx, mock_service):
@@ -144,7 +144,7 @@ class TestMemoryStats:
             MemoryStatsItem(namespace="default", count=5, last_updated=now),
             MemoryStatsItem(namespace="user_facts", count=3, last_updated=now),
         ]
-        mock_service.get_stats.return_value = items
+        mock_service.repository.get_stats = AsyncMock(return_value=items)
 
         result = await memory_stats(user_id="u1", ctx=mock_ctx)
 
@@ -157,12 +157,12 @@ class TestMemoryStats:
     @pytest.mark.asyncio
     async def test_stats_nonexistent_user(self, mock_ctx, mock_service):
         """Для несуществующего user_id → пустой список."""
-        mock_service.get_stats.return_value = []
+        mock_service.repository.get_stats = AsyncMock(return_value=[])
 
         result = await memory_stats(user_id="ghost", ctx=mock_ctx)
 
         assert result == []
-        mock_service.get_stats.assert_awaited_once_with("ghost")
+        mock_service.repository.get_stats.assert_awaited_once_with("ghost")
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +177,8 @@ class TestMemoryFindSimilar:
         results = [
             SearchResult(id="1", content="similar", metadata={}, score=0.95),
         ]
-        mock_service.search.return_value = results
+        mock_service.embedding.embed = AsyncMock(return_value=[0.1, 0.2])
+        mock_service.repository.search = AsyncMock(return_value=results)
 
         result = await memory_find_similar(
             content="test query",
@@ -188,8 +189,9 @@ class TestMemoryFindSimilar:
         assert len(result) == 1
         assert result[0]["id"] == "1"
         assert result[0]["score"] == 0.95
-        mock_service.search.assert_awaited_once_with(
-            query="test query",
+        mock_service.embedding.embed.assert_awaited_once_with("test query")
+        mock_service.repository.search.assert_awaited_once_with(
+            query_embedding=[0.1, 0.2],
             user_id="u1",
             limit=10,
             threshold=0.7,
