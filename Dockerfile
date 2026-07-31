@@ -33,11 +33,9 @@ COPY VERSION ./VERSION
 
 EXPOSE 8000
 
-# --workers 4 = 4 процесса для параллельной обработки запросов
-# --loop uvloop = быстрый event loop (uvloop входит в uvicorn[standard])
-# --timeout-graceful-shutdown 30 = 30s на graceful shutdown
-# --backlog 2048 = очередь соединений
-ENTRYPOINT ["uvicorn", "memory_server.__main__:app", \
+# По умолчанию — uvicorn MCP сервер
+# В docker-compose можно переопределить command: для celery worker
+CMD ["uvicorn", "memory_server.__main__:app", \
     "--host", "0.0.0.0", "--port", "8000", \
     "--workers", "4", \
     "--loop", "uvloop", \
