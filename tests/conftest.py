@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -6,6 +6,22 @@ from memory_server.config import Settings
 from memory_server.memory.namespace_repository import NamespaceRepository
 from memory_server.memory.repository import MemoryRepository
 from memory_server.memory.service import MemoryService
+
+
+# ── Celery fixtures ─────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def celery_app():
+    """Настроить Celery для тестов — task_always_eager=True.
+
+    Выполняет задачи синхронно в том же процессе, без Redis/broker.
+    """
+    from memory_server.celery_app import app
+
+    app.conf.update(task_always_eager=True)
+    yield app
+    app.conf.update(task_always_eager=False)
 
 
 @pytest.fixture

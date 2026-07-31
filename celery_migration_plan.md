@@ -1,945 +1,1137 @@
-# План перехода selti на полный Celery
+# План перехода selti на Celery (обновлённый)
 
 **Дата:** 31.07.2026
 **Проект:** selti — Python MCP-сервер семантической памяти
-**Статус:** В разработке
+**Статус:** Актуализирован с учётом завершённой миграции pgvector → Qdrant
 **Автор:** Момо (Planner)
-**Обновлено:** Делегация ролей добавлена
+**Версия:** 2.0
 
 ---
 
-## Команда и зоны ответственности
+## Контекст: что УЖЕ сделано
 
-| Агент | Роль | Зоны в этом плане |
+Миграция pgvector → Qdrant **полностью завершена** (Фазы 0-6 plan.md). Текущее состояние:
+
+| Компонент | Статус | Детали |
 |---|---|---|
-| **Афина** | Team Lead | Оркестрация, контроль, согласование с Милордом |
-| **Момо** | Planner | Планирование, декомпозиция, актуализация плана |
-| **Эна** | Architect | Архитектурные решения, конфигурация Celery, ревью |
-| **Сона** | Programmer | Реализация tasks, миграция tools, cleanup |
-| **Катерина** | Tester | Unit/integration/load тесты, regression |
-| **Нора** | DB-Architect | Connection pool, оптимизация запросов |
-| **Рэй** | DevOps | Docker, CI/CD, деплой, инфраструктура |
-| **Лита** | Security | Аудит безопасности, secrets, auth |
-| **Тиамат** | Tech-Writer | Документация, README, runbooks |
-| **Мая** | Observability | Метрики, мониторинг, Grafana, алерты |
+| Qdrant | ✅ Работает | 1791 точка, HNSW индекс, on-disk |
+| repository_qdrant.py | ✅ Активен | dual-write: вектор → Qdrant, метаданные → PG |
+| server.py lifespan | ✅ Создаёт | pool, embedding_client, qdrant_client, repository, service |
+| requirements.txt | ✅ Есть | qdrant-client>=1.12.0 |
+| Docker | ✅ Есть | qdrant сервис в docker-compose.yml |
+| Tools | ✅ 18 штук | async с _track_tool, service из lifespan_context |
+
+**Вывод:** План миграции на Celery нужно писать "с чистого листа", не дублируя уже выполненные шаги.
 
 ---
 
-## Архитектурные решения (уже приняты)
+## Архитектурные решения
 
-| Параметр | Значение |
-|----------|----------|
-| Broker | Redis (уже есть в инфраструктуре) |
-| Backend | Redis (result store) |
-| Pool | prefork |
-| Очереди | `memory_ops` (high), `embed_ops` (medium), `batch_ops` (low) |
-| Workers | `memory-worker` (c=4, replicas=2), `embed-worker` (c=2, replicas=1), `batch-worker` (c=1, replicas=1) |
-| Мониторинг | Flower + Prometheus метрики |
-| Lazy init | Embedding models загружаются при старте worker |
-
----
-
-## Классификация операций по очередям
-
-### Очередь `memory_ops` (high priority)
-Операции с памятью, требующие минимального отклика:
-- `memory_store` — одиночное сохранение
-- `memory_get` — получение по ID (read-only, может остаться sync)
-- `memory_update` — обновление (включая ре-эмбеддинг)
-- `memory_delete` — удаление
-- `memory_archive` — архивация
-- `memory_link` / `memory_unlink` — управление связями
-- `hash_upsert` / `hash_get` / `hash_list` / `hash_delete` — хеши
-
-### Очередь `embed_ops` (medium priority)
-Операции, связанные с вычислением эмбеддингов:
-- `memory_search` — семантический поиск (embed + search)
-- `memory_find_similar` — поиск похожих
-- `memory_traverse` — обход графа (embed + CTE walk)
-- `memory_graph_stats` — статистика графа (read-only)
-- `memory_recent` / `memory_list` / `memory_stats` / `memory_namespaces` — read-only, можно в embed_ops или оставить sync
-
-### Очередь `batch_ops` (low priority)
-Пакетные операции:
-- `memory_ingest_batch` — батчевая вставка (embed + insert + sync)
-- `memory_forget` — удаление всех записей пользователя
-
-> **Важно:** MCP tools должны оставаться синхронными с точки зрения клиента (caller). Задачи в очередях — это фоновые операции. MCP tool вызывает Celery task, ждёт результат (или возвращает task ID для async).
+| Параметр | Значение | Обоснование |
+|----------|----------|-------------|
+| Broker | Redis (уже есть) | Минимальные изменения инфраструктуры |
+| Backend | Redis | Result store на том же Redis |
+| Pool | prefork | CPU-bound embedding операции |
+| Очереди | `memory_ops` (high), `embed_ops` (medium), `batch_ops` (low) | Разделение по приоритету |
+| Workers | memory-worker (c=4), embed-worker (c=2), batch-worker (c=1) | Балансировка нагрузки |
+| MCP API | **Без изменений** | Клиент не должен заметить переход |
+| sync/async | MCP tools → Celery task → sync execution | Workers выполняют sync код |
 
 ---
 
-## Фаза 0: Подготовка инфраструктуры (2 дня)
+## Критический путь
+
+```
+Фаза 0 (Инфра) → Фаза 1 (Tasks) → Фаза 2 (Tools) → Фаза 3 (Тесты) → Фаза 5 (Оптимизация)
+                                  ↘
+                                  Фаза 4 (Мониторинг + FastAPI) → Фаза 5
+```
+
+---
+
+## Фаза 0: Инфраструктура Celery (1.5 дня)
 
 ### Цель
-Настроить Celery app, Docker, очереди и минимальную конфигурацию.
+Настроить Celery app, очереди, Docker workers и минимальную конфигурацию.
 
-### Ответственный: **Рэй (DevOps)**
-### Участники: **Эна (architect)**, **Афина (Team Lead)**
-
-### Задачи по агентам
-
-| Агент | Задачи |
-|---|---|
-| **Рэй** | Docker Compose (workers, flower), Dockerfile, env vars, healthcheck |
-| **Эна** | Конфигурация Celery (queues, routing, serialization), celery_config.py |
-| **Афина** | Контроль, согласование с Милордом перед стартом следующей фазы |
-
-### Точки согласования
-- [ ] **Старт фазы:** Афина подтверждает, что Redis доступен в dev-окружении
-- [ ] **Конец фазы:** Рэй + Эна демонстрируют `celery inspect ping` → Афина принимает
+### Ответственный: **Рэй (DevOps)** + **Эна (Architect)**
 
 ### Шаги
 
-1. [ ] **Установка зависимостей**
-   - Файл: `requirements.txt`
-   - Добавить: `celery[redis]>=5.6.0`, `flower>=2.0.0`
-   - Добавить: `kombu>=5.3.0` (для Exchange/Queue)
+#### 0.1 Установка зависимостей
+- **Файл:** `requirements.txt`
+- **Действия:**
+  ```diff
+  + celery[redis]>=5.6.0
+  + flower>=2.0.0
+  + kombu>=5.3.0
+  ```
+- **Проверка:** `pip install -r requirements.txt` проходит
+- **Время:** 5 мин
 
-2. [ ] **Создать `memory_server/celery_app.py`**
-   - Celery instance с конфигурацией из `settings`
-   - `broker_url` и `result_backend` из env (Redis)
-   - Сериализация: только JSON
-   - `task_track_started=True`
-   - `task_time_limit=300`, `task_soft_time_limit=240`
-   - `task_acks_late=True`, `worker_prefetch_multiplier=1`
-   - `worker_send_task_events=True` (для Flower)
-   - Auto-discover tasks из `memory_server.tasks`
+#### 0.2 Создать `memory_server/celery_app.py`
+- **Новый файл**
+- **Содержимое:**
+  ```python
+  from celery import Celery
+  
+  app = Celery("selti")
+  
+  app.config_from_object({
+      "broker_url": settings.celery_broker_url,
+      "result_backend": settings.celery_result_backend,
+      "task_serializer": "json",
+      "result_serializer": "json",
+      "accept_content": ["json"],
+      "task_track_started": True,
+      "task_time_limit": 300,
+      "task_soft_time_limit": 240,
+      "task_acks_late": True,
+      "worker_prefetch_multiplier": 1,
+      "worker_send_task_events": True,
+      "task_routes": {
+          "memory.tasks.memory_*": {"queue": "memory_ops"},
+          "memory.tasks.embed_*": {"queue": "embed_ops"},
+          "memory.tasks.batch_*": {"queue": "batch_ops"},
+          "hash.tasks.*": {"queue": "memory_ops"},
+      },
+  })
+  
+  app.autodiscover_tasks(["memory_server.tasks"])
+  ```
+- **Время:** 30 мин
 
-3. [ ] **Создать `memory_server/tasks/__init__.py`**
-   - Пустой файл для пакета
+#### 0.3 Создать `memory_server/tasks/__init__.py`
+- **Новый файл** (пустой)
 
-4. [ ] **Создать `memory_server/tasks/celery_config.py`**
-   - Конфигурация очередей через `kombu.Exchange` и `kombu.Queue`:
-     ```python
-     memory_ops = Queue('memory_ops', Exchange('memory_ops'), routing_key='memory')
-     embed_ops = Queue('embed_ops', Exchange('embed_ops'), routing_key='embed')
-     batch_ops = Queue('batch_ops', Exchange('batch_ops'), routing_key='batch')
-     ```
-   - `task_routes` для маршрутизации задач по очередям
+#### 0.4 Обновить `memory_server/config.py`
+- **Файл:** `memory_server/config.py`
+- **Добавить поля:**
+  ```python
+  celery_broker_url: str = "redis://:@redis:6379/0"
+  celery_result_backend: str = "redis://:@redis:6379/1"
+  celery_worker_concurrency_memory: int = 4
+  celery_worker_concurrency_embed: int = 2
+  celery_worker_concurrency_batch: int = 1
+  ```
+- **Время:** 10 мин
 
-5. [ ] **Обновить `memory_server/config.py`**
-   - Добавить настройки Celery:
-     ```python
-     celery_broker_url: str = "redis://:@redis:6379/0"
-     celery_result_backend: str = "redis://:@redis:6379/1"
-     celery_worker_concurrency_memory: int = 4
-     celery_worker_concurrency_embed: int = 2
-     celery_worker_concurrency_batch: int = 1
-     ```
+#### 0.5 Обновить `.env.example`
+- **Добавить переменные:**
+  ```
+  CELERY_BROKER_URL=redis://:@redis:6379/0
+  CELERY_RESULT_BACKEND=redis://:@redis:6379/1
+  ```
 
-6. [ ] **Обновить `.env.example`**
-   - Добавить переменные Celery:
-     ```
-     CELERY_BROKER_URL=redis://:@redis:6379/0
-     CELERY_RESULT_BACKEND=redis://:@redis:6379/1
-     CELERY_WORKER_CONCURRENCY_MEMORY=4
-     CELERY_WORKER_CONCURRENCY_EMBED=2
-     CELERY_WORKER_CONCURRENCY_BATCH=1
-     ```
+#### 0.6 Обновить `docker-compose.yml`
+- **Добавить сервисы:**
+  ```yaml
+  celery-memory-worker:
+    build: .
+    command: celery -A memory_server.celery_app worker -Q memory_ops -l INFO -c 4 -n memory-worker@%h
+    env_file: .env
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      qdrant: { condition: service_healthy }
+    restart: unless-stopped
 
-7. [ ] **Обновить `docker-compose.yml`**
-   - Добавить сервис `celery-memory-worker`:
-     ```yaml
-     celery-memory-worker:
-       build: .
-       command: celery -A memory_server.celery_app worker -Q memory_ops -l INFO -c 4 -n memory-worker@%h
-       env_file: .env
-       depends_on:
-         redis:
-           condition: service_healthy
-         postgres:
-           condition: service_healthy
-       restart: unless-stopped
-     ```
-   - Добавить сервис `celery-embed-worker`:
-     ```yaml
-     celery-embed-worker:
-       build: .
-       command: celery -A memory_server.celery_app worker -Q embed_ops -l INFO -c 2 -n embed-worker@%h
-       env_file: .env
-       depends_on:
-         redis:
-           condition: service_healthy
-       restart: unless-stopped
-     ```
-   - Добавить сервис `celery-batch-worker`:
-     ```yaml
-     celery-batch-worker:
-       build: .
-       command: celery -A memory_server.celery_app worker -Q batch_ops -l INFO -c 1 -n batch-worker@%h
-       env_file: .env
-       depends_on:
-         redis:
-           condition: service_healthy
-       restart: unless-stopped
-     ```
-   - Добавить сервис `flower`:
-     ```yaml
-     flower:
-       image: mher/flower:2.0
-       command: celery -A memory_server.celery_app flower --port=5555 --enable_prometheus
-       ports:
-         - "5555:5555"
-       environment:
-         - CELERY_BROKER_URL=redis://redis:6379/0
-         - CELERY_RESULT_BACKEND=redis://redis:6379/1
-       depends_on:
-         - redis
-       restart: unless-stopped
-     ```
+  celery-embed-worker:
+    build: .
+    command: celery -A memory_server.celery_app worker -Q embed_ops -l INFO -c 2 -n embed-worker@%h
+    env_file: .env
+    depends_on:
+      redis: { condition: service_healthy }
+    restart: unless-stopped
 
-8. [ ] **Обновить `Dockerfile`**
-   - Добавить `COPY memory_server/celery_app.py` и `COPY memory_server/tasks/`
-   - Добавить ENTRYPOINT для worker (опционально, через docker-compose override)
+  celery-batch-worker:
+    build: .
+    command: celery -A memory_server.celery_app worker -Q batch_ops -l INFO -c 1 -n batch-worker@%h
+    env_file: .env
+    depends_on:
+      redis: { condition: service_healthy }
+    restart: unless-stopped
 
-9. [ ] **Создать `memory_server/tasks/worker_init.py`**
-   - Lazy init для embedding models при старте worker
-   - Использовать `celery.signals.worker_process_init` для инициализации
-   - Кэшировать EmbeddingClient, QdrantClient, asyncpg pool
+  flower:
+    image: mher/flower:2.0
+    command: celery -A memory_server.celery_app flower --port=5555 --enable_prometheus
+    ports: ["5555:5555"]
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+    depends_on: [redis]
+    restart: unless-stopped
+  ```
 
-### Проверка
-- [ ] `celery -A memory_server.celery_app worker -Q memory_ops -l INFO` стартует без ошибок
+#### 0.7 Обновить `Dockerfile`
+- **Действия:** Добавить копирование `celery_app.py` и `tasks/`
+-CMD entrypoint остаётся uvicorn (workers запускаются через docker-compose override)
+
+### Проверка Фазы 0
+- [ ] `celery -A memory_server.celery_app worker -Q memory_ops -l INFO` стартует
 - [ ] `celery -A memory_server.celery_app inspect ping` отвечает
 - [ ] Flower доступен на `http://localhost:5555`
-- [ ] Docker compose поднимает все сервисы
+- [ ] `docker compose up -d` поднимает все сервисы
 
 ### Риски
-- Redis может быть недоступен → healthcheck + `depends_on: condition: service_healthy`
-- Конфликт портов (Flower 5555) → проверить, что порт свободен
-
-### Откат
-- Удалить сервисы из docker-compose.yml
-- Откатить изменения в requirements.txt
-- Удалить celery_app.py и tasks/
+- Redis недоступен → healthcheck + `depends_on: condition: service_healthy`
+- Конфликт портов Flower (5555) → проверить доступность
 
 ---
 
-## Фаза 1: Инфраструктура задач (3 дня)
+## Фаза 1: Инфраструктура задач (2 дня)
 
 ### Цель
-Создать обёртку для Celery tasks с учётом специфики MCP tools: sync-интерфейс для клиента + async execution в workers.
+Создать Celery tasks, обёртку для sync выполнения в async контексте MCP tools, и singleton connections для workers.
 
-### Ответственный: **Сона (Programmer)**
-### Участники: **Эна (architect)**, **Нора (db-architect)**, **Афина (Team Lead)**
+### Ответственный: **Сона (Programmer)** + **Нора (DB-Architect)**
 
-### Задачи по агентам
+### Ключевой паттерн
 
-| Агент | Задачи |
-|---|---|
-| **Сона** | celery_app.py, tasks/__init__.py, memory_tasks.py, embed_tasks.py, batch_tasks.py, hash_tasks.py, serializers.py, errors.py |
-| **Эна** | Архитектура task_bridge, паттерны retry, design base.py |
-| **Нора** | Connection pool singleton (connections.py), оптимизация запросов, worker_init.py |
-| **Афина** | Контроль, проверка что задачи регистрируются корректно |
+```
+MCP Tool (async) → Celery task.delay() → Worker (sync) → Service → Repository → PG/Qdrant
+                       ↓
+              result.get(timeout) ← AsyncResult
+```
 
-### Точки согласования
-- [ ] **День 1:** Эна ревьюит архитектуру base.py и connections.py перед реализацией
-- [ ] **День 2:** Нора + Сона — pool создаётся при старте worker, метрики доступны
-- [ ] **Конец фазы:** Афина — `celery inspect registered` показывает все задачи
+**Важно:** MCP tools остаются async для клиента. Celery tasks выполняются sync в prefork workers.
 
 ### Шаги
 
-1. [ ] **Создать `memory_server/tasks/base.py`**
-   - Базовый класс задач с:
-     - Lazy init: пул соединений создаётся при первом вызове, не при импорте
-     - Автоматическое подключение к PG, Redis, Qdrant
-     - Таймауты (hard: 300s, soft: 240s)
-     - Retry с exponential backoff
-     - Логирование через `celery.utils.log.get_task_logger`
-     - Метрики через `prometheus_client`
+#### 1.1 Создать `memory_server/tasks/base.py`
+- **Базовый класс задач:**
+  ```python
+  from celery import shared_task
+  from memory_server.tasks.connections import get_pool, get_qdrant, get_embedding
+  
+  class MemoryTask:
+      """Базовый класс для задач памяти."""
+      
+      def __init__(self):
+          self._pool = None
+          self._qdrant = None
+          self._embedding = None
+      
+      @property
+      def pool(self):
+          if self._pool is None:
+              self._pool = get_pool()
+          return self._pool
+      
+      @property
+      def qdrant(self):
+          if self._qdrant is None:
+              self._qdrant = get_qdrant()
+          return self._qdrant
+      
+      @property
+      def embedding(self):
+          if self._embedding is None:
+              self._embedding = get_embedding()
+          return self._embedding
+  ```
+- **Время:** 40 мин
 
-2. [ ] **Создать `memory_server/tasks/memory_tasks.py`**
-   - Задачи для `memory_ops` очереди:
-     ```python
-     @shared_task(name='memory.store', queue='memory_ops', bind=True)
-     def store_memory(self, content, user_id, metadata, namespace, importance):
-         ...
+#### 1.2 Создать `memory_server/tasks/connections.py`
+- **Singleton connections для workers:**
+  ```python
+  import asyncpg
+  from qdrant_client import QdrantClient
+  from memory_server.config import settings
+  from memory_server.db.pool import create_pool
+  from memory_server.embedding.client import EmbeddingClient
+  from memory_server.cache.redis_client import EmbeddingCache
+  
+  _pool: asyncpg.Pool | None = None
+  _qdrant: QdrantClient | None = None
+  _embedding: EmbeddingClient | None = None
+  
+  def get_pool() -> asyncpg.Pool:
+      global _pool
+      if _pool is None:
+          import asyncio
+          dsn = settings.database_url.replace("postgresql+asyncpg://", "postgresql://")
+          _pool = asyncio.get_event_loop().run_until_complete(
+              create_pool(dsn=dsn, min_size=settings.db_min_connections, max_size=settings.db_max_connections)
+          )
+      return _pool
+  
+  def get_qdrant() -> QdrantClient | None:
+      global _qdrant
+      if _qdrant is None and settings.qdrant_enabled:
+          _qdrant = QdrantClient(url=settings.qdrant_url, timeout=30)
+      return _qdrant
+  
+  def get_embedding() -> EmbeddingClient:
+      global _embedding
+      if _embedding is None:
+          cache = EmbeddingCache(redis_url=settings.redis_url)
+          _embedding = EmbeddingClient(
+              api_url=settings.embedding_api_url,
+              api_key=settings.embedding_api_key,
+              model=settings.embedding_model,
+              dimension=settings.embedding_dimension,
+              cache=cache,
+          )
+      return _embedding
+  
+  def close_all():
+      global _pool, _qdrant, _embedding
+      if _pool:
+          import asyncio
+          asyncio.get_event_loop().run_until_complete(_pool.close())
+          _pool = None
+      if _qdrant:
+          _qdrant.close()
+          _qdrant = None
+      if _embedding:
+          import asyncio
+          asyncio.get_event_loop().run_until_complete(_embedding.aclose())
+          _embedding = None
+  ```
+- **Время:** 40 мин
 
-     @shared_task(name='memory.update', queue='memory_ops', bind=True)
-     def update_memory(self, memory_id, content, metadata, importance):
-         ...
+#### 1.3 Создать `memory_server/tasks/memory_tasks.py`
+- **Задачи для `memory_ops`:**
+  ```python
+  from celery import shared_task
+  
+  @shared_task(name="memory.store", queue="memory_ops", bind=True, max_retries=3)
+  def store_memory(self, content, user_id, metadata, namespace, importance):
+      """Сохранить память через Celery."""
+      # Lazy init service
+      from memory_server.memory.service import MemoryService
+      from memory_server.memory.namespace_repository import NamespaceRepository
+      
+      pool = get_pool()
+      qdrant = get_qdrant()
+      embedding = get_embedding()
+      ns_repo = NamespaceRepository(pool=pool)
+      repository = MemoryRepository(pool=pool, qdrant=qdrant, qdrant_collection=settings.qdrant_collection)
+      service = MemoryService(repository=repository, embedding_provider=embedding, namespace_repository=ns_repo, config=settings)
+      
+      import asyncio
+      record, action = asyncio.get_event_loop().run_until_complete(
+          service.store(content=content, user_id=user_id, metadata=metadata, namespace=namespace, importance=importance)
+      )
+      return {"id": record.id, "action": action.value}
+  
+  @shared_task(name="memory.search", queue="embed_ops", bind=True, max_retries=3)
+  def search_memory(self, query, user_id, limit, threshold, namespace):
+      """Поиск памяти через Celery."""
+      # ... аналогично
+      pass
+  
+  # ... аналогично для update, delete, archive, link, unlink, get_relations, traverse, graph_stats
+  ```
+- **Время:** 2 часа
 
-     @shared_task(name='memory.delete', queue='memory_ops', bind=True)
-     def delete_memory(self, memory_id):
-         ...
+#### 1.4 Создать `memory_server/tasks/embed_tasks.py`
+- **Задачи для `embed_ops`:**
+  - `memory.search`
+  - `memory.find_similar`
+  - `memory.traverse`
+- **Время:** 1 час
 
-     @shared_task(name='memory.archive', queue='memory_ops', bind=True)
-     def archive_memory(self, memory_id):
-         ...
+#### 1.5 Создать `memory_server/tasks/batch_tasks.py`
+- **Задачи для `batch_ops`:**
+  - `memory.ingest_batch`
+  - `memory.forget`
+- **Время:** 1 час
 
-     @shared_task(name='memory.link', queue='memory_ops', bind=True)
-     def create_link(self, source_id, target_id, link_type, description, weight):
-         ...
+#### 1.6 Создать `memory_server/tasks/hash_tasks.py`
+- **Задачи для `memory_ops`:**
+  - `hash.upsert`, `hash.get`, `hash.list`, `hash.delete`
+- **Время:** 30 мин
 
-     @shared_task(name='memory.unlink', queue='memory_ops', bind=True)
-     def delete_link(self, source_id, target_id, link_type):
-         ...
-     ```
+#### 1.7 Создать `memory_server/tasks/serializers.py`
+- **JSON-сериализация Pydantic моделей:**
+  ```python
+  def serialize_record(record: MemoryRecord) -> dict: ...
+  def deserialize_record(data: dict) -> MemoryRecord: ...
+  def serialize_search_result(result: SearchResult) -> dict: ...
+  ```
+- **Время:** 30 мин
 
-3. [ ] **Создать `memory_server/tasks/embed_tasks.py`**
-   - Задачи для `embed_ops` очереди:
-     ```python
-     @shared_task(name='memory.search', queue='embed_ops', bind=True)
-     def search_memory(self, query, user_id, limit, threshold, namespace):
-         ...
+#### 1.8 Создать `memory_server/tasks/signals.py`
+- **Celery signals для lifecycle:**
+  ```python
+  from celery.signals import worker_process_init, worker_process_shutdown
+  
+  @worker_process_init.connect
+  def init_worker(**kwargs):
+      get_pool()
+      get_qdrant()
+      get_embedding()
+  
+  @worker_process_shutdown.connect
+  def shutdown_worker(**kwargs):
+      close_all()
+  ```
+- **Время:** 20 мин
 
-     @shared_task(name='memory.find_similar', queue='embed_ops', bind=True)
-     def find_similar(self, content, user_id, limit, threshold, namespace):
-         ...
-
-     @shared_task(name='memory.traverse', queue='embed_ops', bind=True)
-     def traverse_graph(self, start_id, depth, link_types):
-         ...
-     ```
-
-4. [ ] **Создать `memory_server/tasks/batch_tasks.py`**
-   - Задачи для `batch_ops` очереди:
-     ```python
-     @shared_task(name='memory.ingest_batch', queue='batch_ops', bind=True)
-     def ingest_batch(self, entries, user_id):
-         ...
-
-     @shared_task(name='memory.forget', queue='batch_ops', bind=True)
-     def forget_user(self, user_id, namespace=None):
-         ...
-     ```
-
-5. [ ] **Создать `memory_server/tasks/hash_tasks.py`**
-   - Задачи для хешей (в `memory_ops`):
-     ```python
-     @shared_task(name='hash.upsert', queue='memory_ops', bind=True)
-     def upsert_hash(self, source_type, source_id, content_hash, size_bytes, metadata):
-         ...
-
-     @shared_task(name='hash.get', queue='memory_ops', bind=True)
-     def get_hash(self, source_type, source_id):
-         ...
-
-     @shared_task(name='hash.list', queue='memory_ops', bind=True)
-     def list_hashes(self, source_type, updated_since, project, limit, offset):
-         ...
-
-     @shared_task(name='hash.delete', queue='memory_ops', bind=True)
-     def delete_hash(self, source_type, source_id):
-         ...
-     ```
-
-6. [ ] **Создать `memory_server/tasks/connections.py`**
-   - Singleton-подключения для workers:
-     ```python
-     _pool: asyncpg.Pool | None = None
-     _qdrant: QdrantClient | None = None
-     _embedding: EmbeddingClient | None = None
-
-     def get_pool() -> asyncpg.Pool: ...
-     def get_qdrant() -> QdrantClient | None: ...
-     def get_embedding_client() -> EmbeddingClient: ...
-     ```
-   - Инициализация при старте worker через `celery.signals.worker_process_init`
-   - Закрытие при остановке через `celery.signals.worker_process_shutdown`
-
-7. [ ] **Создать `memory_server/tasks/serializers.py`**
-   - JSON-сериализация Pydantic моделей (MemoryRecord → dict → JSON)
-   - Десериализация: dict → Pydantic models
-   - Обработка datetime, UUID
-
-8. [ ] **Создать `memory_server/tasks/errors.py`**
-   - Кастомные исключения для tasks:
-     ```python
-     class TaskValidationError(ValueError): ...
-     class TaskTimeoutError(Exception): ...
-     class TaskDependencyError(Exception): ...
-     ```
-
-### Проверка
-- [ ] Задачи регистрируются: `celery -A memory_server.celery_app inspect registered`
+### Проверка Фазы 1
+- [ ] `celery -A memory_server.celery_app inspect registered` показывает все задачи
 - [ ] Задачи маршрутизируются в правильные очереди
-- [ ] Connection pool создаётся при старте worker
-- [ ] Логи worker содержат информацию о подключении к PG/Redis/Qdrant
+- [ ] Pool создаётся при старте worker
+- [ ] `celery -A memory_server.celery_app call memory.store --args='["test","user1"]'` работает
 
 ### Риски
-- asyncpg pool может истощиться → настроить `db_min_connections` / `db_max_connections`
-- Qdrant sync client может блокировать prefork worker → использовать timeout
-- Embedding model может не загрузиться → retry + graceful degradation
-
-### Откат
-- Удалить `memory_server/tasks/`
-- Откатить `celery_app.py`
+- asyncpg pool может истощиться → настроить min/max connections
+- Qdrant sync client может блокировать prefork worker → timeout=30s
+- EmbeddingClient требует async → `asyncio.get_event_loop().run_until_complete()`
 
 ---
 
-## Фаза 2: Миграция MCP Tools (5 дней)
+## Фаза 2: Миграция MCP Tools (3 дня)
 
 ### Цель
-Переключить MCP tools с прямых вызовов service на Celery tasks. MCP tool должен вызвать task и получить результат.
+Переключить MCP tools с прямых вызовов service на Celery tasks.
 
-### Ответственный: **Сона (Programmer)**
-### Участники: **Эна (architect)**, **Катерина (tester)**, **Афина (Team Lead)**
+### Ответственный: **Сона (Programmer)** + **Эна (Architect)**
 
-### Задачи по агентам
+### Ключевые решения
 
-| Агент | Задачи |
-|---|---|
-| **Сона** | task_bridge.py, миграция memory_tools.py, hash_tools.py, обновление server.py, task_results.py, __main__.py |
-| **Эна** | Ревью архитектурных решений, контроль что tool остаётся async для клиента |
-| **Катерина** | Smoke тесты после каждого tool (не полные — полные в Фазе 3) |
-| **Афина** | Контроль, приоритезация, эскалация проблем |
-
-### Точки согласования
-- [ ] **День 1:** Эна ревьюит task_bridge.py — паттерн sync↔async одобрен
-- [ ] **День 3:** Катерина — memory_store, memory_search, memory_get работают через Celery
-- [ ] **День 4:** Сона — все 25 MCP tools переключены, Эна ревьюит
-- [ ] **Конец фазы:** Афина — интеграционный smoke test, нет regressions
+1. **Tool остаётся async** → вызывает `app.send_task()` → `result.get(timeout)`
+2. **Service создаётся в lifespan** → нужен для health-check и potentially sync operations
+3. **ACL/auth проверка** → остаётся на уровне tool (до отправки в Celery)
+4. **Timeout** → tool timeout > task timeout > soft_time_limit
 
 ### Шаги
 
-1. [ ] **Создать `memory_server/tools/task_bridge.py`**
-   - Мост между sync MCP tools и async Celery tasks:
-     ```python
-     def run_task_sync(task_name: str, timeout: int = 60, **kwargs) -> Any:
-         """Вызвать Celery task и дождаться результата (sync)."""
-         result = app.send_task(task_name, kwargs=kwargs)
-         return result.get(timeout=timeout)
+#### 2.1 Создать `memory_server/tools/task_bridge.py`
+- **Мост sync↔async:**
+  ```python
+  import asyncio
+  from memory_server.celery_app import app
+  
+  async def run_task_async(task_name: str, timeout: int = 120, **kwargs) -> Any:
+      """Вызвать Celery task и дождаться результата (async)."""
+      result = app.send_task(task_name, kwargs=kwargs)
+      return await asyncio.to_thread(result.get, timeout=timeout)
+  
+  def run_task_sync(task_name: str, timeout: int = 120, **kwargs) -> Any:
+      """Вызвать Celery task и дождаться результата (sync, для workers)."""
+      result = app.send_task(task_name, kwargs=kwargs)
+      return result.get(timeout=timeout)
+  ```
+- **Время:** 30 мин
 
-     async def run_task_async(task_name: str, timeout: int = 60, **kwargs) -> Any:
-         """Вызвать Celery task и дождаться результата (async)."""
-         result = app.send_task(task_name, kwargs=kwargs)
-         return await asyncio.to_thread(result.get, timeout=timeout)
-     ```
+#### 2.2 Модифицировать `memory_server/tools/memory_tools.py`
+- **Для каждого tool:** заменить прямой вызов `service.*` на Celery task
+- **Пример:**
+  ```python
+  @mcp.tool()
+  async def memory_store(content, user_id, metadata, namespace, importance, ctx):
+      metadata = _coerce_metadata(metadata)
+      result = await run_task_async(
+          "memory.store",
+          content=content, user_id=user_id,
+          metadata=metadata, namespace=namespace,
+          importance=importance,
+      )
+      return result
+  ```
+- **Важно:** 
+  - Tool остаётся async для клиента
+  - Auth/ACL проверка — до вызова run_task_async
+  - Timeout tool = timeout task + запас (120s > 60s soft)
+- **Файлы:** `memory_tools.py`, `hash_tools.py`
+- **Время:** 2 часа
 
-2. [ ] **Модифицировать `memory_server/tools/memory_tools.py`**
-   - Каждый tool вызывает Celery task вместо `service.*`:
-     ```python
-     @mcp.tool()
-     async def memory_store(content, user_id, metadata, namespace, importance, ctx):
-         result = await run_task_async(
-             'memory.store',
-             content=content, user_id=user_id,
-             metadata=metadata, namespace=namespace,
-             importance=importance,
-         )
-         return result
-     ```
-   - **Важно:** tool остаётся async для клиента, но выполняется через Celery
-   - Таймаут tool = таймаут Celery task + запас
+#### 2.3 Обновить `memory_server/server.py`
+- **Lifespan:** Оставить service для health-check
+- **Добавить:** Проверку Celery health в health endpoint
+- **Время:** 30 мин
 
-3. [ ] **Модифицировать `memory_server/tools/hash_tools.py`**
-   - Аналогичная миграция для hash tools
-   - ACL проверка остаётся на уровне tool (до отправки в Celery)
+#### 2.4 Создать `memory_server/tools/task_results.py`
+- **Проверка статуса задач:**
+  ```python
+  @mcp.tool()
+  async def task_status(task_id: str):
+      result = AsyncResult(task_id, app=celery_app)
+      return {"task_id": task_id, "status": result.state, "result": result.result}
+  ```
+- **Время:** 20 мин
 
-4. [ ] **Обновить `memory_server/server.py`**
-   - Lifespan: убрать прямое создание service (сервис теперь в workers)
-   - Lifespan: оставить только health-check pool для HTTP health endpoint
-   - Или: создать lightweight service только для health-check
+#### 2.5 Создать `memory_server/tasks/errors.py`
+- **Кастомные исключения:**
+  ```python
+  class TaskValidationError(ValueError): ...
+  class TaskTimeoutError(Exception): ...
+  class TaskDependencyError(Exception): ...
+  ```
+- **Время:** 10 мин
 
-5. [ ] **Создать `memory_server/tools/task_results.py`**
-   - Проверка статуса задач (для async режима):
-     ```python
-     @mcp.tool()
-     async def task_status(task_id: str):
-         result = AsyncResult(task_id, app=celery_app)
-         return {"task_id": task_id, "status": result.state, "result": result.result}
-     ```
-
-6. [ ] **Обновить `memory_server/__main__.py`**
-   - Добавить endpoint `/tasks/{task_id}` для проверки статуса задач
-   - Добавить endpoint `/tasks` для списка активных задач
-
-### Проверка
+### Проверка Фазы 2
 - [ ] `memory_store` сохраняет через Celery → запись в БД
 - [ ] `memory_search` ищет через Celery → результат возвращается клиенту
 - [ ] `memory_ingest_batch` обрабатывает батч через batch_ops очередь
-- [ ] Все 25 MCP tools работают через Celery
+- [ ] Все 18 MCP tools работают через Celery
 - [ ] Таймауты работают корректно
 - [ ] Retry при ошибках Redis/PG работает
 
 ### Риски
-- **Критический:** MCP tool блокируется пока task не выполнится → таймаут 60s
+- **Критический:** MCP tool блокируется пока task не выполнится
   - Митигация: `task_soft_time_limit=240` < `tool_timeout=300`
-- Сервис больше не создаёт pool в lifespan → health endpoint должен работать без pool
-- Кэш эмбеддингов может не работать в worker context → проверить EmbeddingCache
-
-### Откат
-- Откатить `memory_tools.py` и `hash_tools.py` к прямым вызовам service
-- Восстановить lifespan в `server.py`
+- Service больше не создаёт pool в lifespan → health endpoint должен работать без pool
+  - Решение: Health endpoint проверяет Celery ping, а не PG pool
 
 ---
 
-## Фаза 3: Тесты и совместимость (3 дня)
+## Фаза 3: Тесты (2 дня)
 
 ### Цель
 Убедиться, что все существующие тесты продолжают работать, и написать тесты для Celery tasks.
 
-### Ответственный: **Катерина (Tester)**
-### Участники: **Сона (Programmer)**, **Афина (Team Lead)**
-
-### Задачи по агентам
-
-| Агент | Задачи |
-|---|---|
-| **Катерина** | Unit-тесты tasks (CELERY_ALWAYS_EAGER), ~30-40 тестов, обновление conftest.py |
-| **Сона** | Интеграционные тесты с Redis broker, тесты serializers |
-| **Катерина** | Load тесты (100 параллельных операций), regression testing |
-| **Афина** | Контроль, проверка покрытия ≥80% |
-
-### Точки согласования
-- [ ] **День 1:** Катерина — conftest.py с CELERY_ALWAYS_EAGER готов, unit-тесты запускаются
-- [ ] **День 2:** Сона — интеграционные тесты с реальным Redis проходят
-- [ ] **Конец фазы:** Афина — `pytest -v` все тесты зелёные, покрытие ≥80%
+### Ответственный: **Катерина (Tester)** + **Сона (Programmer)**
 
 ### Шаги
 
-1. [ ] **Обновить `tests/conftest.py`**
-   - Добавить fixture для mock Celery app:
-     ```python
-     @pytest.fixture
-     def celery_app():
-         from memory_server.celery_app import app
-         app.conf.update(CELERY_ALWAYS_EAGER=True)
-         return app
-     ```
-   - `CELERY_ALWAYS_EAGER=True` для unit-тестов (выполнение sync)
+#### 3.1 Обновить `tests/conftest.py`
+- **Добавить fixture для Celery:**
+  ```python
+  @pytest.fixture
+  def celery_app():
+      from memory_server.celery_app import app
+      app.conf.update(CELERY_ALWAYS_EAGER=True)
+      return app
+  ```
 
-2. [ ] **Создать `tests/test_celery_tasks.py`**
-   - Тесты для каждой задачи:
-     - Happy path (успешное выполнение)
-     - Error cases (невалидные данные, таймауты)
-     - Retry behavior
-     - Connection failures
-   - ~30-40 тестов
+#### 3.2 Создать `tests/test_celery_tasks.py`
+- **Тесты для каждой задачи:**
+  - Happy path (успешное выполнение)
+  - Error cases (невалидные данные, таймауты)
+  - Retry behavior
+  - Connection failures
+- **~30-40 тестов**
 
-3. [ ] **Обновить `tests/test_tools.py`**
-   - Mock Celery tasks в tool тестах
-   - Проверить что tools корректно вызывают tasks
-   - Проверить таймауты и error handling
+#### 3.3 Создать `tests/test_serializers.py`
+- **Тесты JSON-сериализации:**
+  - datetime, UUID, None, nested dicts
+  - Edge cases
 
-4. [ ] **Обновить `tests/test_service.py`**
-   - Сервисные тесты остаются (тестируют business logic без Celery)
-   - Добавить тесты для serializ/deserializ через JSON
+#### 3.4 Обновить `tests/test_tools.py`
+- **Mock Celery tasks** в tool тестах
+- Проверить что tools корректно вызывают tasks
 
-5. [ ] **Создать `tests/test_serializers.py`**
-   - Тесты JSON-сериализации Pydantic моделей
-   - Edge cases: datetime, UUID, None, nested dicts
+#### 3.5 Проверить все существующие тесты
+- `pytest tests/ -v` — все 14 файлов тестов должны пройти
 
-6. [ ] **Обновить `tests/test_config.py`**
-   - Тесты для Celery-конфигурации
-   - Проверка что настройки берутся из env
-
-7. [ ] **Проверить все существующие тесты**
-   - Запустить `pytest -v` — все 19 файлов тестов должны пройти
-   - Убедиться что моки не сломаны
-
-### Проверка
+### Проверка Фазы 3
 - [ ] `pytest tests/ -v` — все тесты проходят
 - [ ] `pytest tests/test_celery_tasks.py -v` — новые тесты проходят
-- [ ] Покрытие кода не ниже 80% для tasks
-
-### Риски
-- `CELERY_ALWAYS_EAGER` может вести себя иначе чем реальный worker → интеграционные тесты отдельно
-- Моки asyncpg pool могут конфликтовать с Celery pool → изолировать
-
-### Откат
-- Удалить `tests/test_celery_tasks.py`, `tests/test_serializers.py`
-- Откатить conftest.py
+- [ ] Покрытие кода ≥80% для tasks
 
 ---
 
-## Фаза 4: Мониторинг и метрики (2 дня)
+## Фаза 4: Мониторинг + Логирование (2 дня)
 
 ### Цель
-Настроить метрики Celery workers, интеграцию с Prometheus, дашборды.
+Настроить Prometheus метрики, structured logging, alerting rules, health checks для Celery workers.
 
-### Ответственный: **Мая (Observability)**
-### Участники: **Рэй (DevOps)**, **Афина (Team Lead)**
+### Ответственный: **Мая (Observability)** + **Сона (Programmer)**
 
-### Задачи по агентам
+### Архитектура observability
 
-| Агент | Задачи |
-|---|---|
-| **Мая** | Prometheus метрики (athena_celery_*), signals.py, Grafana дашборд celery.json |
-| **Рэй** | Настройка alerting в prometheus-rules.yml, healthcheck workers в docker-compose |
-| **Мая** | HTTP endpoints (/tasks/{id}, /workers, /health) — если не в Фазе 5 |
-| **Афина** | Контроль, проверка что метрики появляются в Prometheus |
-
-### Точки согласования
-- [ ] **День 1:** Мая — метрики celery_* экспортируются, Рэй — scraping настроен
-- [ ] **Конец фазы:** Афина — Grafana дашборд отображает данные, алерты протестированы
+```
+┌─────────────────────────────────────────────────┐
+│                   selti-worker                   │
+│  ┌──────────┐  ┌──────────┐  ┌──────────────┐  │
+│  │ Prometheus│  │ structlog│  │ Celery       │  │
+│  │ metrics  │  │ JSON logs│  │ signals      │  │
+│  └────┬─────┘  └────┬─────┘  └──────┬───────┘  │
+│       │              │               │           │
+│  ┌────┴──────────────┴───────────────┴───────┐  │
+│  │         metrics.py + logging.py           │  │
+│  └─────────────────────┬─────────────────────┘  │
+│                        │ :9090/metrics           │
+└────────────────────────┼────────────────────────┘
+                         │
+              ┌──────────▼──────────┐
+              │     Prometheus      │
+              │  (scrape :9090)     │
+              └──────────┬──────────┘
+                         │
+              ┌──────────▼──────────┐
+              │   Alertmanager      │
+              │  (webhook/telegram) │
+              └─────────────────────┘
+```
 
 ### Шаги
 
-1. [ ] **Обновить `memory_server/metrics.py`**
-   - Добавить Celery-метрики:
-     ```python
-     CELERY_TASKS_TOTAL = Counter(
-         "athena_celery_tasks_total",
-         "Total Celery tasks executed",
-         ["task", "queue", "status"],
-     )
+#### 4.1 Обновить `memory_server/metrics.py` — полный набор Celery метрик
 
-     CELERY_TASK_DURATION = Histogram(
-         "athena_celery_task_duration_seconds",
-         "Celery task execution duration",
-         ["task", "queue"],
-         buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0),
-     )
+**Обязательные метрики (production):**
 
-     CELERY_TASK_RETRIES = Counter(
-         "athena_celery_task_retries_total",
-         "Total Celery task retries",
-         ["task"],
-     )
+```python
+from prometheus_client import Counter, Histogram, Gauge, Info
 
-     CELERY_QUEUE_LENGTH = Gauge(
-         "athena_celery_queue_length",
-         "Approximate queue length",
-         ["queue"],
-     )
-     ```
+# --- Task lifecycle (ядро) ---
+CELERY_TASK_SENT = Counter(
+    "celery_task_sent_total",
+    "Task sent to broker",
+    ["task", "queue"],
+)
 
-2. [ ] **Создать `memory_server/tasks/signals.py`**
-   - Сигналы Celery для метрик:
-     ```python
-     from celery.signals import task_success, task_failure, task_retry
+CELERY_TASK_RECEIVED = Counter(
+    "celery_task_received_total",
+    "Task received by worker",
+    ["task", "queue"],
+)
 
-     @task_success.connect
-     def handle_task_success(sender, **kwargs): ...
+CELERY_TASK_STARTED = Counter(
+    "celery_task_started_total",
+    "Task started execution",
+    ["task", "queue"],
+)
 
-     @task_failure.connect
-     def handle_task_failure(sender, **kwargs): ...
+CELERY_TASK_SUCCEEDED = Counter(
+    "celery_task_succeeded_total",
+    "Task completed successfully",
+    ["task", "queue"],
+)
 
-     @task_retry.connect
-     def handle_task_retry(sender, **kwargs): ...
-     ```
+CELERY_TASK_FAILED = Counter(
+    "celery_task_failed_total",
+    "Task failed",
+    ["task", "queue", "exception"],
+)
 
-3. [ ] **Обновить `monitoring/alerts/prometheus-rules.yml`**
-   - Добавить алерты Celery:
-     ```yaml
-     - name: celery
-       interval: 30s
-       rules:
-         - alert: CeleryWorkerDown
-           expr: athena_celery_workers_active == 0
-           for: 2m
-           labels:
-             severity: critical
-           annotations:
-             summary: "Нет активных Celery workers"
+CELERY_TASK_RETRIES = Counter(
+    "celery_task_retries_total",
+    "Task retry attempts",
+    ["task", "queue"],
+)
 
-         - alert: CeleryTaskFailureRateHigh
-           expr: rate(athena_celery_tasks_total{status="FAILURE"}[5m]) > 0.1
-           for: 5m
-           labels:
-             severity: warning
-           annotations:
-             summary: "High Celery task failure rate"
+CELERY_TASK_REJECTED = Counter(
+    "celery_task_rejected_total",
+    "Task rejected by worker",
+    ["task", "queue"],
+)
 
-         - alert: CeleryTaskDurationHigh
-           expr: histogram_quantile(0.95, rate(athena_celery_task_duration_seconds_bucket[5m])) > 60
-           for: 5m
-           labels:
-             severity: warning
-           annotations:
-             summary: "P95 task duration > 60s"
+CELERY_TASK_REVOKED = Counter(
+    "celery_task_revoked_total",
+    "Task revoked/cancelled",
+    ["task"],
+)
 
-         - alert: CeleryQueueBacklog
-           expr: athena_celery_queue_length > 100
-           for: 10m
-           labels:
-             severity: warning
-           annotations:
-             summary: "Celery queue backlog > 100 tasks"
-     ```
+# --- Duration (histogram) ---
+CELERY_TASK_DURATION = Histogram(
+    "celery_task_duration_seconds",
+    "Task execution duration (started → succeeded/failed)",
+    ["task", "queue"],
+    buckets=[0.1, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300],
+)
 
-4. [ ] **Создать `monitoring/dashboards/celery.json`**
-   - Дашборд Grafana с панелями:
-     - Task success/failure rate
-     - Task duration (P50, P95, P99)
-     - Queue length per queue
-     - Active workers
-     - Retry rate
+CELERY_TASK_LATENCY = Histogram(
+    "celery_task_latency_seconds",
+    "Time from sent to started (queue wait + pickup)",
+    ["task", "queue"],
+    buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30],
+)
 
-5. [ ] **Обновить healthcheck в `docker-compose.yml`**
-   - Health-check для workers:
-     ```yaml
-     healthcheck:
-       test: ["CMD", "celery", "-A", "memory_server.celery_app", "inspect", "ping", "--timeout=5"]
-       interval: 30s
-       timeout: 10s
-       retries: 3
-     ```
+# --- Worker state ---
+CELERY_WORKER_online = Gauge(
+    "celery_worker_online",
+    "Worker online status (1=online, 0=offline)",
+    ["worker"],
+)
 
-### Проверка
-- [ ] `curl http://localhost:8000/metrics` содержит `athena_celery_*` метрики
-- [ ] Flower показывает активных workers
-- [ ] Алерты срабатывают при模拟ной ошибке
-- [ ] Grafana дашборд отображает данные
+CELERY_WORKER_ACTIVE_TASKS = Gauge(
+    "celery_worker_active_tasks",
+    "Number of active tasks per worker",
+    ["worker"],
+)
 
-### Риски
-- Метрики могут замедлить workers → sample rate, если нужно
-- Prometheus может не собирать метрики workers → проверить scraping config
+CELERY_WORKER_PROCESSES = Gauge(
+    "celery_worker_processes",
+    "Number of child processes per worker",
+    ["worker"],
+)
 
-### Откат
-- Удалить Celery-метрики из `metrics.py`
-- Удалить `celery.json` дашборд
-- Откатить prometheus-rules.yml
+CELERY_WORKER_RSS_BYTES = Gauge(
+    "celery_worker_rss_bytes",
+    "Worker RSS memory usage",
+    ["worker"],
+)
 
----
+# --- Queue depth ---
+CELERY_QUEUE_LENGTH = Gauge(
+    "celery_queue_length",
+    "Number of unacknowledged messages in queue",
+    ["queue"],
+)
 
-## Фаза 5: Интеграция с FastAPI (2 дня)
+# --- Broker connectivity ---
+CELERY_BROKER_CONNECTIVITY = Gauge(
+    "celery_broker_connectivity",
+    "Broker connection status (1=connected, 0=disconnected)",
+)
 
-### Цель
-Добавить HTTP endpoints для управления Celery tasks и интеграцию с существующим FastAPI app.
+# --- Info ---
+CELERY_APP_INFO = Info(
+    "celery_app",
+    "Celery application metadata",
+)
+```
 
-### Ответственный: **Сона (Programmer)**
-### Участники: **Лита (security)**, **Афина (Team Lead)**
+**Label cardinality — строго контролировать:**
+| Label | Допустимые значения | Риск cardinality |
+|-------|---------------------|------------------|
+| `task` | `memory.store`, `memory.search`, ... (~10 values) | ✅ Безопасно |
+| `queue` | `memory_ops`, `embed_ops`, `batch_ops` (3 values) | ✅ Безопасно |
+| `worker` | `memory-worker@%h`, ... (~3 values) | ✅ Безопасно |
+| `status` | `succeeded`, `failed` (2 values) | ✅ Безопасно |
+| `exception` | `TimeoutError`, `OperationalError`, ... (~10 values) | ✅ Безопасно |
+| ❌ `task_id` | уникальные = cardinality explosion | 🚫 НИКОГДА |
 
-### Задачи по агентам
+**Histogram buckets — обоснование:**
+- `duration`: [0.1, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300] — memory ops 0.1-5s, embed ops 1-30s, batch 10-300s
+- `latency`: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30] — queue wait, обычно <1s
 
-| Агент | Задачи |
-|---|---|
-| **Сона** | APIRouter tasks.py, endpoints /tasks/{id}, /tasks, /workers, /health |
-| **Лита** | Аудит безопасности endpoints (auth, rate limiting, information disclosure) |
-| **Сона** | Интеграция с existing FastMCP, celery_health.py |
-| **Афина** | Контроль, финальное согласование |
+#### 4.2 Обновить `memory_server/tasks/signals.py` — lifecycle + метрики + логи
 
-### Точки согласования
-- [ ] **День 1:** Сона — эндпоинты работают, Лита — аудит пройден
-- [ ] **Конец фазы:** Афина — все endpoints отвечают, auth работает
+```python
+import time
+import structlog
+from celery.signals import (
+    task_sent, task_received, task_started,
+    task_success, task_failure, task_retry,
+    task_rejected, task_revoked,
+    worker_ready, worker_shutdown,
+)
 
-### Шаги
+logger = structlog.get_logger("selti-worker")
 
-1. [ ] **Создать `memory_server/api/tasks.py`**
-   - APIRouter для управления задачами:
-     ```python
-     router = APIRouter(prefix="/tasks", tags=["tasks"])
+# --- Task lifecycle metrics ---
 
-     @router.get("/{task_id}")
-     async def get_task_status(task_id: str): ...
+@task_sent.connect
+def handle_task_sent(sender, task_id, task, args, kwargs, **kw):
+    from memory_server.metrics import CELERY_TASK_SENT
+    CELERY_TASK_SENT.labels(task=task, queue=kw.get("queue", "default")).inc()
+    logger.debug("task_sent", task_id=task_id, task=task)
 
-     @router.get("/")
-     async def list_active_tasks(): ...
+@task_received.connect
+def handle_task_received(sender, task_id, task, args, kwargs, **kw):
+    from memory_server.metrics import CELERY_TASK_RECEIVED
+    CELERY_TASK_RECEIVED.labels(task=task, queue=kw.get("queue", "default")).inc()
+    # Store start time for duration calculation
+    _task_start_times[task_id] = time.monotonic()
+    logger.info("task_received", task_id=task_id, task=task)
 
-     @router.post("/{task_id}/cancel")
-     async def cancel_task(task_id: str): ...
+@task_started.connect
+def handle_task_started(sender, task_id, **kw):
+    from memory_server.metrics import CELERY_TASK_STARTED
+    CELERY_TASK_STARTED.labels(task=kw.get("task", "unknown"), queue=kw.get("queue", "default")).inc()
+    logger.info("task_started", task_id=task_id)
 
-     @router.get("/queues")
-     async def get_queue_lengths(): ...
-     ```
+@task_success.connect
+def handle_task_result(sender, task_id, result, **kw):
+    from memory_server.metrics import CELERY_TASK_SUCCEEDED, CELERY_TASK_DURATION
+    task_name = sender.name if sender else "unknown"
+    queue = kw.get("queue", "default")
+    CELERY_TASK_SUCCEEDED.labels(task=task_name, queue=queue).inc()
+    # Duration
+    start = _task_start_times.pop(task_id, None)
+    if start:
+        duration = time.monotonic() - start
+        CELERY_TASK_DURATION.labels(task=task_name, queue=queue).observe(duration)
+        logger.info("task_succeeded", task_id=task_id, duration=round(duration, 3))
 
-2. [ ] **Обновить `memory_server/__main__.py`**
-   - Подключить `tasks` router
-   - Добавить endpoint `/workers` для статуса workers:
-     ```python
-     @app.get("/workers")
-     async def workers_status():
-         inspector = app.celery_app.control.inspect(timeout=5.0)
-         return inspector.ping()
-     ```
+@task_failure.connect
+def handle_task_failure(sender, task_id, exception, traceback, **kw):
+    from memory_server.metrics import CELERY_TASK_FAILED, CELERY_TASK_DURATION
+    task_name = sender.name if sender else "unknown"
+    queue = kw.get("queue", "default")
+    CELERY_TASK_FAILED.labels(task=task_name, queue=queue, exception=type(exception).__name__).inc()
+    start = _task_start_times.pop(task_id, None)
+    if start:
+        duration = time.monotonic() - start
+        CELERY_TASK_DURATION.labels(task=task_name, queue=queue).observe(duration)
+    logger.error("task_failed", task_id=task_id, exception=str(exception), duration=round(duration, 3) if start else None)
 
-3. [ ] **Обновить healthcheck**
-   - Расширить `/health` endpoint:
-     ```python
-     @app.get("/health")
-     async def health():
-         checks = {
-             "config": ...,
-             "celery": check_celery_health(),
-             "redis": check_redis_health(),
-         }
-     ```
-   - Проверка Celery health через `celery.control.ping()`
+@task_retry.connect
+def handle_task_retry(sender, request, reason, **kw):
+    from memory_server.metrics import CELERY_TASK_RETRIES
+    CELERY_TASK_RETRIES.labels(task=sender.name, queue=kw.get("queue", "default")).inc()
+    logger.warn("task_retry", task_id=request.id, reason=str(reason), attempt=request.retries)
 
-4. [ ] **Создать `memory_server/tasks/celery_health.py`**
-   - Проверка здоровья Celery:
-     ```python
-     def check_celery_health() -> dict:
-         inspector = app.control.inspect(timeout=3.0)
-         active = inspector.active()
-         ping = inspector.ping()
-         return {
-             "ping": ping is not None,
-             "workers": len(active) if active else 0,
-         }
-     ```
+@task_rejected.connect
+def handle_task_rejected(sender, **kw):
+    from memory_server.metrics import CELERY_TASK_REJECTED
+    CELERY_TASK_REJECTED.labels(task=kw.get("task", "unknown"), queue=kw.get("queue", "default")).inc()
+    logger.warn("task_rejected", task_id=kw.get("task_id"), reason=kw.get("reason"))
 
-### Проверка
-- [ ] `GET /tasks/{task_id}` возвращает статус задачи
-- [ ] `GET /tasks` возвращает список активных задач
-- [ ] `POST /tasks/{task_id}/cancel` отменяет задачу
-- [ ] `GET /health` содержит celery check
+@task_revoked.connect
+def handle_task_revoked(sender, request, terminated, signum, expired, **kw):
+    from memory_server.metrics import CELERY_TASK_REVOKED
+    CELERY_TASK_REVOKED.labels(task=sender.name if sender else "unknown").inc()
+    logger.warn("task_revoked", task_id=request.id if request else None)
+
+# --- Worker lifecycle ---
+
+@worker_ready.connect
+def handle_worker_ready(sender, **kw):
+    logger.info("worker_ready", worker=sender.hostname)
+
+@worker_shutdown.connect
+def handle_worker_shutdown(sender, **kw):
+    logger.info("worker_shutdown", worker=sender.hostname)
+
+# --- Helpers ---
+_task_start_times: dict[str, float] = {}
+```
+
+#### 4.3 Настроить structured logging для workers — стандарт Argenta
+
+**Формат:** `[ISO8601] [LEVEL] [service] message {"key": "value"}`
+
+**Пример:**
+```
+2026-07-31T14:30:00.123Z [INFO] [selti-worker] task_received {"task_id": "abc-123", "task": "memory.store", "queue": "memory_ops"}
+2026-07-31T14:30:00.456Z [ERROR] [selti-worker] task_failed {"task_id": "abc-123", "exception": "TimeoutError", "duration": 240.0}
+```
+
+**Реализация — `memory_server/logging_config.py`:**
+
+```python
+import logging
+import structlog
+import sys
+from datetime import datetime, timezone
+
+SERVICE_NAME = "selti-worker"
+
+def setup_worker_logging(log_level: str = "INFO"):
+    """Настройка structured logging для Celery workers."""
+    
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            add_service_name,
+            structlog.dev.ConsoleRenderer() if sys.stderr.isatty() else structlog.processors.JSONRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(
+            logging.getLevelName(log_level.upper())
+        ),
+        context_class=dict,
+        logger_factory=structlog.PrintLoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
+
+def add_service_name(logger, method_name, event_dict):
+    event_dict["service"] = SERVICE_NAME
+    return event_dict
+
+# --- Celery log format overrides ---
+# Убираем стандартный формат Celery "[YYYY-MM-DD HH:MM:SS,mmm: LEVEL/ProcessName]"
+# и заменяем на structlog
+
+CELERY_WORKER_LOG_FORMAT = "%(message)s"
+CELERY_WORKER_TASK_LOG_FORMAT = "%(message)s"
+CELERY_WORKER_HIJACK_ROOT_LOGGER = False  # Не перехватывать root logger
+```
+
+**В `celery_app.py` добавить:**
+```python
+app.conf.update(
+    worker_hijack_root_logger=False,
+    worker_log_format="%(message)s",
+    worker_task_log_format="%(message)s",
+)
+```
+
+**Correlation ID через task_id:**
+```python
+# В signals.py, task_received:
+structlog.contextvars.clear_contextvars()
+structlog.contextvars.bind_contextvars(task_id=task_id, task_name=task)
+
+# Все последующие логи в рамках этой задачи будут содержать task_id
+```
+
+**Уровни логирования — строго:**
+| Уровнь | Когда | Пример |
+|--------|-------|--------|
+| `DEBUG` | Трассировка, dev only | `task_sent`, payload |
+| `INFO` | Нормальные события | `task_received`, `task_succeeded`, `worker_ready` |
+| `WARN` | Требует внимания, но не ошибка | `task_retry`, `task_rejected`, `queue_backlog` |
+| `ERROR` | Ошибка, требующая действия | `task_failed`, `connection_lost` |
+
+⚠️ **WARN, не WARNING!** Стандарт Argenta.
+
+#### 4.4 Создать `memory_server/api/tasks.py` — HTTP endpoints
+
+```python
+from fastapi import APIRouter, HTTPException
+from celery import app as celery_app
+
+router = APIRouter(prefix="/tasks", tags=["tasks"])
+
+@router.get("/{task_id}")
+async def get_task_status(task_id: str):
+    """Статус конкретной задачи."""
+    from celery.result import AsyncResult
+    result = AsyncResult(task_id, app=celery_app)
+    return {
+        "task_id": task_id,
+        "status": result.state,
+        "result": result.result if result.ready() else None,
+    }
+
+@router.get("/")
+async def list_active_tasks():
+    """Список активных задач по worker."""
+    inspector = celery_app.control.inspect(timeout=3.0)
+    active = inspector.active() or {}
+    return {"workers": active}
+
+@router.post("/{task_id}/cancel")
+async def cancel_task(task_id: str):
+    """Отменить задачу."""
+    celery_app.control.revoke(task_id, terminate=True)
+    return {"task_id": task_id, "status": "revoked"}
+
+@router.get("/queues")
+async def get_queue_lengths():
+    """Длины очередей (из Redis)."""
+    # Реализация через redis LLEN
+    ...
+```
+
+#### 4.5 Обновить `memory_server/__main__.py`
+
+- Подключить `tasks router` к FastAPI app
+- Добавить `/workers` endpoint (список workers через inspect)
+
+#### 4.6 Создать `memory_server/tasks/celery_health.py`
+
+```python
+def check_celery_health() -> dict:
+    """Проверка здоровья Celery cluster."""
+    try:
+        inspector = celery_app.control.inspect(timeout=3.0)
+        ping = inspector.ping()
+        active = inspector.active()
+        stats = inspector.stats()
+        
+        workers_online = len(ping) if ping else 0
+        total_active = sum(len(v) for v in (active or {}).values())
+        
+        return {
+            "healthy": workers_online > 0,
+            "workers_online": workers_online,
+            "active_tasks": total_active,
+            "workers": list(ping.keys()) if ping else [],
+        }
+    except Exception as e:
+        return {"healthy": False, "error": str(e)}
+```
+
+**В health endpoint (`/health`):**
+```python
+@app.get("/health")
+async def health():
+    celery = check_celery_health()
+    return {
+        "status": "healthy" if celery["healthy"] else "degraded",
+        "components": {
+            "celery": celery,
+            "postgres": ...,
+            "qdrant": ...,
+        },
+    }
+```
+
+#### 4.7 Обновить `monitoring/alerts/prometheus-rules.yml` — production alerting
+
+```yaml
+groups:
+  - name: celery_alerts
+    rules:
+      # === КРИТИЧЕСКИЕ ===
+      
+      - alert: CeleryWorkerDown
+        expr: sum(celery_worker_online) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "All Celery workers are down"
+          description: "No Celery workers responding for {{ $value }} minutes"
+      
+      - alert: CeleryTaskFailureRateHigh
+        expr: |
+          sum(rate(celery_task_failed_total[5m])) by (task)
+          / sum(rate(celery_task_succeeded_total[5m]) + rate(celery_task_failed_total[5m])) by (task)
+          > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Celery task failure rate > 5% for {{ $labels.task }}"
+          description: "{{ $value | humanizePercentage }} failure rate over 5 minutes"
+      
+      # === ВЫСОКИЕ ===
+      
+      - alert: CeleryTaskDurationHigh
+        expr: |
+          histogram_quantile(0.95, sum(rate(celery_task_duration_seconds_bucket[5m])) by (le, task))
+          > 60
+        for: 10m
+        labels:
+          severity: high
+        annotations:
+          summary: "Celery task P95 duration > 60s for {{ $labels.task }}"
+          description: "P95 is {{ $value | humanizeDuration }}"
+      
+      - alert: CeleryQueueBacklog
+        expr: celery_queue_length > 100
+        for: 5m
+        labels:
+          severity: high
+        annotations:
+          summary: "Queue {{ $labels.queue }} backlog > 100 tasks"
+          description: "{{ $value }} tasks waiting"
+      
+      # === СРЕДНИЕ ===
+      
+      - alert: CeleryTaskRetrySpike
+        expr: sum(rate(celery_task_retries_total[5m])) by (task) > 0.2
+        for: 10m
+        labels:
+          severity: medium
+        annotations:
+          summary: "High retry rate for {{ $labels.task }}"
+          description: "{{ $value }} retries/sec over 5 minutes"
+      
+      - alert: CeleryWorkerMemoryHigh
+        expr: |
+          celery_worker_rss_bytes / (worker_max_memory_per_child * 1024) > 0.8
+        for: 5m
+        labels:
+          severity: medium
+        annotations:
+          summary: "Worker {{ $labels.worker }} memory > 80% of limit"
+```
+
+#### 4.8 Обновить `docker-compose.yml` — метрики endpoints
+
+```yaml
+celery-memory-worker:
+  ...
+  # Добавить port для Prometheus scrape (если нужен отдельный)
+  # Или скрапить через Flower /app metrics
+
+flower:
+  ...
+  command: celery -A memory_server.celery_app flower --port=5555 --enable_prometheus
+  ports:
+    - "5555:5555"
+```
+
+#### 4.9 Добавить `prometheus.yml` scrape config
+
+```yaml
+scrape_configs:
+  - job_name: "celery-flower"
+    static_configs:
+      - targets: ["flower:5555"]
+    metrics_path: "/metrics"
+    scrape_interval: 15s
+  
+  - job_name: "selti-memory-server"
+    static_configs:
+      - targets: ["memory-server:8000"]
+    metrics_path: "/metrics"
+    scrape_interval: 15s
+```
+
+#### 4.10 Docker healthcheck для workers
+
+```yaml
+celery-memory-worker:
+  ...
+  healthcheck:
+    test: ["CMD-SHELL", "celery -A memory_server.celery_app inspect ping --destination celery@$$HOSTNAME || exit 1"]
+    interval: 30s
+    timeout: 10s
+    retries: 3
+    start_period: 15s
+```
+
+⚠️ `inspect ping` может нагружать CPU при большом кластере. Для 3 workers — допустимо. Для масштаба — перейти на HTTP health endpoint.
+
+### Проверка Фазы 4
+- [ ] `curl http://localhost:8000/metrics` содержит `celery_task_*` метрики
+- [ ] Логи worker в формате `[ISO8601] [LEVEL] [selti-worker] message {"key": "value"}`
+- [ ] `task_id` присутствует в логах задач (correlation ID)
+- [ ] `GET /tasks/{task_id}` возвращает статус
 - [ ] `GET /workers` возвращает список workers
+- [ ] `GET /health` содержит celery check
+- [ ] Alertmanager получает алерты при simulating failure
+- [ ] `WARN` используется вместо `WARNING`
+- [ ] Нет label cardinality explosion (проверить через `label_replace`)
 
-### Риски
-- `celery.control.inspect()` может быть медленным → timeout=3s
-- Отмена задачи может не сработать если task уже выполняется → acks_late=True
+### Production checklist
 
-### Откат
-- Удалить `api/tasks.py`
-- Откатить `__main__.py`
-
----
-
-## Фаза 6: Docker и деплой (2 дня)
-
-### Цель
-Финализировать Docker-конфигурацию, обновить deploy script, проверить production-ready.
-
-### Ответственный: **Рэй (DevOps)**
-### Участники: **Лита (security)**, **Тиамат (tech-writer)**, **Афина (Team Lead)**
-
-### Задачи по агентам
-
-| Агент | Задачи |
-|---|---|
-| **Рэй** | Production docker-compose.prod.yml, rolling deploy, scripts/celery_management.sh |
-| **Лита** | Аудит secrets, credentials, network security, exposed ports |
-| **Тиамат** | Документация deployment process, README обновление |
-| **Афина** | Финальное согласование с Милордом перед production |
-
-### Точки согласования
-- [ ] **День 1:** Рэй — docker-compose.prod.yml готов, Лита — secrets audit пройден
-- [ ] **Конец фазы:** Афина — `docker compose up -d` поднимает все сервисы, healthcheck'и зелёные
-
-### Шаги
-
-1. [ ] **Обновить `Dockerfile`**
-   - Мульти-билд: builder + runtime
-   - Копировать `celery_app.py`, `tasks/`
-   - Добавить `celery` в PATH
-   - Отдельный ENTRYPOINT для workers (через CMD override):
-     ```dockerfile
-     # Default: run MCP server
-     ENTRYPOINT ["uvicorn", "memory_server.__main__:app", ...]
-
-     # Override for worker: docker run ... CMD ["celery", "-A", "memory_server.celery_app", "worker", ...]
-     ```
-
-2. [ ] **Обновить `docker-compose.yml`**
-   - Финальная конфигурация со всеми сервисами
-   - Зависимости: memory-server → postgres, redis; workers → redis
-   - Resource limits для каждого worker
-   - Health checks для всех сервисов
-   - Logging driver (json-file с rotation)
-
-3. [ ] **Создать `docker-compose.prod.yml`**
-   - Production override:
-     - Без `local-db` profile (PostgreSQL внешний)
-     - Без exposed ports (кроме memory-server)
-     - Resource limits по памяти/CPU
-     - Restart policies
-
-4. [ ] **Обновить `deploy.sh`**
-   - Добавить деплой workers:
-     ```bash
-     # Pull and restart workers
-     docker compose -f docker-compose.prod.yml up -d celery-memory-worker celery-embed-worker celery-batch-worker flower
-     ```
-   - Rolling update для workers (по очереди)
-   - Health-check после каждого worker
-
-5. [ ] **Создать `scripts/celery_management.sh`**
-   - Утилиты для управления:
-     ```bash
-     # Статус
-     ./scripts/celery_management.sh status
-
-     # Очистка очереди
-     ./scripts/celery_management.sh purge memory_ops
-
-     # Graceful shutdown
-     ./scripts/celery_management.sh shutdown
-
-     # Мониторинг
-     ./scripts/celery_management.sh inspect
-     ```
-
-6. [ ] **Проверить `.env` на production**
-   - Убедиться что secrets не в коде
-   - Redis password настроен
-   - PG password настроен
-
-### Проверка
-- [ ] `docker compose up -d` поднимает все сервисы
-- [ ] Все healthchecks проходят
-- [ ] `docker compose logs celery-memory-worker` — worker стартует
-- [ ] `docker compose logs flower` — Flower работает
-- [ ] Deploy script работает без ошибок
-
-### Риски
-- Workers могут потребовать больше памяти чем MCP server → настроить limits
-- Prefork pool может fork() слишком много процессов → `worker_max_tasks_per_child=1000`
-
-### Откат
-- `docker compose down` → `docker compose up -d` с предыдущим docker-compose.yml
-- Откатить deploy.sh
+- [ ] Метрики: все обязательные counters/histograms/gauges на месте
+- [ ] Labels: только `task`, `queue`, `worker`, `status`, `exception` — нет `task_id`
+- [ ] Histogram buckets: обоснованы для selti workload
+- [ ] Alert rules: все 6 алертов настроены с правильными порогами
+- [ ] Logging: structlog JSON в production, console в dev
+- [ ] Log levels: DEBUG → INFO → WARN → ERROR (не WARNING!)
+- [ ] Correlation ID: task_id в каждом логе задачи
+- [ ] Health check: `/health` отвечает 200/503
+- [ ] Docker healthcheck: workers помечаются unhealthy при падении
+- [ ] Prometheus scrape: interval 15s, targets корректны
 
 ---
 
-## Фаза 7: Оптимизация и финализация (2 дня)
+## Фаза 5: Оптимизация и финализация (1.5 дня)
 
 ### Цель
-Оптимизировать производительность, убрать legacy code, написать документацию.
+Оптимизировать производительность, cleanup, документация.
 
-### Ответственный: **Сона (Programmer)**
-### Участники: **Катерина (tester)**, **Тиамат (tech-writer)**, **Афина (Team Lead)**
-
-### Задачи по агентам
-
-| Агент | Задачи |
-|---|---|
-| **Сона** | Cleanup legacy code, performance benchmark, оптимизация connection pool |
-| **Катерина** | Regression testing, stress testing (24h soak test) |
-| **Тиамат** | README, architecture doc, runbooks, CHANGELOG |
-| **Афина** | Финальный отчёт Милорду, закрытие миграции |
-
-### Точки согласования
-- [ ] **День 1:** Сona — benchmark P95 < 2s для memory_ops, Катерина — regression clean
-- [ ] **Конец фазы:** Афина — финальный `pytest`, документация актуальна, отчёт Милорду
+### Ответственный: **Сона (Programmer)** + **Катерина (Tester)** + **Тиамат (Tech-Writer)**
 
 ### Шаги
 
-1. [ ] **Оптимизация connection pool**
-   - Настроить `worker_max_tasks_per_child=1000` (предотвращение memory leak)
-   - Настроить `worker_max_memory_per_child=200000` (200MB в KB)
-   - Мониторить usage через метрики
+#### 5.1 Оптимизация connection pool
+- `worker_max_tasks_per_child=1000` (предотвращение memory leak)
+- `worker_max_memory_per_child=200000` (200MB)
+- Мониторинг через метрики
 
-2. [ ] **Убрать legacy sync код**
-   - Если MCP tools полностью переключены на Celery:
-     - Убрать прямые вызовы `service.*` из tools
-     - Убрать `MemoryService` из `server.py` lifespan (если не нужен)
-     - Оставить `MemoryService` в `tasks/` для worker context
+#### 5.2 Performance benchmark
+- Замерить latency: MCP tool → Celery task → результат
+- Сравнить с baseline (до Celery)
+- Убедиться P95 < 2s для memory_ops
 
-3. [ ] **Обновить документацию**
-   - README.md: обновить секцию установки/конфигурации
-   - Добавить документацию по Celery tasks
-   - Описать очереди и маршрутизацию
+#### 5.3 Cleanup
+- Удалить `celery_docs_summary.md`
+- Обновить VERSION
+- Обновить CHANGELOG
 
-4. [ ] **Финальный `pytest` прогон**
-   - Убедиться что все тесты проходят
-   - Проверить покрытие
+#### 5.4 Документация
+- README.md: обновить секцию установки/конфигурации
+- Добавить документацию по Celery tasks
+- Описать очереди и маршрутизацию
 
-5. [ ] **Performance testing**
-   - Замерить latency: MCP tool → Celery task → результат
-   - Сравнить с baseline (до Celery)
-   - Убедиться что P95 < 2s для memory_ops
+#### 5.5 Финальный `pytest`
+- Убедиться что все тесты проходят
+- Проверить покрытие
 
-6. [ ] **Cleanup**
-   - Удалить `celery_docs_summary.md` (документация в README)
-   - Обновить VERSION
-   - Обновить CHANGELOG
-
-### Проверка
+### Проверка Фазы 5
 - [ ] Все тесты проходят
-- [ ] Latency P95 < 2s для memory_ops
-- [ ] Latency P95 < 5s для embed_ops
+- [ ] P95 latency < 2s для memory_ops
+- [ ] P95 latency < 5s для embed_ops
 - [ ] No memory leaks в workers (мониторинг 24h)
 - [ ] Документация актуальна
-
-### Риски
-- Удаление legacy кода может сломать что-то → incremental удаление с тестами
-- Performance regression → benchmark before/after
-
-### Откат
-- Git revert коммитов оптимизации
 
 ---
 
@@ -947,28 +1139,33 @@
 
 | Фаза | Дни | Зависит от | Ответственный |
 |------|-----|-----------|---------------|
-| Фаза 0: Подготовка инфраструктуры | 2 | — | **Рэй** |
-| Фаза 1: Инфраструктура задач | 3 | Фаза 0 | **Сона** |
-| Фаза 2: Миграция MCP Tools | 5 | Фаза 1 | **Сона** |
-| Фаза 3: Тесты и совместимость | 3 | Фаза 2 | **Катерина** |
-| Фаза 4: Мониторинг и метрики | 2 | Фаза 1 | **Мая** |
-| Фаза 5: Интеграция с FastAPI | 2 | Фаза 2 | **Сона** |
-| Фаза 6: Docker и деплой | 2 | Фаза 2, 4, 5 | **Рэй** |
-| Фаза 7: Оптимизация | 2 | Фаза 3, 6 | **Сона** |
-| **ИТОГО** | **21 день** | | |
-
-### Критический путь
-```
-Фаза 0 → Фаза 1 → Фаза 2 → Фаза 3 → Фаза 7
-                     ↓
-                  Фаза 4 → Фаза 6
-                     ↓
-                  Фаза 5 → Фаза 6
-```
+| Фаза 0: Инфраструктура Celery | 1.5 | — | **Рэй** |
+| Фаза 1: Инфраструктура задач | 2 | Фаза 0 | **Сона** |
+| Фаза 2: Миграция MCP Tools | 3 | Фаза 1 | **Сона** |
+| Фаза 3: Тесты | 2 | Фаза 2 | **Катерина** |
+| Фаза 4: Мониторинг + FastAPI | 2 | Фаза 1 | **Мая** + **Сона** |
+| Фаза 5: Оптимизация | 1.5 | Фаза 3, 4 | **Сона** |
+| **ИТОГО** | **~12 дней** | | |
 
 ### Параллельные задачи
 - Фаза 4 (мониторинг) может идти параллельно с Фазой 2 (миграция tools)
-- Фаза 5 (FastAPI) может идти параллельно с Фазой 3 (тесты)
+- Фаза 3 (тесты) может частично идти параллельно с Фазой 2
+
+---
+
+## Распределение ролей: сводная таблица
+
+| Агент | Фазы | Общая нагрузка |
+|---|---|---|
+| **Афина** | 0, 1, 2, 3, 4, 5 | Контроль всех фаз |
+| **Сона** | 1, 2, 4, 5 | Основной исполнитель (4 фазы) |
+| **Рэй** | 0 | Инфраструктура (1 фаза) |
+| **Эна** | 0, 1, 2 | Архитектура (3 фазы) |
+| **Катерина** | 3, 5 | Тестирование (2 фазы) |
+| **Мая** | 4 | Мониторинг: метрики, structured logging, alerting, health checks |
+| **Нора** | 1 | DB (1 фаза) |
+| **Тиамат** | 5 | Документация (1 фаза) |
+| **Момо** | — | План (этот документ) |
 
 ---
 
@@ -977,97 +1174,89 @@
 ```
 selti/
 ├── memory_server/
-│   ├── __init__.py
-│   ├── __main__.py          # FastAPI app (обновлён)
 │   ├── celery_app.py         # НОВЫЙ: Celery instance
 │   ├── config.py             # Обновлён: Celery settings
-│   ├── exceptions.py         # Без изменений
-│   ├── logger.py             # Без изменений
-│   ├── metrics.py            # Обновлён: Celery метрики
-│   ├── models.py             # Без изменений
-│   ├── server.py             # Обновлён: убран service из lifespan
-│   ├── cache/
-│   │   └── redis_client.py   # Без изменений
-│   ├── db/
-│   │   ├── pool.py           # Без изменений
-│   │   └── queries.py        # Без изменений
-│   ├── embedding/
-│   │   ├── client.py         # Без изменений
-│   │   └── provider.py       # Без изменений
-│   ├── memory/
-│   │   ├── dedup.py          # Без изменений
-│   │   ├── repository.py     # Без изменений
-│   │   ├── repository_qdrant.py  # Без изменений
-│   │   ├── service.py        # Без изменений (используется в workers)
-│   │   └── ...
+│   ├── metrics.py            # Обновлён: полный набор Celery метрик
+│   ├── logging_config.py     # НОВЫЙ: structured logging (structlog)
+│   ├── server.py             # Без изменений (lifespan остаётся)
+│   ├── api/
+│   │   └── tasks.py          # НОВЫЙ: APIRouter tasks (status, cancel, queues)
 │   ├── tasks/                # НОВЫЙ: Celery tasks
 │   │   ├── __init__.py
-│   │   ├── celery_config.py  # Очереди, Exchange, routing
 │   │   ├── base.py           # Базовый класс задач
 │   │   ├── connections.py    # Singleton connections
 │   │   ├── memory_tasks.py   # Задачи памяти
 │   │   ├── embed_tasks.py    # Задачи эмбеддингов
 │   │   ├── batch_tasks.py    # Батч-задачи
 │   │   ├── hash_tasks.py     # Задачи хешей
-│   │   ├── signals.py        # Celery signals для метрик
+│   │   ├── signals.py        # Celery signals + metrics + structured logs
 │   │   ├── serializers.py    # JSON serialization
 │   │   ├── errors.py         # Кастомные исключения
-│   │   └── worker_init.py    # Lazy init для workers
+│   │   └── celery_health.py  # Health check
 │   ├── tools/
 │   │   ├── memory_tools.py   # Обновлён: вызовы через Celery
 │   │   ├── hash_tools.py     # Обновлён: вызовы через Celery
 │   │   ├── task_bridge.py    # НОВЫЙ: мост sync↔async
-│   │   └── task_results.py   # НОВЫЙ: проверка статуса задач
-│   └── vector/
-│       └── qdrant_store.py   # Без изменений
+│   │   └── task_results.py   # НОВЫЙ: проверка статуса
+│   └── ... (без изменений)
 ├── tests/
 │   ├── conftest.py           # Обновлён: Celery fixtures
 │   ├── test_celery_tasks.py  # НОВЫЙ
 │   ├── test_serializers.py   # НОВЫЙ
 │   └── ... (существующие тесты обновлены)
 ├── monitoring/
-│   ├── alerts/
-│   │   └── prometheus-rules.yml  # Обновлён: Celery алерты
-│   └── dashboards/
-│       ├── postgres-pgvector.json
-│       └── celery.json       # НОВЫЙ
-├── docker-compose.yml        # Обновлён: workers, flower
-├── docker-compose.prod.yml   # НОВЫЙ: production
+│   └── alerts/
+│       └── prometheus-rules.yml  # Обновлён: 6 Celery алертов
+├── docker-compose.yml        # Обновлён: workers, flower, healthchecks
 ├── Dockerfile                # Обновлён: workers
-├── requirements.txt          # Обновлён: celery, flower
-├── deploy.sh                 # Обновлён: workers deploy
-├── scripts/
-│   └── celery_management.sh  # НОВЫЙ: management utils
-└── celery_migration_plan.md  # НОВЫЙ: этот файл
+├── requirements.txt          # Обновлён: celery, flower, structlog, prometheus-client
+└── celery_migration_plan.md  # ЭТОТ ФАЙЛ
 ```
+
+**Убрано:**
+- ❌ `monitoring/dashboards/celery.json` — Grafana будет отдельным сервисом потом
+- ❌ Flower dashboard интеграция с Grafana
 
 ---
 
-## Распределение ролей: сводная таблица
+## Риски и митигации
 
-| Агент | Фазы | Общая нагрузка |
-|---|---|---|
-| **Афина** | 0, 1, 2, 3, 4, 5, 6, 7 | Контроль всех фаз (8/8) |
-| **Сона** | 1, 2, 3, 5, 7 | Основной исполнитель (5 фаз) |
-| **Рэй** | 0, 4, 6 | Инфраструктура (3 фазы) |
-| **Эна** | 0, 1, 2 | Архитектура (3 фазы) |
-| **Катерина** | 2, 3, 7 | Тестирование (3 фазы) |
-| **Мая** | 4 | Мониторинг (1 фаза) |
-| **Нора** | 1 | DB (1 фаза) |
-| **Лита** | 5, 6 | Безопасность (2 фазы) |
-| **Тиамат** | 6, 7 | Документация (2 фазы) |
-| **Момо** | — | План (этот документ) |
+| Риск | Вероятность | Влияние | Митигация |
+|------|-------------|---------|-----------|
+| MCP tool блокируется пока task не выполнится | Средняя | Высокое | `task_soft_time_limit=240` < `tool_timeout=300` |
+| Redis недоступен | Низкая | Критическое | Healthcheck + `depends_on: condition: service_healthy` |
+| asyncpg pool истощается | Средняя | Высокое | `db_min_connections=2`, `db_max_connections=10` |
+| Qdrant sync client блокирует prefork worker | Низкая | Среднее | `timeout=30` для Qdrant operations |
+| EmbeddingClient не работает в sync context | Средняя | Высокое | `asyncio.get_event_loop().run_until_complete()` |
+| Workers потребляют много памяти | Средняя | Среднее | `worker_max_memory_per_child=200000` |
+| Performance regression | Средняя | Среднее | Benchmark before/after, P95 < 2s |
+
+---
+
+## Rollback процедура
+
+### Откат на любом этапе:
+1. Остановить workers: `docker compose down celery-memory-worker celery-embed-worker celery-batch-worker`
+2. Откатить `memory_tools.py` и `hash_tools.py` к прямым вызовам service
+3. Откатить `server.py` (убрать Celery health check)
+4. Удалить `tasks/` directory
+5. Удалить `celery_app.py`
+6. Откатить `requirements.txt`
+7. Пересобрать: `docker compose build memory-server`
+8. Запустить: `docker compose up -d memory-server`
 
 ---
 
 ## Ключевые принципы миграции
 
-1. **Incremental** — каждая фаза тестируется отдельно, не всё сразу
+1. **Incremental** — каждая фаза тестируется отдельно
 2. **Rollback-ready** — каждую фазу можно откатить без потери данных
 3. **Non-breaking** — MCP API не меняется для клиентов
 4. **Observable** — метрики и логи для каждого шага
 5. **Testable** — `CELERY_ALWAYS_EAGER` для unit-тестов
+6. **Minimal changes** — используем существующую инфраструктуру (Redis, pool, embedding client)
 
 ---
 
-*План составлен 31.07.2026 Момо (Planner)*
+*План обновлён 31.07.2026 Момо (Planner)*
+*Учтено: завершённая миграция pgvector → Qdrant, реальная структура кода*

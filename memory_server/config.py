@@ -49,6 +49,18 @@ class Settings(BaseSettings):
 
     redis_url: str = "redis://:@redis:6379/0"
 
+    # ── Celery: асинхронные задачи ──
+    celery_broker_url: str = "redis://localhost:6379/0"
+    celery_result_backend: str = "redis://localhost:6379/0"
+    celery_task_serializer: str = "json"
+    celery_result_serializer: str = "json"
+    celery_accept_content: list[str] = ["json"]
+    celery_timezone: str = "UTC"
+    celery_worker_concurrency: int = 4
+    celery_worker_prefetch_multiplier: int = 1
+    celery_worker_max_tasks_per_child: int = 1000
+    celery_worker_max_memory_per_child: int = 200000  # 200MB
+
     log_level: str = "INFO"
 
     uvicorn_workers: int = 1

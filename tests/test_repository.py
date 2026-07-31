@@ -38,7 +38,6 @@ class TestInsert:
             q.INSERT_MEMORY,
             "u1",
             "Hello",
-            [0.1, 0.2, 0.3],
             {"source": "test"},
             "ns1",
             "ns1-uuid-456",

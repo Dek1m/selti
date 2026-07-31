@@ -194,6 +194,112 @@ python migrations/run.py
 
 ---
 
+## Celery Setup
+
+Система использует **Celery** для асинхронной обработки тяжёлых операций: векторного поиска, batch-вставок, дедупликации и работы с эмбеддингами. MCP-сервер только ставит задачи в очередь, а воркеры выполняют всю работу.
+
+### Архитектура
+
+```
+MCP Server (FastMCP) ──send_task()──▶ Redis (broker) ──▶ Celery Worker (prefork)
+                                                                    │
+                                    ┌───────────────────────────────┤
+                                    │               │               │
+                                    ▼               ▼               ▼
+                              PostgreSQL        Qdrant        Embedding API
+                              (pgvector)       (векторы)      (эмбеддинги)
+```
+
+**Почему Celery, а не asyncio в MCP-сервере:** вся логика selti — async (asyncpg, httpx), но тяжёлые операции (embedding, векторный поиск) блокируют event loop. Celery prefork воркеры изолируют эти операции в отдельных процессах, не блокируя обработку MCP-запросов.
+
+### Очереди
+
+| Очередь    | Назначение                              | Таймаут (soft/hard) |
+|------------|-----------------------------------------|---------------------|
+| `memory`   | store, search, get, update, delete, archive, link, unlink | 240s / 300s |
+| `batch`    | ingest_batch                            | 600s / 900s         |
+| `hash`     | hash_upsert, hash_get, hash_list, hash_delete | 120s / 180s |
+
+### Запуск
+
+```bash
+# Development — всё вместе
+docker compose up -d
+
+# С Flower (мониторинг воркеров)
+docker compose --profile dev up -d
+
+# Только воркер (вручную, для отладки)
+celery -A memory_server.celery_app worker \
+    -Q memory,batch,hash \
+    -c 4 \
+    --without-gossip \
+    --without-mingle \
+    --without-heartbeat \
+    -l INFO
+
+# Только Flower
+celery -A memory_server.celery_app flower --port=5555
+```
+
+### Production-опции воркера
+
+```bash
+celery -A memory_server.celery_app worker \
+    -Q memory,batch,hash \
+    -c 4 \
+    --without-gossip \
+    --without-mingle \
+    --without-heartbeat \
+    --max-tasks-per-child=1000 \
+    --max-memory-per-child=200000 \
+    --logfile=- \
+    -l INFO
+```
+
+| Флаг                              | Зачем                                      |
+|-----------------------------------|--------------------------------------------|
+| `--without-gossip`                | Экономит ~10% CPU, ускоряет старт          |
+| `--without-mingle`                | Экономит ~10% CPU, не нужен в single-worker |
+| `--without-heartbeat`             | Экономит ~10% network                      |
+| `--max-tasks-per-child=1000`      | Реклайм памяти, защита от утечек           |
+| `--max-memory-per-child=200000`   | OOM-защита (200 MB на процесс)             |
+
+### Retry-политика
+
+Задачи автоматически повторяются при ошибках сети или БД:
+
+- **Максимум попыток:** 5
+- **Стратегия:** exponential backoff + jitter
+- **Базовая задержка:** 30 секунд
+
+Validation-ошибки (ValueError, InvalidNamespace) **не ретраятся** — это баги данных, а не транзиентные сбои.
+
+### Мониторинг
+
+| Сервис    | URL                          | Назначение                        |
+|-----------|------------------------------|-----------------------------------|
+| Health    | `GET /health`                | Статус сервера + Celery worker    |
+| Metrics   | `GET /metrics`               | Prometheus: 8 Celery + Redis + Qdrant метрик |
+| Tasks API | `GET /tasks`                 | Активные задачи                   |
+| Task info | `GET /tasks/{task_id}`       | Статус конкретной задачи          |
+| Cancel    | `POST /tasks/{task_id}/cancel` | Отмена задачи (revoke)          |
+| Flower    | `http://localhost:5555`      | Веб-интерфейс мониторинга (dev)   |
+
+### Troubleshooting
+
+| Проблема | Причина | Решение |
+|----------|---------|---------|
+| `ConnectionRefused` к Redis | Redis не запущен | `docker compose up -d redis` |
+| `Task is stuck` / `Acknowledgement timed out` | Воркер упал во время задачи | Проверьте логи: `docker compose logs celery-worker` |
+| `Worker terminated` (SIGKILL) | OOM — процесс съел >200 MB | Увеличьте `CELERY_WORKER_MAX_MEMORY_PER_CHILD` или добавьте RAM |
+| `SoftTimeLimitExceeded` | Задача выполняется дольше лимита | Увеличьте таймаут или оптимизируйте запрос |
+| `Retry and give up` (5 попыток) | Транзиентная ошибка не прошла | Проверьте доступность PostgreSQL / Embedding API |
+| Flower не видит воркеры | `--without-gossip` блокирует discovery | В dev-режиме уберите флаг; в production используйте `celery inspect ping` |
+| `Unknown task` при `inspect registered` | Воркер не подключился к broker | Проверьте `CELERY_BROKER_URL` и доступность Redis |
+
+---
+
 ## Конфигурация
 
 ### Переменные окружения
@@ -214,6 +320,11 @@ python migrations/run.py
 | `SEARCH_DEFAULT_THRESHOLD`| Порог релевантности поиска по умолчанию    | `0.7`                                                     |
 | `MCP_HOST`               | Хост сервера                               | `0.0.0.0`                                                 |
 | `MCP_PORT`               | Порт сервера                               | `8000`                                                    |
+| `CELERY_BROKER_URL`      | URL брокера сообщений (Redis)              | `redis://localhost:6379/0`                                 |
+| `CELERY_RESULT_BACKEND`  | URL хранилища результатов (Redis)          | `redis://localhost:6379/0`                                 |
+| `CELERY_WORKER_CONCURRENCY` | Количество воркер-процессов            | `4`                                                       |
+| `CELERY_WORKER_MAX_MEMORY_PER_CHILD` | OOM-лимит на процесс (KB)     | `200000`                                                  |
+| `CELERY_TASK_ROUTES`     | Маршрутизация задач по очередям (JSON)    | `{"memory_tasks.*":{"queue":"memory"},"hash_tasks.*":{"queue":"hash"}}` |
 | `PG_USER`                | Пользователь PostgreSQL (локальный профиль)| `athena`                                                  |
 | `PG_PASSWORD`            | Пароль PostgreSQL (локальный профиль)      | —                                                         |
 | `REDIS_PASSWORD`         | Пароль Redis (локальный профиль)           | —                                                         |

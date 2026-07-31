@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime
 from typing import Any
 
@@ -9,6 +10,11 @@ from qdrant_client import QdrantClient
 from qdrant_client import models as qm
 
 from memory_server.db import queries as q
+from memory_server.metrics import (
+    QDRANT_OPS_TOTAL,
+    QDRANT_OPS_DURATION_SECONDS,
+    QDRANT_SEARCH_RESULTS,
+)
 from memory_server.models import (
     GraphStats,
     MemoryListResult,
@@ -83,6 +89,7 @@ class MemoryRepository:
 
             # ── Qdrant: вставка вектора ──
             if embedding is not None:
+                qstart = time.monotonic()
                 self.qdrant.upsert(
                     collection_name=self.qdrant_collection,
                     points=[
@@ -100,6 +107,8 @@ class MemoryRepository:
                         )
                     ],
                 )
+                QDRANT_OPS_TOTAL.labels(operation="upsert").inc()
+                QDRANT_OPS_DURATION_SECONDS.labels(operation="upsert").observe(time.monotonic() - qstart)
         else:
             # Fallback: старый паттерн с embedding в PG
             async with self.pool.acquire() as conn:
@@ -184,6 +193,7 @@ class MemoryRepository:
                     )
                 )
             if points:
+                qstart = time.monotonic()
                 # Qdrant batch upsert (max 1000 per request)
                 batch_size = 1000
                 for start in range(0, len(points), batch_size):
@@ -191,6 +201,8 @@ class MemoryRepository:
                         collection_name=self.qdrant_collection,
                         points=points[start : start + batch_size],
                     )
+                QDRANT_OPS_TOTAL.labels(operation="batch_upsert").inc()
+                QDRANT_OPS_DURATION_SECONDS.labels(operation="batch_upsert").observe(time.monotonic() - qstart)
 
         return memory_ids
 
@@ -225,6 +237,7 @@ class MemoryRepository:
 
             search_filter = qm.Filter(must=must_conditions) if must_conditions else None
 
+            qstart = time.monotonic()
             qdrant_results = self.qdrant.query_points(
                 collection_name=self.qdrant_collection,
                 query=query_embedding,
@@ -232,6 +245,9 @@ class MemoryRepository:
                 limit=limit,
                 score_threshold=threshold,
             )
+            QDRANT_OPS_TOTAL.labels(operation="search").inc()
+            QDRANT_OPS_DURATION_SECONDS.labels(operation="search").observe(time.monotonic() - qstart)
+            QDRANT_SEARCH_RESULTS.observe(len(qdrant_results.points))
 
             if not qdrant_results.points:
                 return []
@@ -318,6 +334,7 @@ class MemoryRepository:
 
             # ── Qdrant: обновление вектора (если content изменился) ──
             if embedding is not None:
+                qstart = time.monotonic()
                 # Обновляем и вектор, и payload
                 self.qdrant.update_vectors(
                     collection_name=self.qdrant_collection,
@@ -339,6 +356,8 @@ class MemoryRepository:
                         },
                         points=[memory_id],
                     )
+                QDRANT_OPS_TOTAL.labels(operation="upsert").inc()
+                QDRANT_OPS_DURATION_SECONDS.labels(operation="upsert").observe(time.monotonic() - qstart)
         else:
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow(
@@ -377,10 +396,13 @@ class MemoryRepository:
 
             # Qdrant
             if row is not None:
+                qstart = time.monotonic()
                 self.qdrant.delete(
                     collection_name=self.qdrant_collection,
                     points_selector=qm.PointIdsList(points=[memory_id]),
                 )
+                QDRANT_OPS_TOTAL.labels(operation="delete").inc()
+                QDRANT_OPS_DURATION_SECONDS.labels(operation="delete").observe(time.monotonic() - qstart)
 
             return row is not None
         else:
@@ -429,6 +451,7 @@ class MemoryRepository:
 
             # Qdrant: batch delete
             if ids_to_delete:
+                qstart = time.monotonic()
                 batch_size = 1000
                 for start in range(0, len(ids_to_delete), batch_size):
                     self.qdrant.delete(
@@ -437,6 +460,8 @@ class MemoryRepository:
                             points=ids_to_delete[start : start + batch_size]
                         ),
                     )
+                QDRANT_OPS_TOTAL.labels(operation="delete").inc()
+                QDRANT_OPS_DURATION_SECONDS.labels(operation="delete").observe(time.monotonic() - qstart)
 
             return count
         else:
@@ -554,10 +579,13 @@ class MemoryRepository:
             row = await conn.fetchrow(q.ARCHIVE_MEMORY, memory_id)
             if row is not None and self._has_qdrant():
                 # Архивируем и в Qdrant
+                qstart = time.monotonic()
                 self.qdrant.delete(
                     collection_name=self.qdrant_collection,
                     points_selector=qm.PointIdsList(points=[memory_id]),
                 )
+                QDRANT_OPS_TOTAL.labels(operation="delete").inc()
+                QDRANT_OPS_DURATION_SECONDS.labels(operation="delete").observe(time.monotonic() - qstart)
             return row is not None
 
     # ── Relations (без изменений — только PG) ──

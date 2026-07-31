@@ -1,3 +1,4 @@
+import asyncio
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -13,6 +14,21 @@ from memory_server.metrics import (
     HTTP_REQUEST_DURATION,
 )
 from memory_server.server import mcp, request_id_var
+
+# Lazy import Celery app — может быть не установлен при первом запуске
+_celery_app = None
+
+
+def _get_celery_app():
+    """Получить Celery app (lazy import)."""
+    global _celery_app
+    if _celery_app is None:
+        try:
+            from memory_server.celery_app import app as celery_app
+            _celery_app = celery_app
+        except ImportError:
+            return None
+    return _celery_app
 
 
 class AuthASGIMiddleware:
@@ -55,6 +71,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan, title=settings.mcp_server_name)
+
+# ---- REST API: tasks management ----
+from memory_server.api.tasks import router as tasks_router
+app.include_router(tasks_router)
 
 
 # ---- Middleware: аутентификация ----
@@ -100,8 +120,54 @@ async def metrics_middleware(request: Request, call_next):
 # ---- Health ----
 @app.get("/health")
 async def health():
+    checks = {}
+
+    # PostgreSQL — lightweight probe (не полагаемся на pool singleton)
+    try:
+        import asyncpg
+        # asyncpg не понимает postgresql+asyncpg:// — трансформируем в postgresql://
+        dsn = settings.database_url.replace("postgresql+asyncpg://", "postgresql://")
+        conn = await asyncpg.connect(dsn)
+        await conn.fetchval("SELECT 1")
+        await conn.close()
+        checks["postgres"] = "ok"
+    except Exception as e:
+        checks["postgres"] = f"error: {e}"
+
+    # Redis — ping через async redis client
+    try:
+        import redis.asyncio as aioredis
+        r = aioredis.from_url(settings.redis_url, decode_responses=True)
+        await r.ping()
+        await r.aclose()
+        checks["redis"] = "ok"
+    except Exception as e:
+        checks["redis"] = f"error: {e}"
+
+    # Celery — inspect ping через asyncio.to_thread (sync→async)
+    celery = _get_celery_app()
+    if celery is not None:
+        try:
+            def _inspect_ping():
+                insp = celery.control.inspect(timeout=5)
+                return insp.ping()
+
+            ping_result = await asyncio.to_thread(_inspect_ping)
+            if ping_result:
+                checks["celery"] = f"ok ({len(ping_result)} workers)"
+            else:
+                checks["celery"] = "error: no workers responding"
+        except Exception as e:
+            checks["celery"] = f"error: {e}"
+    else:
+        checks["celery"] = "unavailable (celery_app not configured)"
+
+    overall_status = "ok" if all(
+        v == "ok" or v.startswith("ok") for v in checks.values()
+    ) else "degraded"
+
     return {
-        "status": "ok",
+        "status": overall_status,
         "server": settings.mcp_server_name,
         "version": "0.1.0",
         "checks": {
@@ -109,7 +175,8 @@ async def health():
                 "dedup_enabled": settings.dedup_enabled,
                 "api_key_configured": bool(settings.api_key),
                 "redis_configured": bool(settings.redis_url),
-            }
+            },
+            **checks,
         },
     }
 

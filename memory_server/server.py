@@ -1,20 +1,11 @@
-import asyncio
 import logging
 import multiprocessing
 from contextlib import asynccontextmanager
 
 from fastmcp import FastMCP
 
-from memory_server.cache.redis_client import EmbeddingCache
 from memory_server.config import settings
-from memory_server.db.pool import close_pool, create_pool
-from memory_server.embedding.client import EmbeddingClient
 from argenta_logging import setup_logging, request_id_var
-from memory_server.memory.namespace_repository import NamespaceRepository
-from memory_server.memory.repository_qdrant import MemoryRepository
-from memory_server.vector import create_qdrant_client
-from memory_server.memory.service import MemoryService
-from memory_server.metrics import DB_POOL_SIZE, DB_POOL_AVAILABLE
 from migrations.run import run_migrations
 
 # Инициализация логирования — каждый воркер должен иметь свой logger
@@ -35,70 +26,20 @@ class _MCPSdkFilter(logging.Filter):
 logging.getLogger().addFilter(_MCPSdkFilter())
 
 
-async def _pool_metrics_updater(pool):
-    """Фоновая задача: обновляет метрики пула раз в 15 секунд."""
-    try:
-        while True:
-            DB_POOL_SIZE.set(pool.get_size())
-            DB_POOL_AVAILABLE.set(pool.get_idle_size())
-            await asyncio.sleep(15)
-    except asyncio.CancelledError:
-        pass
-
-
 @asynccontextmanager
 async def lifespan(server: FastMCP):
-    # Сначала миграции — создают extension vector, таблицы, индексы
+    # Миграции — создают extension vector, таблицы, индексы
     await run_migrations()
 
-    # Потом пул — register_vector() требует существующего vector type в БД
-    dsn = settings.database_url.replace("postgresql+asyncpg://", "postgresql://")
-    pool = await create_pool(
-        dsn=dsn,
-        min_size=settings.db_min_connections,
-        max_size=settings.db_max_connections,
-    )
-
-    DB_POOL_SIZE.set(pool.get_size())
-    DB_POOL_AVAILABLE.set(pool.get_idle_size())
-
-    metrics_task = asyncio.create_task(_pool_metrics_updater(pool))
-
-    embedding_cache = EmbeddingCache(redis_url=settings.redis_url)
-
-    embedding_client = EmbeddingClient(
-        api_url=settings.embedding_api_url,
-        api_key=settings.embedding_api_key,
-        model=settings.embedding_model,
-        dimension=settings.embedding_dimension,
-        cache=embedding_cache,
-    )
-
-    qdrant_client = await create_qdrant_client(settings)
-    repository = MemoryRepository(pool=pool, qdrant=qdrant_client, qdrant_collection=settings.qdrant_collection)
-    if qdrant_client and multiprocessing.current_process().name == "MainProcess":
-        logger.info("Qdrant connected", extra={"url": settings.qdrant_url, "collection": settings.qdrant_collection})
-    ns_repo = NamespaceRepository(pool=pool)
-    service = MemoryService(
-        repository=repository,
-        embedding_provider=embedding_client,
-        namespace_repository=ns_repo,
-        config=settings,
-    )
-
+    # MemoryService, EmbeddingClient, QdrantClient, pool —
+    # теперь worker-scoped singletons в connections.py.
+    # MCP tools отправляют задачи через Celery (task_bridge.py).
     if multiprocessing.current_process().name == "MainProcess":
         logger.info("Memory server started", extra={"model": settings.embedding_model})
 
     try:
-        yield {"service": service, "cache": embedding_cache, "ns_repo": ns_repo}
+        yield
     finally:
-        metrics_task.cancel()
-        await metrics_task
-        await embedding_client.aclose()
-        await embedding_cache.close()
-        if qdrant_client:
-            qdrant_client.close()
-        await close_pool(pool)
         if multiprocessing.current_process().name == "MainProcess":
             logger.info("Memory server shutdown complete")
 

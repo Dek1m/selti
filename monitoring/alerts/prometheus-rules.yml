@@ -1,5 +1,5 @@
 # ============================================================
-# prometheus-rules.yml — Алерты для PostgreSQL + Redis
+# prometheus-rules.yml — Алерты для PostgreSQL + Redis + Celery
 # ============================================================
 groups:
   - name: postgres
@@ -112,3 +112,134 @@ groups:
           severity: warning
         annotations:
           summary: "Cache miss rate > 30%"
+
+      - alert: RedisSlowOperations
+        expr: |
+          histogram_quantile(0.95, rate(athena_redis_ops_duration_seconds_bucket[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis операции медленные (P95 > 100ms)"
+          description: "Операция {{ $labels.operation }}, P95 = {{ $value }}s"
+
+  # ============================================================
+  # Celery tasks (по плану v3, Фаза 4)
+  # ============================================================
+  - name: celery
+    interval: 30s
+    rules:
+      # 1. Доступность воркеров
+      - alert: CeleryWorkersDown
+        expr: athena_celery_workers_active == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Нет активных Celery workers"
+          description: "Все воркеры недоступны > 2 минут"
+
+      # 2. Высокий процент ошибок
+      - alert: CeleryHighErrorRate
+        expr: |
+          rate(athena_celery_tasks_total{status="failure"}[5m])
+          /
+          (rate(athena_celery_tasks_total[5m]) > 0)
+          > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Celery error rate > 10%"
+          description: "Задача {{ $labels.task }}, {{ $value | humanizePercentage }} ошибок"
+
+      # 3. Медленные задачи (P95 duration > 30s)
+      - alert: CelerySlowTasks
+        expr: |
+          histogram_quantile(0.95, rate(athena_celery_task_duration_seconds_bucket[5m])) > 30
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Celery задачи медленные (P95 > 30s)"
+          description: "Задача {{ $labels.task }}, P95 = {{ $value }}s"
+
+      # 4. Высокая задержка в очереди (P95 latency > 5s)
+      - alert: CeleryHighQueueLatency
+        expr: |
+          histogram_quantile(0.95, rate(athena_celery_task_latency_seconds_bucket[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Celery queue latency P95 > 5s"
+          description: "Задача {{ $labels.task }} ждёт в очереди {{ $value }}s"
+
+      # 5. Много retry (> 5 в минуту)
+      - alert: CeleryHighRetryRate
+        expr: rate(athena_celery_task_retries_total[5m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Celery retry rate > 5/min"
+          description: "Задача {{ $labels.task }}, retry/sec = {{ $value }}"
+
+      # 6. Есть таймауты (любые)
+      - alert: CeleryTaskTimeouts
+        expr: increase(athena_celery_task_timeouts_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Celery task timeout"
+          description: "Задача {{ $labels.task }} таймаутнулась"
+
+      # 7. Очередь забита (> 100 pending)
+      - alert: CeleryQueueBacklog
+        expr: athena_celery_queue_length > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Celery очередь > 100 задач"
+          description: "Очередь {{ $labels.queue }}, {{ $value }} pending"
+
+  # ============================================================
+  # Selti application metrics
+  # ============================================================
+  - name: selti
+    interval: 30s
+    rules:
+      - alert: SeltiHighToolErrorRate
+        expr: |
+          rate(athena_mcp_tool_calls_total{status="error"}[5m])
+          /
+          (rate(athena_mcp_tool_calls_total[5m]) > 0)
+          > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MCP tool error rate > 5%"
+          description: "Tool {{ $labels.tool }}, {{ $value | humanizePercentage }} ошибок"
+
+      - alert: SeltiSlowToolCalls
+        expr: |
+          histogram_quantile(0.95, rate(athena_mcp_tool_duration_seconds_bucket[5m])) > 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MCP tool P95 > 10s"
+          description: "Tool {{ $labels.tool }}, P95 = {{ $value }}s"
+
+      - alert: SeltiQdrantSlowSearch
+        expr: |
+          histogram_quantile(0.95, rate(athena_qdrant_ops_duration_seconds_bucket{operation="search"}[5m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Qdrant search P95 > 1s"
+          description: "Qdrant search P95 = {{ $value }}s"

@@ -1,14 +1,19 @@
-import asyncio
+"""MCP tools for hash operations.
+
+All tools delegate to Celery tasks via celery_call().
+ACL checks and validation remain at tool level.
+"""
+
 import json
 import logging
 import re
-import time
 from typing import Any
 
 from fastmcp import Context
 
-from memory_server.metrics import MCP_TOOL_CALLS_TOTAL, MCP_TOOL_DURATION_SECONDS
 from memory_server.server import mcp
+from memory_server.tools.task_bridge import celery_call
+from memory_server.utils.metrics_decorator import track_tool_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -18,44 +23,14 @@ HASH_REGEX = re.compile(r"^[a-f0-9]{64}$")
 # Лимит metadata: 64KB
 METADATA_MAX_SIZE = 65536
 
-# Таймаут на каждый тул — 60 секунд
-TOOL_TIMEOUT_SECONDS = 60
-
 # ACL: authorized agents for write operations
 WRITE_AUTHORIZED_AGENTS = {"memory-granulator", "akame", "admin"}
 
-
-async def _track_tool(tool_name: str, coro, *, timeout: float | None = TOOL_TIMEOUT_SECONDS):
-    """Замерить и записать метрики для MCP tool с таймаутом."""
-    start = time.monotonic()
-    logger.info("tool: START", extra={"tool": tool_name, "timeout": timeout})
-    try:
-        if timeout is not None:
-            result = await asyncio.wait_for(coro, timeout=timeout)
-        else:
-            result = await coro
-        duration = time.monotonic() - start
-        MCP_TOOL_CALLS_TOTAL.labels(tool=tool_name, status="ok").inc()
-        MCP_TOOL_DURATION_SECONDS.labels(tool=tool_name).observe(duration)
-        logger.info("tool: DONE", extra={"tool": tool_name, "duration_ms": round(duration * 1000, 1)})
-        return result
-    except asyncio.TimeoutError:
-        duration = time.monotonic() - start
-        MCP_TOOL_CALLS_TOTAL.labels(tool=tool_name, status="timeout").inc()
-        MCP_TOOL_DURATION_SECONDS.labels(tool=tool_name).observe(duration)
-        logger.error("tool: TIMEOUT", extra={
-            "tool": tool_name, "duration_ms": round(duration * 1000, 1), "timeout": timeout,
-        })
-        raise TimeoutError(f"Tool '{tool_name}' timed out after {timeout}s") from None
-    except Exception:
-        duration = time.monotonic() - start
-        MCP_TOOL_CALLS_TOTAL.labels(tool=tool_name, status="error").inc()
-        MCP_TOOL_DURATION_SECONDS.labels(tool=tool_name).observe(duration)
-        logger.error("tool: ERROR", extra={"tool": tool_name, "duration_ms": round(duration * 1000, 1)})
-        raise
-    finally:
-        duration = time.monotonic() - start
-        logger.info("tool: FINALLY", extra={"tool": tool_name, "total_duration_ms": round(duration * 1000, 1)})
+# Имена задач
+TASK_UPSERT_HASH = "memory_server.tasks.hash_tasks.upsert_hash"
+TASK_GET_HASH = "memory_server.tasks.hash_tasks.get_hash"
+TASK_LIST_HASHES = "memory_server.tasks.hash_tasks.list_hashes"
+TASK_DELETE_HASH = "memory_server.tasks.hash_tasks.delete_hash"
 
 
 def _validate_hash(content_hash: str) -> None:
@@ -80,6 +55,7 @@ def _check_write_auth(ctx: Context | None) -> None:
 
 
 @mcp.tool()
+@track_tool_metrics("hash_upsert")
 async def hash_upsert(
     source_type: str,
     source_id: str,
@@ -97,23 +73,18 @@ async def hash_upsert(
     _validate_hash(content_hash)
     _validate_metadata_size(metadata)
 
-    from memory_server.memory.hash_repository import HashRepository
-    from memory_server.server import request_id_var
-
-    service = ctx.request_context.lifespan_context["service"]
-    repo = HashRepository(service.repository.pool)
-
     try:
-        result = await _track_tool("hash_upsert", repo.upsert(
+        result = await celery_call(
+            TASK_UPSERT_HASH,
             source_type=source_type,
             source_id=source_id,
             content_hash=content_hash,
             size_bytes=size_bytes,
             metadata=metadata,
-        ))
+        )
         logger.info("hash_upsert: done", extra={
-            "id": result["id"], "created_at": str(result["created_at"]),
-            "updated_at": str(result["updated_at"]),
+            "id": result.get("id"), "created_at": str(result.get("created_at")),
+            "updated_at": str(result.get("updated_at")),
         })
         return result
     except Exception as e:
@@ -122,6 +93,7 @@ async def hash_upsert(
 
 
 @mcp.tool()
+@track_tool_metrics("hash_get")
 async def hash_get(
     source_type: str,
     source_id: str,
@@ -130,15 +102,14 @@ async def hash_get(
     """Get stored hash for a specific source."""
     logger.info("hash_get", extra={"source_type": source_type, "source_id": source_id})
 
-    from memory_server.memory.hash_repository import HashRepository
-
-    service = ctx.request_context.lifespan_context["service"]
-    repo = HashRepository(service.repository.pool)
-
     try:
-        result = await _track_tool("hash_get", repo.get(source_type, source_id))
+        result = await celery_call(
+            TASK_GET_HASH,
+            source_type=source_type,
+            source_id=source_id,
+        )
         if result:
-            logger.info("hash_get: found", extra={"id": result["id"], "hash": result["content_hash"][:16]})
+            logger.info("hash_get: found", extra={"id": result.get("id"), "hash": result.get("content_hash", "")[:16]})
         else:
             logger.info("hash_get: not found")
         return result
@@ -148,6 +119,7 @@ async def hash_get(
 
 
 @mcp.tool()
+@track_tool_metrics("hash_list")
 async def hash_list(
     source_type: str | None = None,
     updated_since: str | None = None,
@@ -162,24 +134,18 @@ async def hash_list(
         "project": project, "limit": limit,
     })
 
-    from datetime import datetime
-    from memory_server.memory.hash_repository import HashRepository
-
-    service = ctx.request_context.lifespan_context["service"]
-    repo = HashRepository(service.repository.pool)
-
     # Ограничение limit
     limit = min(limit, 500)
-    since = datetime.fromisoformat(updated_since) if updated_since else None
 
     try:
-        results = await _track_tool("hash_list", repo.list(
+        results = await celery_call(
+            TASK_LIST_HASHES,
             source_type=source_type,
-            updated_since=since,
+            updated_since=updated_since,
             project=project,
             limit=limit,
             offset=offset,
-        ))
+        )
         logger.info("hash_list: done", extra={"count": len(results)})
         return results
     except Exception as e:
@@ -188,6 +154,7 @@ async def hash_list(
 
 
 @mcp.tool()
+@track_tool_metrics("hash_delete")
 async def hash_delete(
     source_type: str,
     source_id: str,
@@ -202,15 +169,14 @@ async def hash_delete(
     # ACL
     _check_write_auth(ctx)
 
-    from memory_server.memory.hash_repository import HashRepository
-
-    service = ctx.request_context.lifespan_context["service"]
-    repo = HashRepository(service.repository.pool)
-
     try:
-        deleted_id = await _track_tool("hash_delete", repo.delete(source_type, source_id))
-        logger.warning("hash_delete: done", extra={"deleted_id": deleted_id})
-        return {"id": deleted_id, "success": deleted_id is not None}
+        result = await celery_call(
+            TASK_DELETE_HASH,
+            source_type=source_type,
+            source_id=source_id,
+        )
+        logger.warning("hash_delete: done", extra={"deleted_id": result.get("id")})
+        return result
     except Exception as e:
         logger.exception("Failed to delete hash")
         raise RuntimeError(str(e)) from e

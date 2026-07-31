@@ -1,0 +1,184 @@
+# ============================================================
+# docker-compose.yml — Основной стек athena-memory (selti)
+# ============================================================
+# Использование:
+#   docker compose up -d                    # Без Celery workers
+#   docker compose --profile dev up -d      # С Flower
+# ============================================================
+
+services:
+  # ── Selti MCP Server ──────────────────────────────────────
+  selti:
+    build: .
+    container_name: athena-memory
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - athena-net
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # ── Celery Worker ─────────────────────────────────────────
+  celery-worker:
+    build: .
+    container_name: athena-celery-worker
+    restart: unless-stopped
+    command: >
+      celery -A memory_server.celery_app worker
+      -Q memory,batch,hash
+      -c 4
+      --without-gossip
+      --without-mingle
+      --without-heartbeat
+      --max-tasks-per-child=1000
+      --max-memory-per-child=200000
+      -l INFO
+      --logfile=-
+    env_file: .env
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - DATABASE_URL=postgresql+asyncpg://athena:athena@postgres:5432/athene_memory
+      - QDRANT_URL=http://qdrant:6333
+      - SERVICE_NAME=selti-worker
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "celery", "-A", "memory_server.celery_app", "inspect", "ping", "--timeout=10"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+    networks:
+      - athena-net
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # ── Flower (dev profile) ──────────────────────────────────
+  flower:
+    build: .
+    container_name: athena-flower
+    command: celery -A memory_server.celery_app flower --port=5555
+    env_file: .env
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+    ports:
+      - "5555:5555"
+    depends_on:
+      redis:
+        condition: service_healthy
+    profiles:
+      - dev
+    networks:
+      - athena-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  # ── Redis ─────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: athena-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - athena-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  # ── PostgreSQL ────────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: athena-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: athena
+      POSTGRES_PASSWORD: athena
+      POSTGRES_DB: athene_memory
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U athena -d athene_memory"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - athena-net
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # ── Qdrant ────────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:v1.12.1
+    container_name: athena-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:6333/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - athena-net
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+# ── Volumes ────────────────────────────────────────────────
+volumes:
+  redis-data:
+  postgres-data:
+  qdrant-data:
+
+# ── Networks ───────────────────────────────────────────────
+networks:
+  athena-net:
+    driver: bridge

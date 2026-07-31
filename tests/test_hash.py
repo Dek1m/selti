@@ -249,8 +249,8 @@ class TestHashTools:
             "updated_at": now,
         })
 
-        with patch("memory_server.tools.hash_tools._track_tool", new_callable=AsyncMock) as mock_track:
-            mock_track.return_value = {"id": "hash-1", "created_at": now, "updated_at": now}
+        with patch("memory_server.tools.hash_tools.celery_call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = {"id": "hash-1", "created_at": now, "updated_at": now}
             result = await hash_upsert(
                 source_type="session",
                 source_id="s1",
@@ -261,7 +261,7 @@ class TestHashTools:
             )
 
         assert result["id"] == "hash-1"
-        mock_track.assert_awaited_once()
+        mock_call.assert_awaited_once()
 
     # -- hash_get --
 
@@ -283,8 +283,8 @@ class TestHashTools:
             "updated_at": now,
         })
 
-        with patch("memory_server.tools.hash_tools._track_tool", new_callable=AsyncMock) as mock_track:
-            mock_track.return_value = {
+        with patch("memory_server.tools.hash_tools.celery_call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = {
                 "id": "hash-1",
                 "source_type": "session",
                 "source_id": "s1",
@@ -298,7 +298,7 @@ class TestHashTools:
 
         assert result is not None
         assert result["content_hash"] == "a" * 64
-        mock_track.assert_awaited_once()
+        mock_call.assert_awaited_once()
 
     # -- hash_delete --
 
@@ -348,12 +348,12 @@ class TestHashTools:
             {"id": "h2", "source_type": "file", "source_id": "f1"},
         ])
 
-        with patch("memory_server.tools.hash_tools._track_tool", new_callable=AsyncMock) as mock_track:
-            mock_track.return_value = [
+        with patch("memory_server.tools.hash_tools.celery_call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = [
                 {"id": "h1", "source_type": "session", "source_id": "s1"},
                 {"id": "h2", "source_type": "file", "source_id": "f1"},
             ]
             result = await hash_list(ctx=ctx)
 
         assert len(result) == 2
-        mock_track.assert_awaited_once()
+        mock_call.assert_awaited_once()

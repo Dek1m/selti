@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Optional
 
 import httpx
@@ -6,7 +7,11 @@ import httpx
 from memory_server.cache.redis_client import EmbeddingCache
 from memory_server.embedding.provider import EmbeddingProvider
 from memory_server.exceptions import EmbeddingError
-from memory_server.metrics import EMBEDDING_CACHE_HITS, EMBEDDING_CACHE_MISSES
+from memory_server.metrics import (
+    EMBEDDING_CACHE_HITS,
+    EMBEDDING_CACHE_MISSES,
+    EMBEDDING_DURATION,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,10 +62,13 @@ class EmbeddingClient(EmbeddingProvider):
 
     async def _request_embedding(self, text: str) -> list[float]:
         client = await self._get_client()
+        start = time.monotonic()
         response = await client.post(
             "/embeddings",
             json={"model": self.model, "input": text},
         )
+        duration = time.monotonic() - start
+        EMBEDDING_DURATION.observe(duration)
         if response.status_code != 200:
             detail = response.text
             try:
@@ -113,10 +121,13 @@ class EmbeddingClient(EmbeddingProvider):
 
     async def _batch_request(self, texts: list[str]) -> list[list[float]]:
         client = await self._get_client()
+        start = time.monotonic()
         response = await client.post(
             "/embeddings",
             json={"model": self.model, "input": texts},
         )
+        duration = time.monotonic() - start
+        EMBEDDING_DURATION.observe(duration)
         if response.status_code != 200:
             detail = response.text
             try:

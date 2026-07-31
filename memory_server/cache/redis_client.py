@@ -1,9 +1,15 @@
 import hashlib
 import json
 import logging
+import time
 from typing import Optional
 
 import redis.asyncio as aioredis
+
+from memory_server.metrics import (
+    REDIS_OPS_TOTAL,
+    REDIS_OPS_DURATION_SECONDS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,38 +45,70 @@ class EmbeddingCache:
         """Получить эмбеддинг из кеша. Miss → None."""
         client = await self._get_client()
         key = self._make_key(text)
-        cached = await client.get(key)
-        if cached is None:
-            return None
-        return json.loads(cached)
+        start = time.monotonic()
+        try:
+            cached = await client.get(key)
+            duration = time.monotonic() - start
+            REDIS_OPS_TOTAL.labels(operation="get").inc()
+            REDIS_OPS_DURATION_SECONDS.labels(operation="get").observe(duration)
+            if cached is None:
+                return None
+            return json.loads(cached)
+        except Exception:
+            REDIS_OPS_TOTAL.labels(operation="get").inc()
+            raise
 
     async def set(self, text: str, embedding: list[float]) -> None:
         """Сохранить эмбеддинг в кеш."""
         client = await self._get_client()
         key = self._make_key(text)
-        await client.setex(key, self.ttl, json.dumps(embedding))
+        start = time.monotonic()
+        try:
+            await client.setex(key, self.ttl, json.dumps(embedding))
+            duration = time.monotonic() - start
+            REDIS_OPS_TOTAL.labels(operation="set").inc()
+            REDIS_OPS_DURATION_SECONDS.labels(operation="set").observe(duration)
+        except Exception:
+            REDIS_OPS_TOTAL.labels(operation="set").inc()
+            raise
 
     async def mget(self, texts: list[str]) -> list[Optional[list[float]]]:
         """Batch-получение. Возвращает список (embedding или None)."""
         client = await self._get_client()
         keys = [self._make_key(t) for t in texts]
-        cached = await client.mget(keys)
-        result = []
-        for val in cached:
-            if val is None:
-                result.append(None)
-            else:
-                result.append(json.loads(val))
-        return result
+        start = time.monotonic()
+        try:
+            cached = await client.mget(keys)
+            duration = time.monotonic() - start
+            REDIS_OPS_TOTAL.labels(operation="mget").inc()
+            REDIS_OPS_DURATION_SECONDS.labels(operation="mget").observe(duration)
+            result = []
+            for val in cached:
+                if val is None:
+                    result.append(None)
+                else:
+                    result.append(json.loads(val))
+            return result
+        except Exception:
+            REDIS_OPS_TOTAL.labels(operation="mget").inc()
+            raise
 
     async def mset(self, pairs: list[tuple[str, list[float]]]) -> None:
         """Batch-сохранение: [(text, embedding), ...]."""
         client = await self._get_client()
-        async with client.pipeline() as pipe:
-            for text, embedding in pairs:
-                key = self._make_key(text)
-                await pipe.setex(key, self.ttl, json.dumps(embedding))
-            await pipe.execute()
+        start = time.monotonic()
+        try:
+            async with client.pipeline() as pipe:
+                for text, embedding in pairs:
+                    key = self._make_key(text)
+                    await pipe.setex(key, self.ttl, json.dumps(embedding))
+                await pipe.execute()
+            duration = time.monotonic() - start
+            REDIS_OPS_TOTAL.labels(operation="mset").inc()
+            REDIS_OPS_DURATION_SECONDS.labels(operation="mset").observe(duration)
+        except Exception:
+            REDIS_OPS_TOTAL.labels(operation="mset").inc()
+            raise
 
     async def close(self) -> None:
         if self._client is not None:
