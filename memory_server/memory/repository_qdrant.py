@@ -141,7 +141,6 @@ class MemoryRepository:
                     q.INSERT_MEMORY,
                     user_ids,
                     contents,
-                    [None] * len(user_ids),  # embedding = NULL в PG
                     metadatas,
                     namespaces,
                     namespace_ids,
@@ -155,7 +154,6 @@ class MemoryRepository:
                     q.INSERT_MEMORY,
                     user_ids,
                     contents,
-                    embeddings,
                     metadatas,
                     namespaces,
                     namespace_ids,
