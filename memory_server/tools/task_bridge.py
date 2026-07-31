@@ -26,7 +26,8 @@ def run_task(
 ):
     """Отправить задачу в Celery и дождаться результата (sync context).
 
-    Вызывается из asyncio.to_thread() в MCP tools.
+    Использует polling через result.ready() вместо result.get(),
+    чтобы избежать конфликта async Redis backend с event loop.
     """
     start = time.monotonic()
     logger.info("task_bridge: SEND", extra={
@@ -36,13 +37,31 @@ def run_task(
     result: AsyncResult = app.send_task(task_name, kwargs=kwargs)
 
     try:
-        value = result.get(timeout=timeout)
+        # Poll until ready or timeout
+        while not result.ready():
+            if time.monotonic() - start > timeout:
+                raise TimeoutError()
+            time.sleep(0.1)
+
+        # Check for task-level failure
+        if result.failed():
+            exc = result.result
+            raise exc
+
+        value = result.result
         elapsed_ms = round((time.monotonic() - start) * 1000, 1)
         logger.info("task_bridge: OK", extra={
             "task_name": task_name, "task_id": result.id,
             "duration_ms": elapsed_ms,
         })
         return value
+    except TimeoutError:
+        elapsed_ms = round((time.monotonic() - start) * 1000, 1)
+        logger.error("task_bridge: TIMEOUT", extra={
+            "task_name": task_name, "task_id": result.id,
+            "duration_ms": elapsed_ms, "timeout": timeout,
+        })
+        raise TimeoutError(f"Task {task_name} timed out after {timeout}s")
     except Exception as e:
         elapsed_ms = round((time.monotonic() - start) * 1000, 1)
         logger.error("task_bridge: ERROR", extra={
