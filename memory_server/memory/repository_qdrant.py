@@ -669,6 +669,21 @@ class MemoryRepository:
                 for row in rows
             ]
 
+    async def sync_links_to_relations(self, memory_id: str) -> int:
+        """Синхронизировать metadata.links → relations для одной гранулы."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(q.DELETE_SYNCED_RELATIONS, memory_id)
+            rows = await conn.fetch(q.BACKFILL_RELATIONS_FROM_METADATA, memory_id)
+            return len(rows)
+
+    async def sync_links_batch(self, memory_ids: list[str]) -> int:
+        """Batch-синхронизация metadata.links → relations для списка гранул."""
+        if not memory_ids:
+            return 0
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(q.SYNC_LINKS_BATCH, memory_ids)
+            return len(rows)
+
     async def get_graph_stats(self) -> GraphStats:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(q.GRAPH_STATS)
