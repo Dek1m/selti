@@ -35,7 +35,7 @@ services:
       DATABASE_URL: ${DATABASE_URL}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       SERVICE_NAME: selti
-      UVICORN_WORKERS: ${UVICORN_WORKERS:-4}
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-1}
     depends_on:
       postgres:
         condition: service_healthy

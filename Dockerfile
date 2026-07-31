@@ -33,13 +33,13 @@ COPY VERSION ./VERSION
 
 EXPOSE 8000
 
-# --workers 4 = 4 процессов, каждый с event loop
+# --workers 1 = 1 процесс (memory server не CPU-bound, логи пишутся 1 раз)
 # --loop uvloop = быстрый event loop (uvloop входит в uvicorn[standard])
 # --timeout-graceful-shutdown 30 = 30s на graceful shutdown
 # --backlog 2048 = очередь соединений
 ENTRYPOINT ["uvicorn", "memory_server.__main__:app", \
     "--host", "0.0.0.0", "--port", "8000", \
-    "--workers", "4", \
+    "--workers", "1", \
     "--loop", "uvloop", \
     "--timeout-graceful-shutdown", "30", \
     "--backlog", "2048"]

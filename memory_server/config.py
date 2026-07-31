@@ -51,7 +51,7 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
-    uvicorn_workers: int = 4
+    uvicorn_workers: int = 1
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
