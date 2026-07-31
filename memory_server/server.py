@@ -17,9 +17,8 @@ from memory_server.memory.service import MemoryService
 from memory_server.metrics import DB_POOL_SIZE, DB_POOL_AVAILABLE
 from migrations.run import run_migrations
 
-# Инициализация логирования — только в главном процессе (4 воркера не дублируют)
-if multiprocessing.current_process().name == "MainProcess":
-    setup_logging(service="selti")
+# Инициализация логирования — каждый воркер должен иметь свой logger
+setup_logging(service="selti")
 
 logger = logging.getLogger(__name__)
 
