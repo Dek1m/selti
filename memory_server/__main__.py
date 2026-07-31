@@ -1,3 +1,4 @@
+import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -13,6 +14,13 @@ from memory_server.metrics import (
     HTTP_REQUEST_DURATION,
 )
 from memory_server.server import mcp, request_id_var
+
+
+class _TerminatingSessionFilter(logging.Filter):
+    """Подавляет спам 'Terminating session: None' от MCP SDK."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "Terminating session" not in record.getMessage()
 
 
 class AuthASGIMiddleware:
@@ -132,6 +140,9 @@ app.mount("/mcp", AuthASGIMiddleware(mcp_http_app))
 
 
 if __name__ == "__main__":
+    # Подавляем спам "Terminating session: None" от MCP SDK
+    logging.getLogger().addFilter(_TerminatingSessionFilter())
+
     uvicorn.run(
         "memory_server.__main__:app",
         host=settings.mcp_host,
@@ -141,4 +152,5 @@ if __name__ == "__main__":
         loop="uvloop",
         timeout_graceful_shutdown=30,
         backlog=2048,
+        access_log=False,
     )
