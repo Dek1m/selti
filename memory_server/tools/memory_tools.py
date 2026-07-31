@@ -196,6 +196,7 @@ async def memory_ingest_batch(
     async def _run():
         summary: dict[str, int] = {"insert": 0, "skip": 0, "update": 0}
         results = []
+        to_insert: list[dict] = []
 
         logger.info("memory_ingest_batch: START", extra={
             "entries": len(entries), "user_id": user_id,
