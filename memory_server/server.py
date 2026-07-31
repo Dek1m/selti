@@ -1,7 +1,6 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from contextvars import ContextVar
 
 from fastmcp import FastMCP
 
@@ -9,16 +8,13 @@ from memory_server.cache.redis_client import EmbeddingCache
 from memory_server.config import settings
 from memory_server.db.pool import close_pool, create_pool
 from memory_server.embedding.client import EmbeddingClient
-from argenta_logging import setup_logging
+from argenta_logging import setup_logging, request_id_var
 from memory_server.memory.namespace_repository import NamespaceRepository
 from memory_server.memory.repository_qdrant import MemoryRepository
 from memory_server.vector import create_qdrant_client
 from memory_server.memory.service import MemoryService
 from memory_server.metrics import DB_POOL_SIZE, DB_POOL_AVAILABLE
 from migrations.run import run_migrations
-
-# Correlation ID через contextvars — пробрасывается из middleware __main__.py
-request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
 
 # Инициализация логирования по стандарту Argenta Team
 setup_logging()

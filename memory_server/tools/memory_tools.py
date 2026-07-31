@@ -210,14 +210,12 @@ async def memory_ingest_batch(
                 "content_len": len(entry.get("content", "")),
             })
 
-        # Phase 1: Dedup check for each entry
-        to_insert = []  # entries that need insertion
-        for entry in entries:
-            ns = entry.get("namespace", "default")
-            entry_metadata = _coerce_metadata(entry.get("metadata"))
-
-            if service.config.dedup_enabled:
-                decision = await service.dedup.check(entry["content"], user_id, ns, metadata=entry_metadata)
+        # Phase 1: Batch dedup — вместо serial check × N
+        if service.config.dedup_enabled:
+            decisions = await service.dedup.check_batch(entries, user_id)
+            for i, (entry, decision) in enumerate(zip(entries, decisions)):
+                ns = entry.get("namespace", "default")
+                entry_metadata = _coerce_metadata(entry.get("metadata"))
                 logger.info("memory_ingest_batch: dedup", extra={
                     "namespace": ns, "action": decision.action.value,
                     "existing_id": decision.existing_id, "score": decision.existing_score,
@@ -231,14 +229,26 @@ async def memory_ingest_batch(
                     })
                     continue
 
-            to_insert.append({
-                "content": entry["content"],
-                "metadata": entry_metadata or {},
-                "namespace": ns,
-                "importance": entry.get("importance", 3),
-                "content_hash": decision.content_hash if service.config.dedup_enabled else None,
-                "embedding": decision.embedding if service.config.dedup_enabled else None,
-            })
+                to_insert.append({
+                    "content": entry["content"],
+                    "metadata": entry_metadata or {},
+                    "namespace": ns,
+                    "importance": entry.get("importance", 3),
+                    "content_hash": decision.content_hash,
+                    "embedding": decision.embedding,
+                })
+        else:
+            for entry in entries:
+                ns = entry.get("namespace", "default")
+                entry_metadata = _coerce_metadata(entry.get("metadata"))
+                to_insert.append({
+                    "content": entry["content"],
+                    "metadata": entry_metadata or {},
+                    "namespace": ns,
+                    "importance": entry.get("importance", 3),
+                    "content_hash": None,
+                    "embedding": None,
+                })
 
         logger.info("memory_ingest_batch: phase1 complete", extra={
             "to_insert": len(to_insert), "skipped": summary["skip"], "updated": summary["update"],
@@ -278,18 +288,16 @@ async def memory_ingest_batch(
                     logger.exception("Embedding failed", extra={"count": len(texts_to_embed)})
                     raise
 
-            # Phase 3: Resolve namespace_ids
-            namespace_ids = []
-            for item in to_insert:
-                try:
-                    ns_record = await service.ns_repo.get_or_create(item["namespace"])
-                    namespace_ids.append(ns_record.id)
-                    logger.info("memory_ingest_batch: ns_resolve", extra={
-                        "namespace": item["namespace"], "id": ns_record.id,
-                    })
-                except Exception as e:
-                    logger.exception("Failed to resolve namespace", extra={"namespace": item["namespace"]})
-                    raise
+            # Phase 3: Resolve namespace_ids — параллельно
+            ns_names = [item["namespace"] for item in to_insert]
+            ns_records = await asyncio.gather(*[
+                service.ns_repo.get_or_create(ns) for ns in ns_names
+            ])
+            namespace_ids = [ns_record.id for ns_record in ns_records]
+            for ns, ns_id in zip(ns_names, namespace_ids):
+                logger.info("memory_ingest_batch: ns_resolve", extra={
+                    "namespace": ns, "id": ns_id,
+                })
 
             # Phase 4: Batch SQL insert
             if to_insert:

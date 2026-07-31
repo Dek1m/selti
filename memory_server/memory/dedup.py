@@ -107,3 +107,96 @@ class DedupEngine:
             content_hash=content_hash,
             embedding=vector,
         )
+
+    async def check_batch(
+        self,
+        entries: list[dict],
+        user_id: str,
+    ) -> list[DedupDecision]:
+        """Batch dedup: exact hash check для всех, затем batch embedding + semantic search.
+
+        Оптимизация: вместо serial embed() × N делаем batch embed_many() один раз.
+        """
+        if not self.config.dedup_enabled:
+            return [
+                DedupDecision(
+                    action=DedupAction.INSERT,
+                    content_hash=hashlib.sha256(e["content"].encode()).hexdigest(),
+                )
+                for e in entries
+            ]
+
+        # Phase 1: content hashes для всех entries (CPU-only, мгновенно)
+        hashes = [hashlib.sha256(e["content"].encode()).hexdigest() for e in entries]
+
+        # Phase 2: exact dedup — batch lookup по namespace + hash
+        # Группируем по namespace для эффективных запросов
+        ns_groups: dict[str, list[tuple[int, str]]] = {}
+        for i, (entry, h) in enumerate(zip(entries, hashes)):
+            ns = entry.get("namespace", "default")
+            ns_groups.setdefault(ns, []).append((i, h))
+
+        decisions: list[DedupDecision | None] = [None] * len(entries)
+        for ns, items in ns_groups.items():
+            for idx, h in items:
+                existing = await self.repository.find_by_content_hash(ns, h)
+                if existing is not None:
+                    action = DedupAction.UPDATE if ns == "user_facts" else DedupAction.SKIP
+                    DEDUP_SKIPPED_TOTAL.labels(namespace=ns, reason="exact").inc()
+                    decisions[idx] = DedupDecision(
+                        action=action,
+                        existing_id=existing.id,
+                        content_hash=h,
+                    )
+
+        # Phase 3: соберём тексты для semantic dedup (только те, что не exact-match)
+        to_embed_indices = [i for i, d in enumerate(decisions) if d is None]
+        if not to_embed_indices:
+            return decisions  # type: ignore[return-value]
+
+        texts_to_embed = [entries[i]["content"] for i in to_embed_indices]
+
+        # Batch embedding — один запрос вместо N
+        embeddings = await self.embedding.embed_many(texts_to_embed)
+
+        # Phase 4: semantic dedup для каждого кандидата
+        for local_i, global_i in enumerate(to_embed_indices):
+            entry = entries[global_i]
+            ns = entry.get("namespace", "default")
+            h = hashes[global_i]
+            vector = embeddings[local_i]
+
+            threshold = self.config.dedup_thresholds.get(ns, self.config.dedup_threshold)
+            results = await self.repository.search(
+                query_embedding=vector,
+                user_id=user_id,
+                namespace=ns,
+                threshold=threshold,
+                limit=5,
+            )
+
+            if results and results[0].score >= threshold:
+                incoming_entity = (entry.get("metadata") or {}).get("entity_name", "").strip().lower()
+                existing_entity = (results[0].metadata or {}).get("entity_name", "").strip().lower()
+
+                if incoming_entity and existing_entity and incoming_entity != existing_entity:
+                    pass  # не дубль — entity_name разный
+                else:
+                    best = results[0]
+                    DEDUP_SKIPPED_TOTAL.labels(namespace=ns, reason="semantic").inc()
+                    decisions[global_i] = DedupDecision(
+                        action=DedupAction.SKIP,
+                        existing_id=best.id,
+                        existing_score=best.score,
+                        content_hash=h,
+                    )
+                    continue
+
+            DEDUP_INSERTED_TOTAL.labels(namespace=ns).inc()
+            decisions[global_i] = DedupDecision(
+                action=DedupAction.INSERT,
+                content_hash=h,
+                embedding=vector,
+            )
+
+        return decisions  # type: ignore[return-value]
