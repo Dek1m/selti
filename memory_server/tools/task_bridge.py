@@ -56,6 +56,11 @@ async def celery_call(task_name: str, **kwargs):
     """Async обёртка: отправить задачу в Celery и ждать результат.
 
     Используется в MCP tools вместо прямых вызовов MemoryService.
+    Использует loop.run_in_executor для блокирующего result.get().
     """
+    import functools
     from memory_server.celery_app import app
-    return await asyncio.to_thread(run_task, app, task_name, **kwargs)
+
+    loop = asyncio.get_event_loop()
+    func = functools.partial(run_task, app, task_name, **kwargs)
+    return await loop.run_in_executor(None, func)
