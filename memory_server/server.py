@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import multiprocessing
 from contextlib import asynccontextmanager
 
 from fastmcp import FastMCP
@@ -16,10 +17,23 @@ from memory_server.memory.service import MemoryService
 from memory_server.metrics import DB_POOL_SIZE, DB_POOL_AVAILABLE
 from migrations.run import run_migrations
 
-# Инициализация логирования по стандарту Argenta Team
-setup_logging(service="selti")
+# Инициализация логирования — только в главном процессе (4 воркера не дублируют)
+if multiprocessing.current_process().name == "MainProcess":
+    setup_logging(service="selti")
 
 logger = logging.getLogger(__name__)
+
+# Подавляем шум MCP SDK (Terminating session, StreamableHTTP lifecycle)
+_MCP_SUPPRESSED = ("Terminating session", "StreamableHTTP session manager")
+
+
+class _MCPSdkFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not any(s in msg for s in _MCP_SUPPRESSED)
+
+
+logging.getLogger().addFilter(_MCPSdkFilter())
 
 
 async def _pool_metrics_updater(pool):
@@ -63,7 +77,7 @@ async def lifespan(server: FastMCP):
 
     qdrant_client = await create_qdrant_client(settings)
     repository = MemoryRepository(pool=pool, qdrant=qdrant_client, qdrant_collection=settings.qdrant_collection)
-    if qdrant_client:
+    if qdrant_client and multiprocessing.current_process().name == "MainProcess":
         logger.info("Qdrant connected", extra={"url": settings.qdrant_url, "collection": settings.qdrant_collection})
     ns_repo = NamespaceRepository(pool=pool)
     service = MemoryService(
@@ -73,7 +87,8 @@ async def lifespan(server: FastMCP):
         config=settings,
     )
 
-    logger.info("Memory server started", extra={"model": settings.embedding_model})
+    if multiprocessing.current_process().name == "MainProcess":
+        logger.info("Memory server started", extra={"model": settings.embedding_model})
 
     try:
         yield {"service": service, "cache": embedding_cache, "ns_repo": ns_repo}
@@ -85,7 +100,8 @@ async def lifespan(server: FastMCP):
         if qdrant_client:
             qdrant_client.close()
         await close_pool(pool)
-        logger.info("Memory server shutdown complete")
+        if multiprocessing.current_process().name == "MainProcess":
+            logger.info("Memory server shutdown complete")
 
 
 mcp = FastMCP(
