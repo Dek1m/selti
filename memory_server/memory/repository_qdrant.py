@@ -138,7 +138,7 @@ class MemoryRepository:
             # embeddings игнорируются для PG (они в Qdrant)
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch(
-                    q.INSERT_MEMORY,
+                    q.INSERT_MEMORY_BATCH,
                     user_ids,
                     contents,
                     metadatas,
@@ -151,7 +151,7 @@ class MemoryRepository:
         else:
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch(
-                    q.INSERT_MEMORY,
+                    q.INSERT_MEMORY_BATCH,
                     user_ids,
                     contents,
                     metadatas,
