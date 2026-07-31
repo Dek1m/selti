@@ -9,7 +9,7 @@ from memory_server.cache.redis_client import EmbeddingCache
 from memory_server.config import settings
 from memory_server.db.pool import close_pool, create_pool
 from memory_server.embedding.client import EmbeddingClient
-from memory_server.logger import setup_logging
+from argenta_logging import setup_logging
 from memory_server.memory.namespace_repository import NamespaceRepository
 from memory_server.memory.repository_qdrant import MemoryRepository
 from memory_server.vector import create_qdrant_client
@@ -21,7 +21,7 @@ from migrations.run import run_migrations
 request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
 
 # Инициализация логирования по стандарту Argenta Team
-setup_logging(level=settings.log_level)
+setup_logging()
 
 logger = logging.getLogger(__name__)
 

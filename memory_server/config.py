@@ -15,7 +15,7 @@ class Namespace(str, Enum):
 class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://athena:athena@localhost:5432/athene_memory"
     db_min_connections: int = 2
-    db_max_connections: int = 20
+    db_max_connections: int = 10
 
     embedding_api_url: str = "http://10.0.0.21:8080/v1"
     embedding_api_key: str = ""
@@ -50,6 +50,8 @@ class Settings(BaseSettings):
     redis_url: str = "redis://:@redis:6379/0"
 
     log_level: str = "INFO"
+
+    uvicorn_workers: int = 4
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 

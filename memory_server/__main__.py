@@ -137,4 +137,8 @@ if __name__ == "__main__":
         host=settings.mcp_host,
         port=settings.mcp_port,
         log_level=settings.log_level.lower(),
+        workers=settings.uvicorn_workers,
+        loop="uvloop",
+        timeout_graceful_shutdown=30,
+        backlog=2048,
     )

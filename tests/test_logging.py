@@ -9,14 +9,16 @@ import logging
 import re
 import sys
 
-from memory_server.logger import PosixFormatter, SERVICE_NAME
+from argenta_logging import PosixFormatter
+
+SERVICE_NAME = "selti"
 
 
 class TestPosixFormatter:
     """Проверка PosixFormatter."""
 
     def setup_method(self):
-        self.formatter = PosixFormatter()
+        self.formatter = PosixFormatter(service="selti")
         self.logger = logging.getLogger("test_logger")
         self.logger.handlers.clear()
         self.logger.setLevel(logging.DEBUG)

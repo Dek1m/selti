@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 import pytest
 
-from memory_server.logger import PosixFormatter, get_logger, setup_logging
+from argenta_logging import PosixFormatter, get_logger, setup_logging
 
 
 # ── Регулярка для проверки формата ─────────────────────────────
@@ -305,33 +305,19 @@ class TestDockerIntegration:
                 assert handler.stream is sys.stdout
 
     def test_service_name_from_env(self):
-        """SERVICE_NAME env должен определять имя сервиса при вызове setup_logging."""
-        import memory_server.logger as logger_mod
+        """SERVICE_NAME env определяет имя сервиса через setup_logging."""
+        with patch.dict(os.environ, {"SERVICE_NAME": "my-custom-service"}):
+            setup_logging(service="my-custom-service")
+            root = logging.getLogger()
+            formatter = root.handlers[0].formatter
+            assert isinstance(formatter, PosixFormatter)
+            assert formatter.service == "my-custom-service"
 
-        with patch.dict(os.environ, {"SERVICE_NAME": "my-custom-service"}, clear=True):
-            # Патчим глобальную переменную модуля
-            old_svc = logger_mod.SERVICE_NAME
-            logger_mod.SERVICE_NAME = "my-custom-service"
-            try:
-                fmt = PosixFormatter()
-                logger = logging.getLogger("env_test")
-                logger.handlers.clear()
-                logger.setLevel(logging.DEBUG)
-                record = logger.makeRecord(
-                    name="env_test", level=logging.INFO,
-                    fn="test.py", lno=1, msg="test", args=(),
-                    exc_info=None,
-                )
-                output = fmt.format(record)
-                assert "[my-custom-service]" in output
-            finally:
-                logger_mod.SERVICE_NAME = old_svc
-
-    def test_service_name_default_selti(self):
-        """По умолчанию сервис — selti."""
+    def test_service_name_default(self):
+        """По умолчанию сервис — 'unknown' (из argenta_logging)."""
         with patch.dict(os.environ, {}, clear=True):
             fmt = PosixFormatter()
-            assert fmt.service == "selti"
+            assert fmt.service == "unknown"
 
     def test_setup_logging_custom_service(self):
         """setup_logging принимает имя сервиса."""

@@ -35,25 +35,26 @@ services:
       DATABASE_URL: ${DATABASE_URL}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       SERVICE_NAME: selti
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-4}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health')"]
+      test: ["CMD", "python", "-c", "import asyncio, httpx; asyncio.run(httpx.AsyncClient().get('http://localhost:8000/health', timeout=5.0))"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 15s
+      start_period: 20s
     networks:
       - athena-net
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: 1536M
         reservations:
-          memory: 256M
+          memory: 512M
 
   # ----------------------------------------------------------
   # PostgreSQL 17 + pgvector

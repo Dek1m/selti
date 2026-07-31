@@ -6,7 +6,7 @@ FROM python:3.14-slim AS builder
 WORKDIR /build
 
 # Ставим системные зависимости для asyncpg (libpq)
-RUN apt-get update && apt-get install -y --no-install-recommends     gcc libpq-dev &&     rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends     git gcc libpq-dev &&     rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 
@@ -33,4 +33,13 @@ COPY VERSION ./VERSION
 
 EXPOSE 8000
 
-ENTRYPOINT ["uvicorn", "memory_server.__main__:app", "--host", "0.0.0.0", "--port", "8000"]
+# --workers 4 = 4 процессов, каждый с event loop
+# --loop uvloop = быстрый event loop (uvloop входит в uvicorn[standard])
+# --timeout-graceful-shutdown 30 = 30s на graceful shutdown
+# --backlog 2048 = очередь соединений
+ENTRYPOINT ["uvicorn", "memory_server.__main__:app", \
+    "--host", "0.0.0.0", "--port", "8000", \
+    "--workers", "4", \
+    "--loop", "uvloop", \
+    "--timeout-graceful-shutdown", "30", \
+    "--backlog", "2048"]
