@@ -687,7 +687,7 @@ async def memory_unlink(
 
 @mcp.tool()
 async def memory_get_relations(
-    id: str,
+    source_id: str,
     link_type: str | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
@@ -697,13 +697,13 @@ async def memory_get_relations(
     """
     assert ctx is not None
     service = ctx.request_context.lifespan_context["service"]
-    logger.info("memory_get_relations", extra={"id": id, "link_type": link_type})
+    logger.info("memory_get_relations", extra={"source_id": source_id, "link_type": link_type})
 
     async def _relations_with_steps():
         async with _StepTimer("get_relations/sql_outgoing"):
-            outgoing = await service.repository.get_relations_by_source(id, link_type)
+            outgoing = await service.repository.get_relations_by_source(source_id, link_type)
         async with _StepTimer("get_relations/sql_incoming"):
-            incoming = await service.repository.get_relations_by_target(id, link_type)
+            incoming = await service.repository.get_relations_by_target(source_id, link_type)
         return {"incoming": incoming, "outgoing": outgoing}
 
     try:
@@ -716,7 +716,7 @@ async def memory_get_relations(
             "outgoing": [r.model_dump(mode="json") for r in result["outgoing"]],
         }
     except NotFoundError as e:
-        logger.info("memory_get_relations: not found", extra={"id": id})
+        logger.info("memory_get_relations: not found", extra={"source_id": source_id})
         raise ValueError(str(e)) from e
     except Exception as e:
         logger.exception("Failed to get relations")
