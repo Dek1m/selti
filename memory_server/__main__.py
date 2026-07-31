@@ -16,11 +16,14 @@ from memory_server.metrics import (
 from memory_server.server import mcp, request_id_var
 
 
-class _TerminatingSessionFilter(logging.Filter):
-    """Подавляет спам 'Terminating session: None' от MCP SDK."""
+class _MCPSdkFilter(logging.Filter):
+    """Подавляет шум от MCP SDK: Terminating session + StreamableHTTP lifecycle."""
+
+    _SUPPRESSED = ("Terminating session", "StreamableHTTP session manager")
 
     def filter(self, record: logging.LogRecord) -> bool:
-        return "Terminating session" not in record.getMessage()
+        msg = record.getMessage()
+        return not any(s in msg for s in self._SUPPRESSED)
 
 
 class AuthASGIMiddleware:
@@ -140,8 +143,8 @@ app.mount("/mcp", AuthASGIMiddleware(mcp_http_app))
 
 
 if __name__ == "__main__":
-    # Подавляем спам "Terminating session: None" от MCP SDK
-    logging.getLogger().addFilter(_TerminatingSessionFilter())
+    # Подавляем шум MCP SDK (Terminating session, StreamableHTTP lifecycle)
+    logging.getLogger().addFilter(_MCPSdkFilter())
 
     uvicorn.run(
         "memory_server.__main__:app",

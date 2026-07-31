@@ -17,7 +17,7 @@ from memory_server.metrics import DB_POOL_SIZE, DB_POOL_AVAILABLE
 from migrations.run import run_migrations
 
 # Инициализация логирования по стандарту Argenta Team
-setup_logging()
+setup_logging(service="selti")
 
 logger = logging.getLogger(__name__)
 
