@@ -284,6 +284,10 @@ def close_all():
     except Exception:
         pass
 
+    # Закрыть persistent event loop (после всех async ресурсов)
+    from memory_server.tasks.async_bridge import close_worker_loop
+    close_worker_loop()
+
 
 # ── Health check ────────────────────────────────────────────────
 
@@ -326,7 +330,11 @@ def setup_connection_signals(app):
 
     @worker_process_init.connect
     def on_worker_init(**kwargs):
-        """Worker process started — инициализируем ресурсы."""
+        """Worker process started — инициализируем логирование и ресурсы."""
+        # ArgentaFormatter ДОЛЖЕН быть установлен ПЕРЕД любым другим логированием
+        from memory_server.tasks.logging_config import setup_worker_logging
+        setup_worker_logging()
+
         logger.info("worker_process_init: creating connections")
         get_pool()
         get_qdrant()

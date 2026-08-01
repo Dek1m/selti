@@ -23,15 +23,16 @@ logger = logging.getLogger(__name__)
 
 
 def _get_service():
-    """Get MemoryService with worker-scoped connections."""
-    from memory_server.memory.repository import MemoryRepository
+    """Get MemoryService with worker-scoped connections (Qdrant primary + SQL fallback)."""
+    from memory_server.memory.repository_qdrant import MemoryRepository
     from memory_server.memory.namespace_repository import NamespaceRepository
     from memory_server.memory.dedup import DedupEngine
     from memory_server.memory.service import MemoryService
     from memory_server.config import settings
 
     pool = get_pool()
-    repository = MemoryRepository(pool)
+    qdrant = get_qdrant()
+    repository = MemoryRepository(pool, qdrant=qdrant, qdrant_collection=settings.qdrant_collection)
     ns_repo = NamespaceRepository(pool)
     embedding = get_embedding()
     dedup = DedupEngine(repository, embedding, settings)

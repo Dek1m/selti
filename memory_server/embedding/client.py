@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 from typing import Optional
@@ -32,12 +33,23 @@ class EmbeddingClient(EmbeddingProvider):
         self.model = model
         self.dimension = dimension
         self._client: httpx.AsyncClient | None = None
+        self._client_loop: asyncio.AbstractEventLoop | None = None
+        self._dimension_verified: bool = False
         self._cache = cache
         self.cache_hits: int = 0
         self.cache_misses: int = 0
 
     async def _get_client(self) -> httpx.AsyncClient:
+        loop = asyncio.get_running_loop()
+        # httpx.AsyncClient привязан к event loop — пересоздаём при смене loop
+        if self._client is not None and self._client_loop is not loop:
+            try:
+                await self._client.aclose()
+            except Exception:
+                pass
+            self._client = None
         if self._client is None:
+            self._client_loop = loop
             headers = {"Content-Type": "application/json"}
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
@@ -46,7 +58,9 @@ class EmbeddingClient(EmbeddingProvider):
                 headers=headers,
                 timeout=httpx.Timeout(30.0),
             )
-            await self._verify_dimension()
+            if not self._dimension_verified:
+                await self._verify_dimension()
+                self._dimension_verified = True
         return self._client
 
     async def _verify_dimension(self) -> None:

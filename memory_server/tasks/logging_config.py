@@ -10,6 +10,7 @@ Correlation: task_id via structlog contextvars
 import json
 import logging
 import os
+import sys
 from datetime import datetime, timezone
 
 SERVICE_NAME = os.environ.get("SERVICE_NAME", "selti-worker")
@@ -61,7 +62,7 @@ def setup_worker_logging(level: str = "INFO") -> None:
     Args:
         level: Log level (DEBUG, INFO, WARN, ERROR)
     """
-    handler = logging.StreamHandler()
+    handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(ArgentaFormatter())
 
     root = logging.getLogger()
@@ -78,7 +79,7 @@ def setup_worker_logging(level: str = "INFO") -> None:
 
 def setup_server_logging(level: str = "INFO") -> None:
     """Configure root logger for the MCP server (non-worker)."""
-    handler = logging.StreamHandler()
+    handler = logging.StreamHandler(sys.stdout)
     formatter = ArgentaFormatter()
     handler.setFormatter(formatter)
 

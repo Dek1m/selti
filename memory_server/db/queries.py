@@ -29,9 +29,20 @@ SELECT_MEMORY_BY_CONTENT_HASH = """
     WHERE namespace = $1 AND content_hash = $2
 """
 
-# Векторный поиск теперь через Qdrant (memory_server/vector/qdrant_store.py).
-# pgvector sequential scan удалён — см. Phase 3 миграции.
-SEARCH_MEMORIES = None  # replaced by QdrantVectorStore.search()
+# FTS fallback — используется когда Qdrant недоступен.
+# Основной путь: Qdrant vector search (repository_qdrant.py).
+SEARCH_MEMORIES = """
+    SELECT
+        id, user_id, content, metadata, namespace, importance,
+        ts_rank(to_tsvector('simple', content), plainto_tsquery('simple', $1)) AS score
+    FROM memories
+    WHERE ($2::text IS NULL OR user_id = $2)
+      AND ($3::text IS NULL OR namespace = $3)
+      AND is_archived = false
+      AND to_tsvector('simple', content) @@ plainto_tsquery('simple', $1)
+    ORDER BY score DESC
+    LIMIT $4
+"""
 
 UPDATE_MEMORY = """
     UPDATE memories

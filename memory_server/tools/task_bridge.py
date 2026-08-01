@@ -80,6 +80,6 @@ async def celery_call(task_name: str, **kwargs):
     import functools
     from memory_server.celery_app import app
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     func = functools.partial(run_task, app, task_name, **kwargs)
     return await loop.run_in_executor(None, func)

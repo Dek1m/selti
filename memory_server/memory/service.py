@@ -132,6 +132,7 @@ class MemoryService:
             limit=limit,
             threshold=threshold,
             namespace=namespace,
+            query_text=query,
         )
         logger.info("search: done", extra={"count": len(results)})
         return results

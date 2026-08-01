@@ -217,6 +217,7 @@ class MemoryRepository:
         limit: int = 10,
         threshold: float = 0.7,
         namespace: str | None = None,
+        query_text: str | None = None,
     ) -> list[SearchResult]:
         """Векторный поиск.
 
@@ -284,14 +285,15 @@ class MemoryRepository:
 
             return results
         else:
-            # ── Fallback: SQL sequential scan ──
+            # ── Fallback: SQL FTS sequential scan ──
+            if not query_text:
+                return []
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch(
                     q.SEARCH_MEMORIES,
-                    query_embedding,
+                    query_text,
                     user_id,
                     namespace,
-                    threshold,
                     limit,
                 )
                 return [
