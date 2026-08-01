@@ -1,4 +1,4 @@
-name: Auto-deploy on main
+name: Auto-deploy selti on main
 
 on:
   push:
@@ -10,26 +10,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build Docker image
-        run: docker build -t memory-server:latest .
-
-      - name: Stop old container
-        run: docker rm -f athena-memory 2>/dev/null || true
-
-      - name: Start new container
+      - name: Sync code to server
         run: |
-          docker run -d \
-            --name athena-memory \
-            --restart unless-stopped \
-            --network app_default \
-            -e DATABASE_URL='postgresql+asyncpg://postgres:postgres@postgres:5432/athene_memory' \
-            -e REDIS_URL='redis://redis:6379/0' \
-            -e EMBEDDING_API_URL='http://10.0.0.21:8080/v1' \
-            -e EMBEDDING_MODEL='qwen3-embedding-8b' \
-            -e EMBEDDING_DIMENSION='8192' \
-            memory-server:latest
+          rsync -av --delete \
+            $GITHUB_WORKSPACE/ \
+            /home/svc_athene_ai@atom.ui/opencode/projects/selti/
+
+      - name: Build and deploy
+        run: |
+          cd ~/app
+          docker compose build memory-server celery-worker
+          docker compose up -d memory-server celery-worker
+          sleep 5
+          docker compose ps memory-server celery-worker
 
       - name: Verify health
-        run: |
-          sleep 5
-          curl -sf http://localhost:8000/health && echo ' OK' || echo ' FAILED'
+        run: curl -sf http://localhost:8000/health && echo " OK" || echo " FAILED"
+
+      - name: Cleanup old images
+        run: docker image prune -af --filter "until=24h"
+        continue-on-error: true
