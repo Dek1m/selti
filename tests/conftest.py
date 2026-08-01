@@ -61,13 +61,6 @@ if not hasattr(_cb_mod.CircuitBreaker, "add_state_change_listener"):
 
     _cb_mod.CircuitBreaker.add_state_change_listener = _add_state_change_listener
 
-# ── Patch qdrant_client.models to add missing PointId ──
-try:
-    from qdrant_client import models as _qm
-    if not hasattr(_qm, "PointId"):
-        _qm.PointId = _qm.ExtendedPointId  # alias
-except ImportError:
-    pass
 
 import pytest
 

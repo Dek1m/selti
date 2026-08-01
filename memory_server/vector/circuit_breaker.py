@@ -150,7 +150,7 @@ class CircuitBreakerQdrantClient:
         self,
         collection_name: str,
         payload: dict,
-        points: list[qm.PointId],
+        points: list[qm.ExtendedPointId],
         **kwargs,
     ) -> qm.UpdateResult:
         try:
@@ -174,11 +174,11 @@ class CircuitBreakerQdrantClient:
         collection_name: str,
         scroll_filter: Optional[qm.Filter] = None,
         limit: int = 10,
-        offset: Optional[qm.PointId] = None,
+        offset: Optional[qm.ExtendedPointId] = None,
         with_payload: bool = True,
         with_vectors: bool = False,
         **kwargs,
-    ) -> tuple[list[qm.PointStruct], Optional[qm.PointId]]:
+    ) -> tuple[list[qm.PointStruct], Optional[qm.ExtendedPointId]]:
         try:
             with _cb:
                 return self._client.scroll(
