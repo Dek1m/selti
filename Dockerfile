@@ -20,7 +20,7 @@ FROM python:3.14-slim AS runtime
 WORKDIR /app
 
 # Системные зависимости + Node.js 22 LTS + ssh-клиент
-RUN apt-get update && apt-get install -y --no-install-recommends     libpq5     openssh-client     curl     ca-certificates     gnupg &&     curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key         | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg &&     echo deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main         > /etc/apt/sources.list.d/nodesource.list &&     apt-get update && apt-get install -y --no-install-recommends nodejs &&     apt-get purge -y curl &&     rm -rf /var/lib/apt/lists/* /root/.npm
+RUN apt-get update && apt-get install -y --no-install-recommends     libpq5     openssh-client     curl     ca-certificates     gnupg &&     curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key         | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg &&     echo deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main         > /etc/apt/sources.list.d/nodesource.list &&     apt-get update && apt-get install -y --no-install-recommends nodejs wget &&     rm -rf /var/lib/apt/lists/* /root/.npm
 
 # Копируем установленные пакеты из builder
 COPY --from=builder /root/.local /root/.local
