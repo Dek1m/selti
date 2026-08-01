@@ -1,7 +1,7 @@
 -- ============================================================
 -- 009_stored_procedures.sql
 -- ============================================================
--- PL/pgSQL хранимки для selti (athena-memory).
+-- PL/pgSQL хранимки для selti.
 -- Переносят бизнес-логику из Python в БД:
 --   1) memory_upsert        — upsert с возвратом id
 --   2) memory_insert_batch  — batch insert с exact dedup (content_hash)

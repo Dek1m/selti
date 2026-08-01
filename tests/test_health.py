@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -43,7 +45,7 @@ class TestHealth:
 
         data = response.json()
         assert "server" in data
-        assert data["server"] == "athena-memory"
+        assert data["server"] == os.getenv("SERVICE_NAME", "selti")
         assert "version" in data
         assert data["version"] == "0.1.0"
 

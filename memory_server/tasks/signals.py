@@ -10,7 +10,7 @@
 - task_failure: ошибка задачи
 - task_retry: повторная попытка
 
-Метрики обновляются в athena_celery_* (memory_server/metrics.py).
+Метрики обновляются в <PREFIX>_celery_* (memory_server/metrics.py).
 """
 
 import time

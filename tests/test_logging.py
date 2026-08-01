@@ -6,19 +6,20 @@ POSIX-совместим: grep, jq, awk работают без проблем.
 
 import json
 import logging
+import os
 import re
 import sys
 
 from argenta_logging import PosixFormatter
 
-SERVICE_NAME = "selti"
+SERVICE_NAME = os.getenv("SERVICE_NAME", "selti")
 
 
 class TestPosixFormatter:
     """Проверка PosixFormatter."""
 
     def setup_method(self):
-        self.formatter = PosixFormatter(service="selti")
+        self.formatter = PosixFormatter(service=SERVICE_NAME)
         self.logger = logging.getLogger("test_logger")
         self.logger.handlers.clear()
         self.logger.setLevel(logging.DEBUG)

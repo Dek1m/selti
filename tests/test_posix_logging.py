@@ -21,6 +21,8 @@ import pytest
 
 from argenta_logging import PosixFormatter, get_logger, setup_logging
 
+SERVICE_NAME = os.getenv("SERVICE_NAME", "selti")
+
 
 # ── Регулярка для проверки формата ─────────────────────────────
 LOG_PATTERN = re.compile(
@@ -43,7 +45,7 @@ class TestPosixFormatter:
     """Проверка PosixFormatter — основной формат лога."""
 
     def setup_method(self):
-        self.formatter = PosixFormatter(service="selti")
+        self.formatter = PosixFormatter(service=SERVICE_NAME)
         self.logger = logging.getLogger("test_posix")
         self.logger.handlers.clear()
         self.logger.setLevel(logging.DEBUG)
@@ -100,7 +102,7 @@ class TestPosixFormatter:
         """Сервис должен быть в квадратных скобках."""
         record = self._make_record("test")
         output = self.formatter.format(record)
-        assert "[selti]" in output
+        assert f"[{SERVICE_NAME}]" in output
 
     def test_custom_service_name(self):
         """Сервис берётся из параметра конструктора."""
@@ -217,7 +219,7 @@ class TestLevelFiltering:
         """При LOG_LEVEL=INFO — DEBUG не должен проходить."""
         stream = StringIO()
         handler = logging.StreamHandler(stream)
-        handler.setFormatter(PosixFormatter(service="selti"))
+        handler.setFormatter(PosixFormatter(service=SERVICE_NAME))
         handler.setLevel(logging.INFO)
 
         logger = logging.getLogger("test_filter")
@@ -235,7 +237,7 @@ class TestLevelFiltering:
         """При LOG_LEVEL=ERROR — только ERROR должен проходить."""
         stream = StringIO()
         handler = logging.StreamHandler(stream)
-        handler.setFormatter(PosixFormatter(service="selti"))
+        handler.setFormatter(PosixFormatter(service=SERVICE_NAME))
         handler.setLevel(logging.ERROR)
 
         logger = logging.getLogger("test_error_only")
@@ -254,7 +256,7 @@ class TestLevelFiltering:
         """При LOG_LEVEL=DEBUG — всё должно проходить."""
         stream = StringIO()
         handler = logging.StreamHandler(stream)
-        handler.setFormatter(PosixFormatter(service="selti"))
+        handler.setFormatter(PosixFormatter(service=SERVICE_NAME))
         handler.setLevel(logging.DEBUG)
 
         logger = logging.getLogger("test_debug_all")
@@ -274,21 +276,21 @@ class TestLevelFiltering:
 
     def test_setup_logging_sets_root_level(self):
         """setup_logging должен выставлять уровень на корневом логгере."""
-        setup_logging(level="WARN", service="selti")
+        setup_logging(level="WARN", service=SERVICE_NAME)
         root = logging.getLogger()
         assert root.level == logging.WARNING
 
     def test_setup_logging_default_level(self):
         """По умолчанию уровень INFO."""
         with patch.dict(os.environ, {}, clear=True):
-            setup_logging(service="selti")
+            setup_logging(service=SERVICE_NAME)
         root = logging.getLogger()
         assert root.level == logging.INFO
 
     def test_setup_logging_from_env(self):
         """Уровень берётся из LOG_LEVEL env."""
         with patch.dict(os.environ, {"LOG_LEVEL": "DEBUG"}, clear=True):
-            setup_logging(service="selti")
+            setup_logging(service=SERVICE_NAME)
         root = logging.getLogger()
         assert root.level == logging.DEBUG
 
@@ -298,7 +300,7 @@ class TestDockerIntegration:
 
     def test_handler_uses_stdout(self):
         """Хендлер должен писать в stdout, не stderr."""
-        setup_logging(level="INFO", service="selti")
+        setup_logging(level="INFO", service=SERVICE_NAME)
         root = logging.getLogger()
         for handler in root.handlers:
             if isinstance(handler, logging.StreamHandler):
@@ -335,7 +337,7 @@ class TestEdgeCases:
 
     def test_empty_message(self):
         """Пустое сообщение не должно ломать формат."""
-        formatter = PosixFormatter(service="selti")
+        formatter = PosixFormatter(service=SERVICE_NAME)
         logger = logging.getLogger("edge_empty")
         logger.handlers.clear()
         logger.setLevel(logging.DEBUG)
@@ -346,11 +348,11 @@ class TestEdgeCases:
         )
         output = formatter.format(record)
         assert "[INFO]" in output
-        assert "[selti]" in output
+        assert f"[{SERVICE_NAME}]" in output
 
     def test_special_chars_in_message(self):
         """Спецсимволы в сообщении не должны ломать формат."""
-        formatter = PosixFormatter(service="selti")
+        formatter = PosixFormatter(service=SERVICE_NAME)
         logger = logging.getLogger("edge_special")
         logger.handlers.clear()
         logger.setLevel(logging.DEBUG)
@@ -364,7 +366,7 @@ class TestEdgeCases:
 
     def test_json_meta_not_confused_with_message(self):
         """JSON-мета не должна смешиваться с сообщением."""
-        formatter = PosixFormatter(service="selti")
+        formatter = PosixFormatter(service=SERVICE_NAME)
         logger = logging.getLogger("edge_json")
         logger.handlers.clear()
         logger.setLevel(logging.DEBUG)
@@ -388,7 +390,7 @@ class TestEdgeCases:
 
     def test_log_line_posix_grep_compatible(self):
         """Логи должны быть grep-совместимыми."""
-        formatter = PosixFormatter(service="selti")
+        formatter = PosixFormatter(service=SERVICE_NAME)
         logger = logging.getLogger("grep_test")
         logger.handlers.clear()
         logger.setLevel(logging.DEBUG)
@@ -400,5 +402,5 @@ class TestEdgeCases:
         output = formatter.format(record)
         # grep '\[ERROR\]' должен найти
         assert "[ERROR]" in output
-        # grep '\[selti\]' должен найти
-        assert "[selti]" in output
+        # grep '\[selti\]' должен найти (зависит от SERVICE_NAME)
+        assert f"[{SERVICE_NAME}]" in output

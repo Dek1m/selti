@@ -3,7 +3,7 @@
 -- Идемпотентный: ON CONFLICT DO NOTHING (не перезаписывает существующие связи)
 --
 -- Запуск:
---   docker exec postgres psql -U selti -d athena_memory -f /path/to/012_backfill_relations_from_metadata.sql
+--   docker exec postgres psql -U selti -d memory -f /path/to/012_backfill_relations_from_metadata.sql
 --
 -- ROLLBACK:
 --   DELETE FROM relations WHERE source_id IN (

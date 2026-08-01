@@ -9,7 +9,7 @@ from argenta_logging import setup_logging, request_id_var
 from migrations.run import run_migrations
 
 # Инициализация логирования — каждый воркер должен иметь свой logger
-setup_logging(service="selti")
+setup_logging(service=settings.mcp_server_name)
 
 logger = logging.getLogger(__name__)
 

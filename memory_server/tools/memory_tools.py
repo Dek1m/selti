@@ -569,7 +569,7 @@ async def memory_graph_stats(
 async def memory_version(
     ctx: Context | None = None,
 ) -> dict[str, Any]:
-    """Версия athena-memory сервера."""
+    """Версия selti сервера."""
     from pathlib import Path
 
     version_file = Path(__file__).parent.parent.parent / "VERSION"

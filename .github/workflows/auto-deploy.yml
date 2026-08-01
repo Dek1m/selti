@@ -14,15 +14,15 @@ jobs:
         run: |
           rsync -av --delete \
             $GITHUB_WORKSPACE/ \
-            /home/svc_athene_ai@atom.ui/opencode/projects/selti/
+            /home/svc_athene_ai/opencode/projects/selti/
 
       - name: Build and deploy
         run: |
           cd ~/app
-          docker compose build memory-server celery-worker
-          docker compose up -d memory-server celery-worker
+          docker compose build selti celery-worker
+          docker compose up -d selti celery-worker
           sleep 5
-          docker compose ps memory-server celery-worker
+          docker compose ps selti celery-worker
 
       - name: Verify health
         run: curl -sf http://localhost:8000/health && echo " OK" || echo " FAILED"

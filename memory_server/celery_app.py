@@ -21,7 +21,7 @@ from memory_server.config import settings
 logger = logging.getLogger(__name__)
 
 # ── Create Celery instance ──
-app = Celery("selti")
+app = Celery(settings.mcp_server_name)
 
 # ── Broker & Backend ──
 app.conf.broker_url = settings.celery_broker_url

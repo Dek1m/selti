@@ -80,7 +80,7 @@ def _update_pool_metrics(pool: Optional[asyncpg.Pool]) -> None:
     """Обновить Prometheus метрики состояния pool.
 
     Вызывается после создания pool и при каждом get_pool().
-    Метрики: athena_db_pool_size, athena_db_pool_available.
+    Метрики: <PREFIX>_db_pool_size, <PREFIX>_db_pool_available.
     """
     if pool is None:
         return

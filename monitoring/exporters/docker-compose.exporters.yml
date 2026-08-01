@@ -9,12 +9,12 @@ services:
   # ----- PostgreSQL Exporter (prometheus-community/postgres_exporter) -----
   postgres-exporter:
     image: prometheuscommunity/postgres-exporter:latest
-    container_name: athena-pg-exporter
+    container_name: ${SERVICE_NAME}-pg-exporter
     restart: unless-stopped
     ports:
       - "9187:9187"
     environment:
-      DATA_SOURCE_NAME: "postgresql://athena:${PG_PASSWORD}@postgres:5432/athena_memory?sslmode=disable"
+      DATA_SOURCE_NAME: "postgresql://svc_athene_ai:${SELTI_DB_PASSWORD}@postgres:5432/memory?sslmode=disable"
       # Кастомные метрики для pgvector
       PG_EXPORTER_EXTEND_QUERY_PATH: /etc/postgres-exporter/queries.yaml
     volumes:
@@ -23,7 +23,7 @@ services:
       postgres:
         condition: service_healthy
     networks:
-      - athena-net
+      - app-net
     deploy:
       resources:
         limits:
@@ -32,7 +32,7 @@ services:
   # ----- Redis Exporter (oliver006/redis_exporter) -----
   redis-exporter:
     image: oliver006/redis_exporter:latest
-    container_name: athena-redis-exporter
+    container_name: ${SERVICE_NAME}-redis-exporter
     restart: unless-stopped
     ports:
       - "9121:9121"
@@ -42,13 +42,13 @@ services:
       redis:
         condition: service_healthy
     networks:
-      - athena-net
+      - app-net
     deploy:
       resources:
         limits:
           memory: 64M
 
-# Подключаемся к существующей сети athena-net
+# Подключаемся к существующей сети app-net
 networks:
-  athena-net:
+  app-net:
     external: true

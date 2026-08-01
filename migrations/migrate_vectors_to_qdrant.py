@@ -71,7 +71,7 @@ class Config:
         return cls(
             database_url=os.environ.get(
                 "DATABASE_URL",
-                "postgresql://athena:athena@localhost:5432/athene_memory",
+                "postgresql://svc_athene_ai:changeme@localhost:5432/memory",
             ),
             qdrant_url=os.environ.get("QDRANT_URL", "http://localhost:6333"),
             qdrant_collection=os.environ.get("QDRANT_COLLECTION", "memories"),

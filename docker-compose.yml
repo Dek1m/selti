@@ -1,5 +1,5 @@
 # ============================================================
-# docker-compose.yml — Основной стек athena-memory (selti)
+# docker-compose.yml — Основной стек selti
 # ============================================================
 # Использование:
 #   docker compose up -d                    # Без Celery workers
@@ -10,12 +10,13 @@ services:
   # ── Selti MCP Server ──────────────────────────────────────
   selti:
     build: .
-    container_name: athena-memory
+    container_name: ${SERVICE_NAME}
     restart: unless-stopped
     ports:
       - "8000:8000"
     env_file: .env
     environment:
+      - SERVICE_NAME=${SERVICE_NAME}
       - MCP_HOST=0.0.0.0
       - MCP_PORT=8000
     depends_on:
@@ -32,7 +33,7 @@ services:
       retries: 3
       start_period: 15s
     networks:
-      - athena-net
+      - app-net
     deploy:
       resources:
         limits:
@@ -41,7 +42,7 @@ services:
   # ── Celery Worker ─────────────────────────────────────────
   celery-worker:
     build: .
-    container_name: athena-celery-worker
+    container_name: ${SERVICE_NAME}-worker
     restart: unless-stopped
     command: >
       celery -A memory_server.celery_app worker
@@ -56,11 +57,11 @@ services:
       --logfile=-
     env_file: .env
     environment:
+      - SERVICE_NAME=${SERVICE_NAME}
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
-      - DATABASE_URL=postgresql+asyncpg://athena:athena@postgres:5432/athene_memory
+      - DATABASE_URL=postgresql+asyncpg://svc_athene_ai:${SELTI_DB_PASSWORD}@postgres:5432/${POSTGRES_DB}
       - QDRANT_URL=http://qdrant:6333
-      - SERVICE_NAME=selti-worker
     depends_on:
       redis:
         condition: service_healthy
@@ -75,7 +76,7 @@ services:
       retries: 3
       start_period: 30s
     networks:
-      - athena-net
+      - app-net
     deploy:
       resources:
         limits:
@@ -84,10 +85,11 @@ services:
   # ── Flower (dev profile) ──────────────────────────────────
   flower:
     build: .
-    container_name: athena-flower
+    container_name: ${SERVICE_NAME}-flower
     command: celery -A memory_server.celery_app flower --port=5555
     env_file: .env
     environment:
+      - SERVICE_NAME=${SERVICE_NAME}
       - CELERY_BROKER_URL=redis://redis:6379/0
     ports:
       - "5555:5555"
@@ -97,7 +99,7 @@ services:
     profiles:
       - dev
     networks:
-      - athena-net
+      - app-net
     deploy:
       resources:
         limits:
@@ -106,7 +108,7 @@ services:
   # ── Redis ─────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
-    container_name: athena-redis
+    container_name: redis
     restart: unless-stopped
     ports:
       - "6379:6379"
@@ -119,7 +121,7 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - athena-net
+      - app-net
     deploy:
       resources:
         limits:
@@ -127,24 +129,25 @@ services:
 
   # ── PostgreSQL ────────────────────────────────────────────
   postgres:
-    image: pgvector/pgvector:pg16
-    container_name: athena-postgres
+    image: postgres:18
+    container_name: postgres
+    env_file: .env
     restart: unless-stopped
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_USER: athena
-      POSTGRES_PASSWORD: athena
-      POSTGRES_DB: athene_memory
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-memory}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U athena -d athene_memory"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ${POSTGRES_DB:-memory}"]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
-      - athena-net
+      - app-net
     deploy:
       resources:
         limits:
@@ -153,7 +156,7 @@ services:
   # ── Qdrant ────────────────────────────────────────────────
   qdrant:
     image: qdrant/qdrant:v1.12.1
-    container_name: athena-qdrant
+    container_name: qdrant
     restart: unless-stopped
     ports:
       - "6333:6333"
@@ -166,7 +169,7 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - athena-net
+      - app-net
     deploy:
       resources:
         limits:
@@ -180,5 +183,5 @@ volumes:
 
 # ── Networks ───────────────────────────────────────────────
 networks:
-  athena-net:
+  app-net:
     driver: bridge

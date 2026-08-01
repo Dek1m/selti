@@ -103,7 +103,7 @@ groups:
 
       - alert: RedisSlowOperations
         expr: |
-          histogram_quantile(0.95, rate(athena_redis_ops_duration_seconds_bucket[5m])) > 0.1
+          histogram_quantile(0.95, rate(selti_redis_ops_duration_seconds_bucket[5m])) > 0.1
         for: 5m
         labels:
           severity: warning
@@ -119,7 +119,7 @@ groups:
     rules:
       # 1. Доступность воркеров
       - alert: CeleryWorkersDown
-        expr: athena_celery_workers_active == 0
+        expr: selti_celery_workers_active == 0
         for: 2m
         labels:
           severity: critical
@@ -130,9 +130,9 @@ groups:
       # 2. Высокий процент ошибок
       - alert: CeleryHighErrorRate
         expr: |
-          rate(athena_celery_tasks_total{status="failure"}[5m])
+          rate(selti_celery_tasks_total{status="failure"}[5m])
           /
-          (rate(athena_celery_tasks_total[5m]) > 0)
+          (rate(selti_celery_tasks_total[5m]) > 0)
           > 0.1
         for: 5m
         labels:
@@ -144,7 +144,7 @@ groups:
       # 3. Медленные задачи (P95 duration > 30s)
       - alert: CelerySlowTasks
         expr: |
-          histogram_quantile(0.95, rate(athena_celery_task_duration_seconds_bucket[5m])) > 30
+          histogram_quantile(0.95, rate(selti_celery_task_duration_seconds_bucket[5m])) > 30
         for: 10m
         labels:
           severity: warning
@@ -155,7 +155,7 @@ groups:
       # 4. Высокая задержка в очереди (P95 latency > 5s)
       - alert: CeleryHighQueueLatency
         expr: |
-          histogram_quantile(0.95, rate(athena_celery_task_latency_seconds_bucket[5m])) > 5
+          histogram_quantile(0.95, rate(selti_celery_task_latency_seconds_bucket[5m])) > 5
         for: 5m
         labels:
           severity: warning
@@ -165,7 +165,7 @@ groups:
 
       # 5. Много retry (> 5 в минуту)
       - alert: CeleryHighRetryRate
-        expr: rate(athena_celery_task_retries_total[5m]) > 5
+        expr: rate(selti_celery_task_retries_total[5m]) > 5
         for: 5m
         labels:
           severity: warning
@@ -175,7 +175,7 @@ groups:
 
       # 6. Есть таймауты (любые)
       - alert: CeleryTaskTimeouts
-        expr: increase(athena_celery_task_timeouts_total[5m]) > 0
+        expr: increase(selti_celery_task_timeouts_total[5m]) > 0
         for: 1m
         labels:
           severity: warning
@@ -185,7 +185,7 @@ groups:
 
       # 7. Очередь забита (> 100 pending)
       - alert: CeleryQueueBacklog
-        expr: athena_celery_queue_length > 100
+        expr: selti_celery_queue_length > 100
         for: 5m
         labels:
           severity: warning
@@ -201,9 +201,9 @@ groups:
     rules:
       - alert: SeltiHighToolErrorRate
         expr: |
-          rate(athena_mcp_tool_calls_total{status="error"}[5m])
+          rate(selti_mcp_tool_calls_total{status="error"}[5m])
           /
-          (rate(athena_mcp_tool_calls_total[5m]) > 0)
+          (rate(selti_mcp_tool_calls_total[5m]) > 0)
           > 0.05
         for: 5m
         labels:
@@ -214,7 +214,7 @@ groups:
 
       - alert: SeltiSlowToolCalls
         expr: |
-          histogram_quantile(0.95, rate(athena_mcp_tool_duration_seconds_bucket[5m])) > 10
+          histogram_quantile(0.95, rate(selti_mcp_tool_duration_seconds_bucket[5m])) > 10
         for: 10m
         labels:
           severity: warning
@@ -224,7 +224,7 @@ groups:
 
       - alert: SeltiQdrantSlowSearch
         expr: |
-          histogram_quantile(0.95, rate(athena_qdrant_ops_duration_seconds_bucket{operation="search"}[5m])) > 1
+          histogram_quantile(0.95, rate(selti_qdrant_ops_duration_seconds_bucket{operation="search"}[5m])) > 1
         for: 10m
         labels:
           severity: warning

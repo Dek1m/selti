@@ -1,6 +1,6 @@
-"""Prometheus метрики для athena-memory (selti).
+"""Prometheus метрики для selti.
 
-Префикс: athena_
+Префикс: динамический из SERVICE_NAME env var (lowercase).
 Стиль: ёмко, по-русски комментарии, по-английски имя/описание.
 
 История:
@@ -9,20 +9,24 @@
 - v3: Celery tasks, Redis cache, Qdrant operations (по плану CELERY_MIGRATION_PLAN_v3)
 """
 
+import os
+
 from prometheus_client import Counter, Gauge, Histogram
+
+PREFIX = os.getenv("SERVICE_NAME", "selti").lower()
 
 # ============================================================
 # HTTP
 # ============================================================
 
 HTTP_REQUESTS_TOTAL = Counter(
-    "athena_http_requests_total",
+    f"{PREFIX}_http_requests_total",
     "Total HTTP requests",
     ["method", "endpoint", "status"],
 )
 
 HTTP_REQUEST_DURATION = Histogram(
-    "athena_http_request_duration_seconds",
+    f"{PREFIX}_http_request_duration_seconds",
     "HTTP request duration in seconds",
     ["method", "endpoint"],
     buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
@@ -32,15 +36,15 @@ HTTP_REQUEST_DURATION = Histogram(
 # Database (asyncpg pool)
 # ============================================================
 
-DB_POOL_SIZE = Gauge("athena_db_pool_size", "Current DB pool size")
-DB_POOL_AVAILABLE = Gauge("athena_db_pool_available", "Available connections in pool")
+DB_POOL_SIZE = Gauge(f"{PREFIX}_db_pool_size", "Current DB pool size")
+DB_POOL_AVAILABLE = Gauge(f"{PREFIX}_db_pool_available", "Available connections in pool")
 
 # ============================================================
 # Embedding API
 # ============================================================
 
 EMBEDDING_DURATION = Histogram(
-    "athena_embedding_duration_seconds",
+    f"{PREFIX}_embedding_duration_seconds",
     "Embedding API call duration",
     buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0),
 )
@@ -50,7 +54,7 @@ EMBEDDING_DURATION = Histogram(
 # ============================================================
 
 SEARCH_RESULTS = Histogram(
-    "athena_search_results_count",
+    f"{PREFIX}_search_results_count",
     "Number of results returned by search",
     buckets=(1, 5, 10, 20, 50, 100),
 )
@@ -59,20 +63,20 @@ SEARCH_RESULTS = Histogram(
 # Memory count (per namespace)
 # ============================================================
 
-MEMORY_COUNT = Gauge("athena_memory_count", "Total memories in DB", ["namespace"])
+MEMORY_COUNT = Gauge(f"{PREFIX}_memory_count", "Total memories in DB", ["namespace"])
 
 # ============================================================
 # MCP tools (calls + duration)
 # ============================================================
 
 MCP_TOOL_CALLS_TOTAL = Counter(
-    "athena_mcp_tool_calls_total",
+    f"{PREFIX}_mcp_tool_calls_total",
     "Total MCP tool calls",
     ["tool", "status"],  # status: ok / error / timeout
 )
 
 MCP_TOOL_DURATION_SECONDS = Histogram(
-    "athena_mcp_tool_duration_seconds",
+    f"{PREFIX}_mcp_tool_duration_seconds",
     "MCP tool call duration in seconds",
     ["tool"],
     buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
@@ -83,12 +87,12 @@ MCP_TOOL_DURATION_SECONDS = Histogram(
 # ============================================================
 
 EMBEDDING_CACHE_HITS = Counter(
-    "athena_embedding_cache_hits_total",
+    f"{PREFIX}_embedding_cache_hits_total",
     "Total embedding cache hits",
 )
 
 EMBEDDING_CACHE_MISSES = Counter(
-    "athena_embedding_cache_misses_total",
+    f"{PREFIX}_embedding_cache_misses_total",
     "Total embedding cache misses",
 )
 
@@ -97,13 +101,13 @@ EMBEDDING_CACHE_MISSES = Counter(
 # ============================================================
 
 DEDUP_SKIPPED_TOTAL = Counter(
-    "athena_dedup_skipped_total",
+    f"{PREFIX}_dedup_skipped_total",
     "Total dedup skips by namespace and reason",
     ["namespace", "reason"],  # reason: exact / semantic
 )
 
 DEDUP_INSERTED_TOTAL = Counter(
-    "athena_dedup_inserted_total",
+    f"{PREFIX}_dedup_inserted_total",
     "Total new memories inserted after dedup check",
     ["namespace"],
 )
@@ -114,14 +118,14 @@ DEDUP_INSERTED_TOTAL = Counter(
 
 # Общее количество выполненных задач по имени и статусу
 CELERY_TASKS_TOTAL = Counter(
-    "athena_celery_tasks_total",
+    f"{PREFIX}_celery_tasks_total",
     "Total Celery tasks completed",
     ["task", "status"],  # status: success / failure / retry
 )
 
 # Длительность выполнения задачи (от начала до конца)
 CELERY_TASK_DURATION_SECONDS = Histogram(
-    "athena_celery_task_duration_seconds",
+    f"{PREFIX}_celery_task_duration_seconds",
     "Celery task execution duration in seconds",
     ["task"],
     buckets=(0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0),
@@ -129,7 +133,7 @@ CELERY_TASK_DURATION_SECONDS = Histogram(
 
 # Задержка в очереди (от send_task до начала выполнения)
 CELERY_TASK_LATENCY_SECONDS = Histogram(
-    "athena_celery_task_latency_seconds",
+    f"{PREFIX}_celery_task_latency_seconds",
     "Celery task queue latency (send to start)",
     ["task"],
     buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
@@ -137,34 +141,34 @@ CELERY_TASK_LATENCY_SECONDS = Histogram(
 
 # Количество повторных попыток
 CELERY_TASK_RETRIES_TOTAL = Counter(
-    "athena_celery_task_retries_total",
+    f"{PREFIX}_celery_task_retries_total",
     "Total Celery task retries",
     ["task"],
 )
 
 # Таймауты
 CELERY_TASK_TIMEOUTS_TOTAL = Counter(
-    "athena_celery_task_timeouts_total",
+    f"{PREFIX}_celery_task_timeouts_total",
     "Total Celery task timeouts",
     ["task"],
 )
 
 # Ошибки (.failure)
 CELERY_TASK_ERRORS_TOTAL = Counter(
-    "athena_celery_task_errors_total",
+    f"{PREFIX}_celery_task_errors_total",
     "Total Celery task errors",
     ["task", "exception_type"],
 )
 
 # Активные воркеры
 CELERY_WORKERS_ACTIVE = Gauge(
-    "athena_celery_workers_active",
+    f"{PREFIX}_celery_workers_active",
     "Number of active Celery workers",
 )
 
 # Длина очереди (оценочная, по task_ready)
 CELERY_QUEUE_LENGTH = Gauge(
-    "athena_celery_queue_length",
+    f"{PREFIX}_celery_queue_length",
     "Estimated queue length (pending tasks)",
     ["queue"],
 )
@@ -174,13 +178,13 @@ CELERY_QUEUE_LENGTH = Gauge(
 # ============================================================
 
 REDIS_OPS_TOTAL = Counter(
-    "athena_redis_ops_total",
+    f"{PREFIX}_redis_ops_total",
     "Total Redis operations",
     ["operation"],  # operation: get / set / mget / mset / delete
 )
 
 REDIS_OPS_DURATION_SECONDS = Histogram(
-    "athena_redis_ops_duration_seconds",
+    f"{PREFIX}_redis_ops_duration_seconds",
     "Redis operation duration in seconds",
     ["operation"],
     buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0),
@@ -191,20 +195,20 @@ REDIS_OPS_DURATION_SECONDS = Histogram(
 # ============================================================
 
 QDRANT_OPS_TOTAL = Counter(
-    "athena_qdrant_ops_total",
+    f"{PREFIX}_qdrant_ops_total",
     "Total Qdrant operations",
     ["operation"],  # operation: search / upsert / batch_upsert / delete
 )
 
 QDRANT_OPS_DURATION_SECONDS = Histogram(
-    "athena_qdrant_ops_duration_seconds",
+    f"{PREFIX}_qdrant_ops_duration_seconds",
     "Qdrant operation duration in seconds",
     ["operation"],
     buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
 )
 
 QDRANT_SEARCH_RESULTS = Histogram(
-    "athena_qdrant_search_results_count",
+    f"{PREFIX}_qdrant_search_results_count",
     "Number of results returned by Qdrant search",
     buckets=(1, 5, 10, 20, 50, 100),
 )

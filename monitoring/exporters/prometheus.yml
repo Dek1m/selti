@@ -26,7 +26,7 @@ scrape_configs:
       - targets: ['redis-exporter:9121']
 
   # ----- Memory MCP Server -----
-  - job_name: 'athena-memory'
+  - job_name: 'selti'
     static_configs:
-      - targets: ['athena-memory:8000']
+      - targets: ['selti:8000']
     metrics_path: '/metrics'

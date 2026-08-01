@@ -1,3 +1,4 @@
+import os
 from enum import Enum
 
 from pydantic_settings import BaseSettings
@@ -13,7 +14,7 @@ class Namespace(str, Enum):
 
 
 class Settings(BaseSettings):
-    database_url: str = "postgresql+asyncpg://athena:athena@localhost:5432/athene_memory"
+    database_url: str = os.getenv("DATABASE_URL", "postgresql+asyncpg://svc_athene_ai:changeme@localhost:5432/memory")
     db_min_connections: int = 2
     db_max_connections: int = 10
 
@@ -28,7 +29,7 @@ class Settings(BaseSettings):
     qdrant_api_key: str = ""  # для Qdrant Cloud (опционально)
     qdrant_enabled: bool = True  # False = только PostgreSQL без векторного поиска
 
-    mcp_server_name: str = "athena-memory"
+    mcp_server_name: str = os.getenv("SERVICE_NAME", "selti")
     mcp_host: str = "0.0.0.0"
     mcp_port: int = 8000
     search_default_limit: int = 10

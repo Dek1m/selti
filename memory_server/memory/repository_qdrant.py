@@ -110,13 +110,12 @@ class MemoryRepository:
                 QDRANT_OPS_TOTAL.labels(operation="upsert").inc()
                 QDRANT_OPS_DURATION_SECONDS.labels(operation="upsert").observe(time.monotonic() - qstart)
         else:
-            # Fallback: старый паттерн с embedding в PG
+            # Fallback: embedding не передаётся (колонка удалена из PG)
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow(
                     q.INSERT_MEMORY,
                     user_id,
                     content,
-                    embedding,
                     metadata,
                     namespace,
                     namespace_id or "",
@@ -366,7 +365,6 @@ class MemoryRepository:
                     q.UPDATE_MEMORY,
                     memory_id,
                     content,
-                    embedding,
                     metadata,
                     importance,
                 )
