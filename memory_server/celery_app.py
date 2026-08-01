@@ -105,6 +105,12 @@ app.conf.beat_schedule = {
 # ── Worker Concurrency ──
 app.conf.worker_concurrency = settings.celery_worker_concurrency
 
+# ── Worker Logging ──
+# Отключаем дефолтный root logger Celery, чтобы setup_worker_logging()
+# в worker_process_init signal оставался единственным handler.
+# Без этого Celery добавляет свой StreamHandler после signal и затирает ArgentaFormatter.
+app.conf.worker_hijack_root_logger = False
+
 # ── Discover Tasks ──
 # Автоматически находит tasks в пакете memory_server.tasks
 app.autodiscover_tasks(["memory_server.tasks"])

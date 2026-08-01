@@ -38,7 +38,7 @@ _task_send_times: dict[str, float] = {}
 def setup_signals(app):
     """Подключить все сигналы к Celery app."""
 
-    @task_prerun.connect
+    @task_prerun.connect(weak=False)
     def on_task_prerun(sender, task_id, task, args, kwargs, **estkw):
         """Задача начала выполняться."""
         now = time.monotonic()
@@ -54,7 +54,7 @@ def setup_signals(app):
             "task_name": task.name,
         })
 
-    @task_postrun.connect
+    @task_postrun.connect(weak=False)
     def on_task_postrun(sender, task_id, task, retval, state, **kw):
         """Задача завершилась (успех или ошибка)."""
         now = time.monotonic()
@@ -87,7 +87,7 @@ def setup_signals(app):
                 "duration_ms": round(duration * 1000, 1),
             })
 
-    @task_failure.connect
+    @task_failure.connect(weak=False)
     def on_task_failure(sender, task_id, exception, traceback, **kw):
         """Задача упала с исключением."""
         task_name = sender.name or "unknown"
@@ -109,7 +109,7 @@ def setup_signals(app):
             "error": str(exception)[:500],
         })
 
-    @task_retry.connect
+    @task_retry.connect(weak=False)
     def on_task_retry(sender, request, reason, **kw):
         """Задача повторяется."""
         task_name = sender.name or "unknown"

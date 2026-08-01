@@ -323,12 +323,23 @@ def setup_connection_signals(app):
         setup_connection_signals(app)
 
     Сигналы:
+        setup_logging → перехват настройки Celery (возврат True = Celery не добавляет handler)
         worker_process_init → get_pool() + get_qdrant()
         worker_process_shutdown → close_all()
     """
     from celery.signals import worker_process_init, worker_process_shutdown
 
-    @worker_process_init.connect
+    # Перехват setup_logging: возвращаем True, чтобы Celery НЕ добавлял свой handler.
+    # Наш ArgentaFormatter устанавливается в worker_process_init.
+    # weak=False — замыкания должны жить всё время жизни процесса.
+    from celery.signals import setup_logging as celery_setup_logging
+
+    @celery_setup_logging.connect(weak=False)
+    def on_setup_logging(**kwargs):
+        """Celery пытается настроить logging — пропускаем, настроим сами."""
+        return True
+
+    @worker_process_init.connect(weak=False)
     def on_worker_init(**kwargs):
         """Worker process started — инициализируем логирование и ресурсы."""
         # ArgentaFormatter ДОЛЖЕН быть установлен ПЕРЕД любым другим логированием
@@ -341,7 +352,7 @@ def setup_connection_signals(app):
         # EmbeddingClient — lazy, создаётся при первом обращении задачей
         logger.info("worker_process_init: connections ready")
 
-    @worker_process_shutdown.connect
+    @worker_process_shutdown.connect(weak=False)
     def on_worker_shutdown(**kwargs):
         """Worker process shutting down — закрываем ресурсы."""
         logger.info("worker_process_shutdown: closing connections")
