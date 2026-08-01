@@ -256,6 +256,24 @@ class MemoryService:
 
     # ── Relations ──
 
+    async def _resolve_granule(self, granule_id: str) -> MemoryRecord | None:
+        """Найти гранулу: сначала по UUID, потом по entity_name (fallback)."""
+        # Пробуем UUID
+        try:
+            record = await self.repository.get_by_id(granule_id)
+            if record is not None:
+                return record
+        except Exception:
+            pass  # не UUID — ищем дальше
+
+        # Fallback: ищем по entity_name
+        record = await self.repository.find_by_entity_name(granule_id)
+        if record is not None:
+            logger.info("resolve: found by entity_name", extra={
+                "input": granule_id, "resolved_id": record.id,
+            })
+        return record
+
     async def add_relation(
         self,
         source_id: str,
@@ -265,24 +283,32 @@ class MemoryService:
         description: str | None = None,
         weight: float = 1.0,
         metadata: dict | None = None,
-    ) -> str:
-        """Создать связь между гранулами."""
+    ) -> str | None:
+        """Создать связь между гранулами. Поддерживает строковые entity_name как ID."""
         logger.info("add_relation", extra={
             "source": source_id, "target": target_id,
             "type": link_type, "weight": weight,
         })
-        # Валидация: source_id должен существовать
-        source = await self.repository.get_by_id(source_id)
+
+        # Resolve source
+        source = await self._resolve_granule(source_id)
         if source is None:
-            raise NotFoundError(f"Source granule: {source_id}")
-        # Валидация: target_id должен существовать (если указан)
+            logger.warning("add_relation: source not found", extra={"source": source_id})
+            return None
+        resolved_source_id = source.id
+
+        # Resolve target
+        resolved_target_id: str | None = None
         if target_id is not None:
-            target = await self.repository.get_by_id(target_id)
+            target = await self._resolve_granule(target_id)
             if target is None:
-                raise NotFoundError(f"Target granule: {target_id}")
+                logger.warning("add_relation: target not found", extra={"target": target_id})
+                return None
+            resolved_target_id = target.id
+
         rel_id = await self.repository.add_relation(
-            source_id=source_id,
-            target_id=target_id,
+            source_id=resolved_source_id,
+            target_id=resolved_target_id,
             target_name=target_name,
             link_type=link_type,
             description=description,

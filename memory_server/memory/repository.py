@@ -264,6 +264,9 @@ class MemoryRepository:
     async def get_by_id(self, memory_id: str) -> MemoryRecord | None:
         return await self.pg.get_by_id(memory_id)
 
+    async def find_by_entity_name(self, entity_name: str) -> MemoryRecord | None:
+        return await self.pg.find_by_entity_name(entity_name)
+
     async def find_by_content_hash(
         self, namespace: str, content_hash: str
     ) -> MemoryRecord | None:

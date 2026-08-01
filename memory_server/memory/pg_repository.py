@@ -133,6 +133,24 @@ class PostgreSQLRepository:
                 content_hash=row["content_hash"],
             )
 
+    async def find_by_entity_name(self, entity_name: str) -> MemoryRecord | None:
+        """Найти гранулу по entity_name в metadata (fallback для строковых ID)."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(q.SELECT_MEMORY_BY_ENTITY_NAME, entity_name)
+            if row is None:
+                return None
+            return MemoryRecord(
+                id=str(row["id"]),
+                user_id=row["user_id"],
+                content=row["content"],
+                metadata=row["metadata"] or {},
+                namespace=row["namespace"],
+                importance=row["importance"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+                content_hash=row["content_hash"],
+            )
+
     async def find_by_content_hash(
         self, namespace: str, content_hash: str
     ) -> MemoryRecord | None:

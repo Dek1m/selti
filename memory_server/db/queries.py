@@ -29,6 +29,13 @@ SELECT_MEMORY_BY_CONTENT_HASH = """
     WHERE namespace = $1 AND content_hash = $2
 """
 
+SELECT_MEMORY_BY_ENTITY_NAME = """
+    SELECT id, user_id, content, metadata, namespace, importance, created_at, updated_at, content_hash
+    FROM memories
+    WHERE metadata->>'entity_name' = $1
+    LIMIT 1
+"""
+
 # FTS fallback — используется когда Qdrant недоступен.
 # Основной путь: Qdrant vector search (repository_qdrant.py).
 SEARCH_MEMORIES = """
