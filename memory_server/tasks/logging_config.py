@@ -170,12 +170,6 @@ def setup_worker_logging(level: str = "INFO") -> None:
 
 
 def setup_server_logging(level: str = "INFO", service: str | None = None) -> None:
-    """Configure root logger for the MCP server (non-worker).
-
-    Args:
-        level: Log level (DEBUG, INFO, WARN, ERROR)
-        service: Service name override (default: from env SERVICE_NAME)
-    """
     configure_structlog(service=service)
 
     handler = _create_handler()
@@ -183,3 +177,10 @@ def setup_server_logging(level: str = "INFO", service: str | None = None) -> Non
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
+
+    # Redirect uvicorn loggers through JSON formatter
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        uv_logger = logging.getLogger(name)
+        uv_logger.handlers.clear()
+        uv_logger.addHandler(handler)
+        uv_logger.propagate = False

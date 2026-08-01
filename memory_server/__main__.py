@@ -244,10 +244,21 @@ async def metrics():
 # opencode не шлёт SSE handshake (initialize), поэтому SSE не работает.
 # path="/" внутри sub-app, монтируем на /mcp.
 # GET/POST /mcp → 307 → /mcp/ → mount strips /mcp → / matches sub-app.
-app.mount("/mcp", AuthASGIMiddleware(mcp_http_app))
+# Explicit redirect: /mcp -> /mcp/ (avoids 307 on every POST /mcp)
+@app.api_route("/mcp", methods=["GET", "POST"])
+async def redirect_mcp_trailing_slash(request: Request):
+    from starlette.responses import RedirectResponse
+    url = str(request.url)
+    if not url.endswith("/"):
+        return RedirectResponse(url=url + "/", status_code=307)
+    return RedirectResponse(url=url, status_code=307)
+
+app.mount("/mcp/", AuthASGIMiddleware(mcp_http_app))
 
 
 if __name__ == "__main__":
+    from memory_server.logging_config import LOGGING_CONFIG
+
     uvicorn.run(
         "memory_server.__main__:app",
         host=settings.mcp_host,
@@ -258,4 +269,5 @@ if __name__ == "__main__":
         timeout_graceful_shutdown=30,
         backlog=2048,
         access_log=False,
+        log_config=LOGGING_CONFIG,
     )
