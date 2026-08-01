@@ -21,24 +21,11 @@ logger = logging.getLogger(__name__)
 # ── Circuit Breaker настройки ──
 # failure_threshold: сколько ошибок подряд → opening
 # recovery_timeout: секунд до попытки half-open
-# half_open_max_calls: сколько вызовов в half-open для проверки
 _cb = CircuitBreaker(
     failure_threshold=5,
     recovery_timeout=30,
-    half_open_max_calls=2,
     name="qdrant",
 )
-
-
-def _on_state_change(cb: CircuitBreaker, old_state: str, new_state: str) -> None:
-    QDRANT_CB_STATE.set(1 if new_state == "open" else 0)
-    logger.warning(
-        "Qdrant circuit breaker state changed",
-        extra={"old": old_state, "new": new_state},
-    )
-
-
-_cb.add_state_change_listener(_on_state_change)
 
 
 class CircuitBreakerQdrantClient:
@@ -57,7 +44,9 @@ class CircuitBreakerQdrantClient:
 
     @property
     def state(self) -> str:
-        return self._cb.state
+        current_state = self._cb.state
+        QDRANT_CB_STATE.set(1 if current_state == "open" else 0)
+        return current_state
 
     @property
     def _cb(self) -> CircuitBreaker:

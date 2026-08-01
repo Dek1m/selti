@@ -28,6 +28,8 @@
 -- STABLE — не меняет данные, детерминированна для одного входа.
 -- ════════════════════════════════════════════════════════════
 
+DROP FUNCTION IF EXISTS get_relations_unified(UUID, TEXT);
+
 CREATE OR REPLACE FUNCTION get_relations_unified(
     p_memory_id UUID,
     p_link_type  TEXT DEFAULT NULL
@@ -95,6 +97,8 @@ COMMENT ON FUNCTION get_relations_unified IS 'Все связи гранулы (
 -- STABLE — не меняет данные.
 -- ════════════════════════════════════════════════════════════
 
+DROP FUNCTION IF EXISTS list_with_count(TEXT, TEXT, INT, INT);
+
 CREATE OR REPLACE FUNCTION list_with_count(
     p_user_id   TEXT DEFAULT NULL,
     p_namespace TEXT DEFAULT NULL,
@@ -146,6 +150,8 @@ COMMENT ON FUNCTION list_with_count IS 'Список memories с общим сч
 -- LANGUAGE sql — простой UPDATE.
 -- Не STABLE/IMMUTABLE — меняет данные (UPDATE).
 -- ════════════════════════════════════════════════════════════
+
+DROP FUNCTION IF EXISTS memory_forget_soft(TEXT, TEXT);
 
 CREATE OR REPLACE FUNCTION memory_forget_soft(
     p_user_id   TEXT,
