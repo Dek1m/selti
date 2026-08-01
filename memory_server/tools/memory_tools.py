@@ -5,7 +5,6 @@ ACL checks and metadata coercion remain at tool level.
 """
 
 import json
-import logging
 from typing import Any
 
 from fastmcp import Context
@@ -14,14 +13,10 @@ from memory_server.config import settings
 from memory_server.metrics import (
     SEARCH_RESULTS,
     MEMORY_COUNT,
-    DEDUP_SKIPPED_TOTAL,
-    DEDUP_INSERTED_TOTAL,
 )
 from memory_server.server import mcp
 from memory_server.tools.task_bridge import celery_call
-from memory_server.utils.metrics_decorator import track_tool_metrics
-
-logger = logging.getLogger(__name__)
+from memory_server.utils.metrics_decorator import tool_handler
 
 # Имена задач
 TASK_STORE = "memory_server.tasks.memory_tasks.store_memory"
@@ -57,7 +52,6 @@ def _coerce_metadata(metadata) -> dict | None:
                 return parsed
         except (json.JSONDecodeError, TypeError):
             pass
-        logger.warning("metadata is a string but not valid JSON", extra={"preview": metadata[:200]})
         return None
     return metadata
 
@@ -68,7 +62,7 @@ def _coerce_metadata(metadata) -> dict | None:
 
 
 @mcp.tool()
-@track_tool_metrics("memory_store")
+@tool_handler("memory_store")
 async def memory_store(
     content: str,
     user_id: str,
@@ -83,37 +77,18 @@ async def memory_store(
     Deduplication is applied automatically — returns existing record if a match is found.
     """
     metadata = _coerce_metadata(metadata)
-    logger.info("memory_store: START", extra={
-        "content_len": len(content), "namespace": namespace,
-        "user_id": user_id, "importance": importance,
-    })
-    try:
-        result = await celery_call(
-            TASK_STORE,
-            content=content,
-            user_id=user_id,
-            metadata=metadata,
-            namespace=namespace,
-            importance=importance,
-        )
-        # Обновляем метрики дедупликации
-        ns = namespace or "default"
-        action = result.get("_dedup_action", "insert")
-        if action in ("skip", "update"):
-            DEDUP_SKIPPED_TOTAL.labels(namespace=ns, reason=action).inc()
-        elif action == "insert":
-            DEDUP_INSERTED_TOTAL.labels(namespace=ns).inc()
-        logger.info("memory_store: done", extra={
-            "id": result.get("id"), "dedup_action": action, "namespace": result.get("namespace"),
-        })
-        return result
-    except Exception as e:
-        logger.exception("Failed to store memory")
-        raise RuntimeError(str(e)) from e
+    return await celery_call(
+        TASK_STORE,
+        content=content,
+        user_id=user_id,
+        metadata=metadata,
+        namespace=namespace,
+        importance=importance,
+    )
 
 
 @mcp.tool()
-@track_tool_metrics("memory_search")
+@tool_handler("memory_search")
 async def memory_search(
     query: str,
     user_id: str | None = None,
@@ -126,29 +101,20 @@ async def memory_search(
 
     Returns memories matching the query, ordered by relevance score.
     """
-    logger.info("memory_search: START", extra={
-        "query": query[:200], "namespace": namespace,
-        "limit": limit, "threshold": threshold, "user_id": user_id,
-    })
-    try:
-        results = await celery_call(
-            TASK_SEARCH,
-            query=query,
-            user_id=user_id,
-            limit=limit,
-            threshold=threshold,
-            namespace=namespace,
-        )
-        SEARCH_RESULTS.observe(len(results))
-        logger.info("memory_search: done", extra={"count": len(results)})
-        return results
-    except Exception as e:
-        logger.exception("Failed to search memories")
-        raise RuntimeError(str(e)) from e
+    results = await celery_call(
+        TASK_SEARCH,
+        query=query,
+        user_id=user_id,
+        limit=limit,
+        threshold=threshold,
+        namespace=namespace,
+    )
+    SEARCH_RESULTS.labels(tool="memory_search").observe(len(results))
+    return results
 
 
 @mcp.tool()
-@track_tool_metrics("memory_ingest_batch")
+@tool_handler("memory_ingest_batch")
 async def memory_ingest_batch(
     entries: list[dict],
     user_id: str,
@@ -159,53 +125,28 @@ async def memory_ingest_batch(
     Entries format: [{content, metadata?, namespace?}, ...]
     Returns summary of inserted/skipped/updated counts.
     """
-    logger.info("memory_ingest_batch: START", extra={
-        "entries": len(entries), "user_id": user_id,
-    })
-    try:
-        result = await celery_call(
-            TASK_INGEST_BATCH,
-            entries=entries,
-            user_id=user_id,
-        )
-        # Обновляем метрики дедупликации
-        for r in result.get("results", []):
-            ns = r.get("namespace", "default")
-            action = r.get("action")
-            if action in ("skip", "update"):
-                DEDUP_SKIPPED_TOTAL.labels(namespace=ns, reason=action).inc()
-            elif action == "insert":
-                DEDUP_INSERTED_TOTAL.labels(namespace=ns).inc()
-        logger.info("memory_ingest_batch: done", extra={"summary": result.get("summary")})
-        return result
-    except Exception as e:
-        logger.exception("Failed to ingest batch")
-        raise RuntimeError(str(e)) from e
+    return await celery_call(
+        TASK_INGEST_BATCH,
+        entries=entries,
+        user_id=user_id,
+    )
 
 
 @mcp.tool()
-@track_tool_metrics("memory_stats")
+@tool_handler("memory_stats")
 async def memory_stats(
     user_id: str | None = None,
     ctx: Context | None = None,
 ) -> list[dict]:
     """Get memory statistics for a user — per-namespace counts and last updated."""
-    logger.info("memory_stats", extra={"user_id": user_id})
-    try:
-        result = await celery_call(
-            TASK_STATS, user_id=user_id,
-        )
-        for item in result:
-            MEMORY_COUNT.labels(namespace=item["namespace"]).set(item["count"])
-        logger.info("memory_stats: done", extra={"namespaces": len(result)})
-        return result
-    except Exception as e:
-        logger.exception("Failed to get stats")
-        raise RuntimeError(str(e)) from e
+    result = await celery_call(TASK_STATS, user_id=user_id)
+    for item in result:
+        MEMORY_COUNT.labels(namespace=item["namespace"]).set(item["count"])
+    return result
 
 
 @mcp.tool()
-@track_tool_metrics("memory_find_similar")
+@tool_handler("memory_find_similar")
 async def memory_find_similar(
     content: str,
     user_id: str | None = None,
@@ -215,48 +156,30 @@ async def memory_find_similar(
     ctx: Context | None = None,
 ) -> list[dict]:
     """Find semantically similar memories without storing."""
-    logger.info("memory_find_similar: START", extra={
-        "content_len": len(content), "namespace": namespace,
-        "limit": limit, "threshold": threshold, "user_id": user_id,
-    })
-    try:
-        results = await celery_call(
-            TASK_FIND_SIMILAR,
-            content=content,
-            user_id=user_id,
-            limit=limit,
-            threshold=threshold,
-            namespace=namespace,
-        )
-        SEARCH_RESULTS.observe(len(results))
-        logger.info("memory_find_similar: done", extra={"count": len(results)})
-        return results
-    except Exception as e:
-        logger.exception("Failed to find similar")
-        raise RuntimeError(str(e)) from e
+    results = await celery_call(
+        TASK_FIND_SIMILAR,
+        content=content,
+        user_id=user_id,
+        limit=limit,
+        threshold=threshold,
+        namespace=namespace,
+    )
+    SEARCH_RESULTS.labels(tool="memory_find_similar").observe(len(results))
+    return results
 
 
 @mcp.tool()
-@track_tool_metrics("memory_get")
+@tool_handler("memory_get")
 async def memory_get(
     id: str,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Retrieve a single memory record by its ID."""
-    logger.info("memory_get", extra={"id": id})
-    try:
-        result = await celery_call(
-            TASK_GET, memory_id=id,
-        )
-        logger.info("memory_get: found", extra={"id": result.get("id"), "namespace": result.get("namespace")})
-        return result
-    except Exception as e:
-        logger.exception("Failed to get memory")
-        raise RuntimeError(str(e)) from e
+    return await celery_call(TASK_GET, memory_id=id)
 
 
 @mcp.tool()
-@track_tool_metrics("memory_update")
+@tool_handler("memory_update")
 async def memory_update(
     id: str,
     content: str | None = None,
@@ -269,46 +192,27 @@ async def memory_update(
     If content is provided, a new embedding is generated.
     """
     metadata = _coerce_metadata(metadata)
-    logger.info("memory_update: START", extra={
-        "id": id, "has_content": content is not None,
-        "has_metadata": metadata is not None, "importance": importance,
-    })
-    try:
-        result = await celery_call(
-            TASK_UPDATE,
-            memory_id=id,
-            content=content,
-            metadata=metadata,
-            importance=importance,
-        )
-        logger.info("memory_update: done", extra={"id": result.get("id"), "namespace": result.get("namespace")})
-        return result
-    except Exception as e:
-        logger.exception("Failed to update memory")
-        raise RuntimeError(str(e)) from e
+    return await celery_call(
+        TASK_UPDATE,
+        memory_id=id,
+        content=content,
+        metadata=metadata,
+        importance=importance,
+    )
 
 
 @mcp.tool()
-@track_tool_metrics("memory_delete")
+@tool_handler("memory_delete")
 async def memory_delete(
     id: str,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Delete a memory record by its ID."""
-    logger.info("memory_delete", extra={"id": id})
-    try:
-        result = await celery_call(
-            TASK_DELETE, memory_id=id,
-        )
-        logger.info("memory_delete: done", extra={"id": id, "success": result.get("success")})
-        return result
-    except Exception as e:
-        logger.exception("Failed to delete memory")
-        raise RuntimeError(str(e)) from e
+    return await celery_call(TASK_DELETE, memory_id=id)
 
 
 @mcp.tool()
-@track_tool_metrics("memory_list")
+@tool_handler("memory_list")
 async def memory_list(
     user_id: str | None = None,
     namespace: str | None = None,
@@ -317,27 +221,17 @@ async def memory_list(
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """List memory records with optional filtering and pagination."""
-    logger.info("memory_list", extra={
-        "namespace": namespace, "limit": limit,
-        "offset": offset, "user_id": user_id,
-    })
-    try:
-        result = await celery_call(
-            TASK_LIST,
-            user_id=user_id,
-            namespace=namespace,
-            limit=limit,
-            offset=offset,
-        )
-        logger.info("memory_list: done", extra={"total": result.get("total"), "items": len(result.get("items", []))})
-        return result
-    except Exception as e:
-        logger.exception("Failed to list memories")
-        raise RuntimeError(str(e)) from e
+    return await celery_call(
+        TASK_LIST,
+        user_id=user_id,
+        namespace=namespace,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @mcp.tool()
-@track_tool_metrics("memory_recent")
+@tool_handler("memory_recent")
 async def memory_recent(
     namespace: str | None = None,
     limit: int = 20,
@@ -351,45 +245,31 @@ async def memory_recent(
     Pass 'since' as an ISO datetime string (e.g. '2026-07-25' or '2026-07-25T10:00:00')
     to filter records created after a specific point in time.
     """
-    logger.info("memory_recent", extra={"namespace": namespace, "limit": limit, "since": since})
-    try:
-        results = await celery_call(
-            TASK_RECENT,
-            namespace=namespace,
-            since=since,
-            limit=limit,
-        )
-        logger.info("memory_recent: done", extra={"count": len(results)})
-        return results
-    except Exception as e:
-        logger.exception("Failed to get recent memories")
-        raise RuntimeError(str(e)) from e
+    return await celery_call(
+        TASK_RECENT,
+        namespace=namespace,
+        since=since,
+        limit=limit,
+    )
 
 
 @mcp.tool()
-@track_tool_metrics("memory_forget")
+@tool_handler("memory_forget")
 async def memory_forget(
     user_id: str,
     namespace: str | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Delete all memories for a user, optionally filtered by namespace."""
-    logger.info("memory_forget", extra={"user_id": user_id, "namespace": namespace})
-    try:
-        result = await celery_call(
-            TASK_FORGET,
-            user_id=user_id,
-            namespace=namespace,
-        )
-        logger.info("memory_forget: done", extra={"deleted_count": result.get("deleted_count")})
-        return result
-    except Exception as e:
-        logger.exception("Failed to forget memories")
-        raise RuntimeError(str(e)) from e
+    return await celery_call(
+        TASK_FORGET,
+        user_id=user_id,
+        namespace=namespace,
+    )
 
 
 @mcp.tool()
-@track_tool_metrics("memory_archive")
+@tool_handler("memory_archive")
 async def memory_archive(
     id: str,
     ctx: Context | None = None,
@@ -399,23 +279,14 @@ async def memory_archive(
     Sets is_archived = true. The record is excluded from search, list, and recent queries
     but remains in the database for potential restoration.
     """
-    logger.info("memory_archive", extra={"id": id})
-    try:
-        result = await celery_call(
-            TASK_ARCHIVE, memory_id=id,
-        )
-        logger.info("memory_archive: done", extra={"id": id, "success": result.get("success")})
-        return result
-    except Exception as e:
-        logger.exception("Failed to archive memory")
-        raise RuntimeError(str(e)) from e
+    return await celery_call(TASK_ARCHIVE, memory_id=id)
 
 
 # ── Graph tools ──
 
 
 @mcp.tool()
-@track_tool_metrics("memory_link")
+@tool_handler("memory_link")
 async def memory_link(
     source_id: str,
     target_id: str,
@@ -432,28 +303,18 @@ async def memory_link(
                runs_on | exposes | mounts | derived_from | motivates | informs | informed_by |
                connected_to | contradicts
     """
-    logger.info("memory_link", extra={
-        "source": source_id, "target": target_id,
-        "type": link_type, "weight": weight,
-    })
-    try:
-        result = await celery_call(
-            TASK_ADD_RELATION,
-            source_id=source_id,
-            target_id=target_id,
-            link_type=link_type,
-            description=description,
-            weight=weight,
-        )
-        logger.info("memory_link: done", extra={"relation_id": result.get("relation_id")})
-        return result
-    except Exception as e:
-        logger.exception("Failed to create link")
-        raise RuntimeError(str(e)) from e
+    return await celery_call(
+        TASK_ADD_RELATION,
+        source_id=source_id,
+        target_id=target_id,
+        link_type=link_type,
+        description=description,
+        weight=weight,
+    )
 
 
 @mcp.tool()
-@track_tool_metrics("memory_unlink")
+@tool_handler("memory_unlink")
 async def memory_unlink(
     source_id: str,
     target_id: str,
@@ -461,25 +322,16 @@ async def memory_unlink(
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Удалить связь между двумя гранулами."""
-    logger.info("memory_unlink", extra={
-        "source": source_id, "target": target_id, "type": link_type,
-    })
-    try:
-        result = await celery_call(
-            TASK_DELETE_RELATION,
-            source_id=source_id,
-            target_id=target_id,
-            link_type=link_type,
-        )
-        logger.info("memory_unlink: done", extra={"success": result.get("ok")})
-        return result
-    except Exception as e:
-        logger.exception("Failed to delete link")
-        raise RuntimeError(str(e)) from e
+    return await celery_call(
+        TASK_DELETE_RELATION,
+        source_id=source_id,
+        target_id=target_id,
+        link_type=link_type,
+    )
 
 
 @mcp.tool()
-@track_tool_metrics("memory_get_relations")
+@tool_handler("memory_get_relations")
 async def memory_get_relations(
     source_id: str,
     link_type: str | None = None,
@@ -489,25 +341,15 @@ async def memory_get_relations(
 
     Возвращает {incoming: [...], outgoing: [...]}
     """
-    logger.info("memory_get_relations", extra={"source_id": source_id, "link_type": link_type})
-    try:
-        result = await celery_call(
-            TASK_GET_RELATIONS,
-            source_id=source_id,
-            link_type=link_type,
-        )
-        logger.info("memory_get_relations: done", extra={
-            "incoming": len(result.get("incoming", [])),
-            "outgoing": len(result.get("outgoing", [])),
-        })
-        return result
-    except Exception as e:
-        logger.exception("Failed to get relations")
-        raise RuntimeError(str(e)) from e
+    return await celery_call(
+        TASK_GET_RELATIONS,
+        source_id=source_id,
+        link_type=link_type,
+    )
 
 
 @mcp.tool()
-@track_tool_metrics("memory_traverse")
+@tool_handler("memory_traverse")
 async def memory_traverse(
     start_id: str,
     depth: int = 3,
@@ -519,53 +361,28 @@ async def memory_traverse(
     depth: максимальная глубина обхода (по умолчанию 3)
     link_types: фильтр по типам связей (по умолчанию все)
     """
-    logger.info("memory_traverse", extra={
-        "start_id": start_id, "depth": depth, "link_types": link_types,
-    })
-    try:
-        result = await celery_call(
-            TASK_TRAVERSE,
-            start_id=start_id,
-            depth=depth,
-            link_types=link_types,
-        )
-        logger.info("memory_traverse: done", extra={
-            "nodes": len(result.get("nodes", [])),
-            "edges": len(result.get("edges", [])),
-        })
-        return result
-    except Exception as e:
-        logger.exception("Failed to traverse graph")
-        raise RuntimeError(str(e)) from e
+    return await celery_call(
+        TASK_TRAVERSE,
+        start_id=start_id,
+        depth=depth,
+        link_types=link_types,
+    )
 
 
 @mcp.tool()
-@track_tool_metrics("memory_graph_stats")
+@tool_handler("memory_graph_stats")
 async def memory_graph_stats(
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Статистика графа знаний: связность, сироты, кластеры по namespace и типам связей."""
-    logger.info("memory_graph_stats")
-    try:
-        stats = await celery_call(
-            TASK_GRAPH_STATS,
-        )
-        logger.info("memory_graph_stats: done", extra={
-            "granules": stats.get("total_granules"),
-            "relations": stats.get("total_relations"),
-            "orphans": stats.get("orphans"),
-        })
-        return stats
-    except Exception as e:
-        logger.exception("Failed to get graph stats")
-        raise RuntimeError(str(e)) from e
+    return await celery_call(TASK_GRAPH_STATS)
 
 
 # ── Version (локальный, без Celery) ──
 
 
 @mcp.tool()
-@track_tool_metrics("memory_version")
+@tool_handler("memory_version")
 async def memory_version(
     ctx: Context | None = None,
 ) -> dict[str, Any]:
@@ -574,10 +391,6 @@ async def memory_version(
 
     version_file = Path(__file__).parent.parent.parent / "VERSION"
     version = version_file.read_text().strip() if version_file.exists() else "unknown"
-    logger.info("memory_version", extra={
-        "version": version, "server": settings.mcp_server_name,
-        "model": settings.embedding_model,
-    })
     return {
         "version": version,
         "server": settings.mcp_server_name,
@@ -589,7 +402,7 @@ async def memory_version(
 
 
 @mcp.tool()
-@track_tool_metrics("memory_namespaces")
+@tool_handler("memory_namespaces")
 async def memory_namespaces(
     ctx: Context | None = None,
 ) -> list[dict[str, Any]]:
@@ -598,13 +411,4 @@ async def memory_namespaces(
     Возвращает uid, name и description каждого namespace.
     Используй для динамического определения допустимых namespace.
     """
-    logger.info("memory_namespaces")
-    try:
-        namespaces = await celery_call(
-            TASK_NAMESPACES,
-        )
-        logger.info("memory_namespaces: done", extra={"count": len(namespaces)})
-        return namespaces
-    except Exception as e:
-        logger.exception("Failed to list namespaces")
-        raise RuntimeError(str(e)) from e
+    return await celery_call(TASK_NAMESPACES)

@@ -4,6 +4,7 @@ Coverage: run_task(), celery_call(), error handling, timeout.
 """
 
 import asyncio
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -23,10 +24,12 @@ def mock_celery_app():
 
 @pytest.fixture
 def mock_async_result():
-    """Fake Celery AsyncResult."""
+    """Fake Celery AsyncResult (polling-based: ready/failed/result)."""
     result = MagicMock()
     result.id = "test-task-id-123"
-    result.get.return_value = {"status": "ok", "data": [1, 2, 3]}
+    result.ready.return_value = True
+    result.failed.return_value = False
+    result.result = {"status": "ok", "data": [1, 2, 3]}
     return result
 
 
@@ -35,7 +38,7 @@ def mock_async_result():
 
 class TestRunTask:
     def test_success(self, mock_celery_app, mock_async_result):
-        """Happy path: send_task → result.get → return value."""
+        """Happy path: send_task → ready → return value."""
         mock_celery_app.send_task.return_value = mock_async_result
 
         result = run_task(
@@ -49,45 +52,43 @@ class TestRunTask:
         mock_celery_app.send_task.assert_called_once_with(
             "memory_server.tasks.memory_tasks.store_memory",
             kwargs={"content": "hello", "user_id": "u1"},
+            headers=None,
         )
-        mock_async_result.get.assert_called_once_with(timeout=TASK_RESULT_TIMEOUT)
 
     def test_custom_timeout(self, mock_celery_app, mock_async_result):
-        """Custom timeout passed to result.get()."""
+        """Custom timeout is respected (task finishes fast, no timeout)."""
         mock_celery_app.send_task.return_value = mock_async_result
 
-        run_task(mock_celery_app, "some.task", timeout=10, x=1)
-
-        mock_async_result.get.assert_called_once_with(timeout=10)
+        result = run_task(mock_celery_app, "some.task", timeout=10, x=1)
+        assert result == {"status": "ok", "data": [1, 2, 3]}
 
     def test_task_failure_propagates(self, mock_celery_app):
         """Exception from Celery task propagates to caller."""
         mock_async_result = MagicMock()
         mock_async_result.id = "fail-id"
-        mock_async_result.get.side_effect = RuntimeError("Task failed")
+        mock_async_result.ready.return_value = True
+        mock_async_result.failed.return_value = True
+        mock_async_result.result = RuntimeError("Task failed")
         mock_celery_app.send_task.return_value = mock_async_result
 
         with pytest.raises(RuntimeError, match="Task failed"):
             run_task(mock_celery_app, "failing.task")
 
     def test_connection_error_propagates(self, mock_celery_app):
-        """ConnectionError from broker propagates."""
-        mock_async_result = MagicMock()
-        mock_async_result.id = "conn-id"
-        mock_async_result.get.side_effect = ConnectionError("Broker unreachable")
-        mock_celery_app.send_task.return_value = mock_async_result
+        """send_task raising an exception propagates."""
+        mock_celery_app.send_task.side_effect = ConnectionError("Broker unreachable")
 
         with pytest.raises(ConnectionError):
             run_task(mock_celery_app, "some.task")
 
     def test_timeout_propagates(self, mock_celery_app):
-        """TimeoutError from result.get propagates."""
+        """TimeoutError when task doesn't finish in time."""
         mock_async_result = MagicMock()
         mock_async_result.id = "timeout-id"
-        mock_async_result.get.side_effect = asyncio.TimeoutError()
+        mock_async_result.ready.return_value = False  # never ready
         mock_celery_app.send_task.return_value = mock_async_result
 
-        with pytest.raises(asyncio.TimeoutError):
+        with pytest.raises(TimeoutError, match="timed out"):
             run_task(mock_celery_app, "slow.task", timeout=0.001)
 
 

@@ -94,11 +94,15 @@ app.conf.task_max_retries = 5
 # ── Result Settings ──
 app.conf.result_expires = 3600  # 1 hour — результаты автоматически чистятся
 
-# ── Beat Schedule: periodic worker stats ──
+# ── Beat Schedule: periodic worker stats + business metrics ──
 app.conf.beat_schedule = {
     "update-worker-stats": {
         "task": "worker_stats.update",
         "schedule": 30.0,  # каждые 30 секунд
+    },
+    "update-business-metrics": {
+        "task": "business_metrics.update",
+        "schedule": 3600.0,  # раз в час
     },
 }
 

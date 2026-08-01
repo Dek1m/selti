@@ -1,9 +1,9 @@
 import asyncio
-import logging
 import time
 from typing import Optional
 
 import httpx
+import structlog
 
 from memory_server.cache.redis_client import EmbeddingCache
 from memory_server.embedding.provider import EmbeddingProvider
@@ -11,10 +11,11 @@ from memory_server.exceptions import EmbeddingError
 from memory_server.metrics import (
     EMBEDDING_CACHE_HITS,
     EMBEDDING_CACHE_MISSES,
+    EMBEDDING_CACHE_HIT_RATIO,
     EMBEDDING_DURATION,
 )
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger()
 
 
 class EmbeddingClient(EmbeddingProvider):
@@ -34,21 +35,31 @@ class EmbeddingClient(EmbeddingProvider):
         self.dimension = dimension
         self._client: httpx.AsyncClient | None = None
         self._client_loop: asyncio.AbstractEventLoop | None = None
+        self._client_lock = asyncio.Lock()
         self._dimension_verified: bool = False
         self._cache = cache
         self.cache_hits: int = 0
         self.cache_misses: int = 0
 
     async def _get_client(self) -> httpx.AsyncClient:
-        loop = asyncio.get_running_loop()
-        # httpx.AsyncClient привязан к event loop — пересоздаём при смене loop
-        if self._client is not None and self._client_loop is not loop:
-            try:
-                await self._client.aclose()
-            except Exception:
-                pass
-            self._client = None
-        if self._client is None:
+        # Fast path — клиент уже создан и loop тот же
+        if self._client is not None and self._client_loop is asyncio.get_running_loop():
+            return self._client
+
+        async with self._client_lock:
+            loop = asyncio.get_running_loop()
+            # Double-check после acquiring lock
+            if self._client is not None and self._client_loop is loop:
+                return self._client
+
+            # Закрываем старый клиент при смене loop
+            if self._client is not None:
+                try:
+                    await self._client.aclose()
+                except Exception:
+                    pass
+                self._client = None
+
             self._client_loop = loop
             headers = {"Content-Type": "application/json"}
             if self.api_key:
@@ -61,7 +72,7 @@ class EmbeddingClient(EmbeddingProvider):
             if not self._dimension_verified:
                 await self._verify_dimension()
                 self._dimension_verified = True
-        return self._client
+            return self._client
 
     async def _verify_dimension(self) -> None:
         """Verify the embedding dimension matches configuration."""
@@ -94,12 +105,19 @@ class EmbeddingClient(EmbeddingProvider):
         data = response.json()
         return data["data"][0]["embedding"]
 
+    def _update_hit_ratio(self) -> None:
+        """Обновить gauge cache hit ratio из instance-level счётчиков."""
+        total = self.cache_hits + self.cache_misses
+        if total > 0:
+            EMBEDDING_CACHE_HIT_RATIO.set(self.cache_hits / total)
+
     async def embed(self, text: str) -> list[float]:
         if self._cache is not None:
             cached = await self._cache.get(text)
             if cached is not None:
                 self.cache_hits += 1
                 EMBEDDING_CACHE_HITS.inc()
+                self._update_hit_ratio()
                 return cached
             self.cache_misses += 1
             EMBEDDING_CACHE_MISSES.inc()
@@ -129,6 +147,7 @@ class EmbeddingClient(EmbeddingProvider):
             self.cache_hits += hits
             if hits:
                 EMBEDDING_CACHE_HITS.inc(hits)
+            self._update_hit_ratio()
             return cached
         else:
             return await self._batch_request(texts)
@@ -155,9 +174,10 @@ class EmbeddingClient(EmbeddingProvider):
         return [item["embedding"] for item in data["data"]]
 
     async def aclose(self) -> None:
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
+        async with self._client_lock:
+            if self._client is not None:
+                await self._client.aclose()
+                self._client = None
 
     async def __aenter__(self):
         await self._get_client()

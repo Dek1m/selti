@@ -16,6 +16,22 @@ from prometheus_client import Counter, Gauge, Histogram
 PREFIX = os.getenv("SERVICE_NAME", "selti").lower()
 
 # ============================================================
+# Health check
+# ============================================================
+
+HEALTH_STATUS = Gauge(
+    f"{PREFIX}_health_status",
+    "Health check status (1=ok, 0=error)",
+    ["check"],
+)
+
+HEALTH_CHECKS_TOTAL = Counter(
+    f"{PREFIX}_health_checks_total",
+    "Total health check attempts",
+    ["check"],
+)
+
+# ============================================================
 # HTTP
 # ============================================================
 
@@ -56,6 +72,7 @@ EMBEDDING_DURATION = Histogram(
 SEARCH_RESULTS = Histogram(
     f"{PREFIX}_search_results_count",
     "Number of results returned by search",
+    ["tool"],
     buckets=(1, 5, 10, 20, 50, 100),
 )
 
@@ -164,6 +181,7 @@ CELERY_TASK_ERRORS_TOTAL = Counter(
 CELERY_WORKERS_ACTIVE = Gauge(
     f"{PREFIX}_celery_workers_active",
     "Number of active Celery workers",
+    multiprocess_mode="livesum",
 )
 
 # Длина очереди (оценочная, по task_ready)
@@ -171,6 +189,7 @@ CELERY_QUEUE_LENGTH = Gauge(
     f"{PREFIX}_celery_queue_length",
     "Estimated queue length (pending tasks)",
     ["queue"],
+    multiprocess_mode="livesum",
 )
 
 # ============================================================
@@ -211,4 +230,40 @@ QDRANT_SEARCH_RESULTS = Histogram(
     f"{PREFIX}_qdrant_search_results_count",
     "Number of results returned by Qdrant search",
     buckets=(1, 5, 10, 20, 50, 100),
+)
+
+# ============================================================
+# Qdrant Circuit Breaker
+# ============================================================
+
+QDRANT_CB_STATE = Gauge(
+    f"{PREFIX}_qdrant_circuit_breaker_state",
+    "Qdrant circuit breaker state (1=open, 0=closed/half-open)",
+)
+
+# ============================================================
+# Business metrics (НОВАЯ) — шаг 3.9
+# ============================================================
+
+# Dedup ratio: skipped / (skipped + inserted) per namespace.
+# Обновляется инлайн в dedup.py после каждого решения.
+DEDUP_RATIO = Gauge(
+    f"{PREFIX}_dedup_ratio",
+    "Dedup skip ratio per namespace (skipped / total)",
+    ["namespace"],
+)
+
+# Memory growth rate: новые записи в hour per namespace.
+# Обновляется periodic task раз в час.
+MEMORY_GROWTH_RATE = Gauge(
+    f"{PREFIX}_memory_growth_rate",
+    "Memory growth rate per namespace (records/hour)",
+    ["namespace"],
+)
+
+# Embedding cache hit ratio: hits / (hits + misses).
+# Обновляется инлайн в embedding/client.py после каждого cache-операции.
+EMBEDDING_CACHE_HIT_RATIO = Gauge(
+    f"{PREFIX}_embedding_cache_hit_ratio",
+    "Embedding cache hit ratio (0.0 – 1.0)",
 )

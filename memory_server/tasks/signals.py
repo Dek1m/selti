@@ -16,7 +16,9 @@
 import time
 import logging
 
-from celery.signals import task_prerun, task_postrun, task_failure, task_retry
+from celery.signals import task_prerun, task_postrun, task_failure, task_retry, worker_process_init
+
+from argenta_logging import request_id_var
 
 from memory_server.metrics import (
     CELERY_TASKS_TOTAL,
@@ -43,6 +45,12 @@ def setup_signals(app):
         """Задача начала выполняться."""
         now = time.monotonic()
         _task_start_times[task_id] = now
+
+        # Проброс correlation_id из headers в contextvar
+        headers = estkw.get("headers") or {}
+        cid = headers.get("correlation_id")
+        if cid:
+            request_id_var.set(cid)
 
         # Пытаемся достать send_time из kwargs (передаётся через task_bridge)
         send_time = (kwargs or {}).get("_send_time")
@@ -121,4 +129,22 @@ def setup_signals(app):
             "reason": str(reason)[:200],
         })
 
+    @worker_process_init.connect(weak=False)
+    def on_worker_process_init(sender, **kwargs):
+        """Очистка PROMETHEUS_MULTIPROC_DIR перед началом работы worker process.
+        
+        Используем prometheus_multiproc_cleanup() для удаления .db файлов
+        от мёртвых процессов. Не удаляем файлы живых процессов!
+        """
+        import os
+        from prometheus_client import multiprocess
+        
+        prom_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+        if prom_dir:
+            try:
+                multiprocess.prometheus_multiproc_cleanup()
+                logger.info("Prometheus multiproc cleanup completed")
+            except Exception as e:
+                logger.warning(f"Prometheus multiproc cleanup failed: {e}")
+    
     logger.info("Celery signals connected")

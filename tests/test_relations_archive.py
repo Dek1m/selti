@@ -4,7 +4,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from memory_server.memory.repository_qdrant import MemoryRepository
+from memory_server.memory.repository import MemoryRepository
+from memory_server.memory.pg_repository import PostgreSQLRepository
 from memory_server.models import (
     GraphStats,
     Relation,
@@ -16,13 +17,14 @@ from memory_server.models import (
 
 @pytest.fixture
 def repo(mock_pool):
-    return MemoryRepository(pool=mock_pool)
+    pg = PostgreSQLRepository(pool=mock_pool)
+    return MemoryRepository(pg=pg)
 
 
 @pytest.fixture
 def conn(repo):
     """Shortcut to the mock connection inside the pool."""
-    return repo.pool.acquire.return_value.__aenter__.return_value
+    return repo.pg.pool.acquire.return_value.__aenter__.return_value
 
 
 class TestAddRelation:
@@ -138,13 +140,11 @@ class TestDeleteRelation:
 class TestTraverse:
     @pytest.mark.asyncio
     async def test_traverse_returns_results(self, repo, conn):
-        conn.fetch = AsyncMock(
-            return_value=[
-                {
-                    "node_id": "tgt-1",
-                    "depth": 1,
-                }
-            ]
+        conn.fetchrow = AsyncMock(
+            return_value={
+                "nodes": [{"id": "tgt-1", "content": "test", "namespace": "ns", "importance": 3, "depth": 1}],
+                "edges": [],
+            }
         )
 
         result = await repo.traverse(
@@ -152,10 +152,12 @@ class TestTraverse:
             depth=3,
         )
 
-        assert isinstance(result, list)
-        assert len(result) == 1
-        assert result[0]["node_id"] == "tgt-1"
-        assert result[0]["depth"] == 1
+        assert isinstance(result, dict)
+        assert "nodes" in result
+        assert "edges" in result
+        assert len(result["nodes"]) == 1
+        assert result["nodes"][0]["id"] == "tgt-1"
+        assert result["nodes"][0]["depth"] == 1
 
 
 class TestGetGraphStats:
@@ -163,24 +165,19 @@ class TestGetGraphStats:
     async def test_get_graph_stats(self, repo, conn):
         conn.fetchrow = AsyncMock(
             return_value={
-                "total_granules": 100,
-                "total_relations": 50,
-                "linked_granules": 70,
-                "orphans": 30,
+                "p_total_granules": 100,
+                "p_total_relations": 50,
+                "p_linked_granules": 70,
+                "p_orphans": 30,
+                "p_by_namespace": {
+                    "code_knowledge": {"total": 60, "linked": 40, "orphans": 20},
+                    "user_facts": {"total": 40, "linked": 30, "orphans": 10},
+                },
+                "p_by_link_type": {
+                    "depends_on": 30,
+                    "related_to": 20,
+                },
             }
-        )
-        # First fetch: by_namespace, Second fetch: by_link_type
-        conn.fetch = AsyncMock(
-            side_value=[
-                [
-                    {"namespace": "code_knowledge", "total": 60, "linked": 40, "orphans": 20},
-                    {"namespace": "user_facts", "total": 40, "linked": 30, "orphans": 10},
-                ],
-                [
-                    {"link_type": "depends_on", "cnt": 30},
-                    {"link_type": "related_to", "cnt": 20},
-                ],
-            ]
         )
 
         result = await repo.get_graph_stats()

@@ -63,7 +63,7 @@ class Relation(BaseModel):
     description: str | None = None
     weight: float = 1.0
     metadata: dict = Field(default_factory=dict)
-    created_at: datetime
+    created_at: datetime | None = None
 
 
 class RelationCreate(BaseModel):

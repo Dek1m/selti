@@ -37,6 +37,7 @@ import asyncpg
 from qdrant_client import QdrantClient
 
 from memory_server.config import settings
+from memory_server.vector.circuit_breaker import CircuitBreakerQdrantClient
 from memory_server.tasks.async_bridge import run_async
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,7 @@ logger = logging.getLogger(__name__)
 # ── Singletons (per worker process) ─────────────────────────────
 
 _pool: Optional[asyncpg.Pool] = None
-_qdrant: Optional[QdrantClient] = None
+_qdrant: Optional[CircuitBreakerQdrantClient] = None
 _embedding: Optional["EmbeddingClient"] = None
 _pool_lock = threading.Lock()  # Guard от гонки при lazy init
 
@@ -148,8 +149,8 @@ def get_pool() -> asyncpg.Pool:
 
 # ── QdrantClient ────────────────────────────────────────────────
 
-def get_qdrant() -> Optional[QdrantClient]:
-    """Получить или создать QdrantClient (sync, per process).
+def get_qdrant() -> Optional[CircuitBreakerQdrantClient]:
+    """Получить или создать QdrantClient с Circuit Breaker (sync, per process).
 
     Если qdrant_enabled=False — возвращает None.
     Задачи должны проверять: if get_qdrant() is None → fallback.
@@ -170,8 +171,9 @@ def get_qdrant() -> Optional[QdrantClient]:
         url = settings.qdrant_url.replace("http://", "").replace("https://", "")
         host, port_str = url.split(":")
         port = int(port_str.rstrip("/"))
-        _qdrant = QdrantClient(host=host, port=port, timeout=30)
-        logger.info("QdrantClient ready")
+        client = QdrantClient(host=host, port=port, timeout=30)
+        _qdrant = CircuitBreakerQdrantClient(client)
+        logger.info("QdrantClient ready (circuit breaker enabled)")
     except Exception as e:
         logger.error(
             "QdrantClient creation FAILED",

@@ -4,6 +4,7 @@ import logging
 from typing import NamedTuple
 
 import asyncpg
+from cachetools import TTLCache
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ class NamespaceRepository:
 
     def __init__(self, pool: asyncpg.Pool):
         self.pool = pool
-        self._cache: dict[str, NamespaceRecord] = {}
+        self._cache: TTLCache[str, NamespaceRecord] = TTLCache(maxsize=128, ttl=300)
 
     async def _load_all(self) -> None:
         """Загрузить все namespaces из БД в кэш."""

@@ -19,6 +19,7 @@ services:
       - SERVICE_NAME=${SERVICE_NAME}
       - MCP_HOST=0.0.0.0
       - MCP_PORT=8000
+      - PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus
     depends_on:
       postgres:
         condition: service_healthy
@@ -34,9 +35,17 @@ services:
       start_period: 15s
     networks:
       - app-net
+    volumes:
+      - prometheus-data:/tmp/prometheus
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       resources:
         limits:
+          cpus: "2.0"
           memory: 512M
 
   # ── Celery Worker ─────────────────────────────────────────
@@ -62,6 +71,7 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - DATABASE_URL=postgresql+asyncpg://svc_athene_ai:${SELTI_DB_PASSWORD}@postgres:5432/${POSTGRES_DB}
       - QDRANT_URL=http://qdrant:6333
+      - PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus
     depends_on:
       redis:
         condition: service_healthy
@@ -77,9 +87,17 @@ services:
       start_period: 30s
     networks:
       - app-net
+    volumes:
+      - prometheus-data:/tmp/prometheus
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       resources:
         limits:
+          cpus: "2.0"
           memory: 512M
 
   # ── Flower (dev profile) ──────────────────────────────────
@@ -100,9 +118,15 @@ services:
       - dev
     networks:
       - app-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       resources:
         limits:
+          cpus: "1.0"
           memory: 128M
 
   # ── Redis ─────────────────────────────────────────────────
@@ -122,9 +146,15 @@ services:
       retries: 5
     networks:
       - app-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       resources:
         limits:
+          cpus: "1.0"
           memory: 128M
 
   # ── PostgreSQL ────────────────────────────────────────────
@@ -148,9 +178,15 @@ services:
       retries: 5
     networks:
       - app-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       resources:
         limits:
+          cpus: "1.0"
           memory: 512M
 
   # ── Qdrant ────────────────────────────────────────────────
@@ -170,9 +206,15 @@ services:
       retries: 5
     networks:
       - app-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       resources:
         limits:
+          cpus: "1.0"
           memory: 256M
 
 # ── Volumes ────────────────────────────────────────────────
@@ -180,6 +222,7 @@ volumes:
   redis-data:
   postgres-data:
   qdrant-data:
+  prometheus-data:
 
 # ── Networks ───────────────────────────────────────────────
 networks:

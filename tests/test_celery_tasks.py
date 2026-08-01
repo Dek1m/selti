@@ -311,26 +311,18 @@ class TestGetNamespaces:
     def test_happy_path(self):
         from memory_server.tasks.memory_tasks import get_namespaces
 
-        # get_namespaces uses NamespaceRepository directly, needs pool mock
-        with patch(
-            "memory_server.tasks.memory_tasks.get_pool"
-        ) as mock_get_pool:
-            mock_pool_inst = MagicMock()
-            mock_get_pool.return_value = mock_pool_inst
-            with patch(
-                "memory_server.memory.namespace_repository.NamespaceRepository"
-            ) as MockNSRepo:
-                ns = MagicMock()
-                ns.uid = "default"
-                ns.name = "Default"
-                ns.description = ""
-                repo_inst = MagicMock()
-                repo_inst.list_all = AsyncMock(return_value=[ns])
-                MockNSRepo.return_value = repo_inst
+        with patch("memory_server.tasks.memory_tasks._get_service") as mock_get_svc:
+            mock_svc = MagicMock()
+            ns = MagicMock()
+            ns.uid = "default"
+            ns.name = "Default"
+            ns.description = ""
+            mock_svc.ns_repo.list_all = AsyncMock(return_value=[ns])
+            mock_get_svc.return_value = mock_svc
 
-                result = get_namespaces()
-                assert len(result) == 1
-                assert result[0]["uid"] == "default"
+            result = get_namespaces()
+            assert len(result) == 1
+            assert result[0]["uid"] == "default"
 
 
 class TestFindSimilar:
@@ -351,9 +343,23 @@ class TestGetRelations:
     def test_happy_path(self):
         from memory_server.tasks.memory_tasks import get_relations
 
-        result = get_relations(source_id="granule-1")
-        assert "incoming" in result
-        assert "outgoing" in result
+        with patch("memory_server.tasks.memory_tasks._get_service") as mock_get_svc:
+            mock_svc = MagicMock()
+            rel_in = MagicMock()
+            rel_in.model_dump.return_value = {"source_id": "a", "target_id": "b", "type": "related_to"}
+            rel_out = MagicMock()
+            rel_out.model_dump.return_value = {"source_id": "b", "target_id": "c", "type": "contains"}
+            mock_result = MagicMock()
+            mock_result.incoming = [rel_in]
+            mock_result.outgoing = [rel_out]
+            mock_svc.repository.get_relations = AsyncMock(return_value=mock_result)
+            mock_get_svc.return_value = mock_svc
+
+            result = get_relations(source_id="granule-1")
+            assert "incoming" in result
+            assert "outgoing" in result
+            assert len(result["incoming"]) == 1
+            assert len(result["outgoing"]) == 1
 
     def test_empty_source_id_raises(self):
         from memory_server.tasks.memory_tasks import get_relations

@@ -124,6 +124,7 @@ class TestSearch:
             limit=5,
             threshold=0.8,
             namespace="ns",
+            query_text="find this",
         )
         assert result == results
 

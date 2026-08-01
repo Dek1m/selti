@@ -1,6 +1,6 @@
 """Общий декоратор для трекинга метрик MCP tools.
 
-Заменяет дублированный _track_tool в memory_tools.py и hash_tools.py.
+Заменяет дублированный try/except + logging + metrics во всех tools.
 """
 
 import functools
@@ -12,31 +12,30 @@ from memory_server.metrics import MCP_TOOL_CALLS_TOTAL, MCP_TOOL_DURATION_SECOND
 logger = logging.getLogger(__name__)
 
 
-def track_tool_metrics(tool_name: str):
-    """Декоратор для трекинга метрик MCP tools.
+def tool_handler(tool_name: str):
+    """Декоратор: timing, метрики, логирование, обёртка ошибок → RuntimeError.
 
     Использование:
-        @track_tool_metrics("memory_store")
+        @tool_handler("memory_store")
         async def memory_store(...):
-            ...
+            return await celery_call(TASK_STORE, ...)
     """
     def decorator(func):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
             start = time.monotonic()
-            logger.info("tool: START", extra={"tool": tool_name})
             try:
                 result = await func(*args, **kwargs)
                 duration = time.monotonic() - start
+                logger.info(f"{tool_name}: done", extra={"duration_ms": round(duration * 1000, 1)})
                 MCP_TOOL_CALLS_TOTAL.labels(tool=tool_name, status="ok").inc()
                 MCP_TOOL_DURATION_SECONDS.labels(tool=tool_name).observe(duration)
-                logger.info("tool: DONE", extra={"tool": tool_name, "duration_ms": round(duration * 1000, 1)})
                 return result
-            except Exception:
+            except Exception as e:
                 duration = time.monotonic() - start
+                logger.error(f"{tool_name}: error", extra={"error": str(e), "duration_ms": round(duration * 1000, 1)})
                 MCP_TOOL_CALLS_TOTAL.labels(tool=tool_name, status="error").inc()
                 MCP_TOOL_DURATION_SECONDS.labels(tool=tool_name).observe(duration)
-                logger.error("tool: ERROR", extra={"tool": tool_name, "duration_ms": round(duration * 1000, 1)})
-                raise
+                raise RuntimeError(str(e)) from e
         return wrapper
     return decorator

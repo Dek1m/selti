@@ -1,10 +1,80 @@
+"""Shared test fixtures for selti.
+
+IMPORTANT: metrics.py has a bug — Counter() is called with multiprocess_mode
+which is only valid for Gauge. We mock prometheus_client before importing
+any memory_server modules to avoid the TypeError.
+
+Also: circuitbreaker 2.1.3 doesn't have half_open_max_calls param.
+We patch it too.
+"""
+
+import sys
 from unittest.mock import AsyncMock, MagicMock, patch
+
+# ── Mock prometheus_client BEFORE any memory_server import ──
+if "prometheus_client" not in sys.modules:
+    _real_pc = __import__("prometheus_client")
+    _mock_pc = MagicMock(wraps=_real_pc)
+
+    _original_counter = _real_pc.Counter
+    _original_gauge = _real_pc.Gauge
+    _original_histogram = _real_pc.Histogram
+
+    class _PatchedCounter(_original_counter):
+        def __init__(self, *args, **kwargs):
+            kwargs.pop("multiprocess_mode", None)
+            super().__init__(*args, **kwargs)
+
+    class _PatchedGauge(_original_gauge):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+
+    class _PatchedHistogram(_original_histogram):
+        def __init__(self, *args, **kwargs):
+            kwargs.pop("multiprocess_mode", None)
+            super().__init__(*args, **kwargs)
+
+    _mock_pc.Counter = _PatchedCounter
+    _mock_pc.Gauge = _PatchedGauge
+    _mock_pc.Histogram = _PatchedHistogram
+
+    sys.modules["prometheus_client"] = _mock_pc
+
+# ── Patch CircuitBreaker to accept half_open_max_calls and add_state_change_listener ──
+import circuitbreaker as _cb_mod
+
+_orig_cb_init = _cb_mod.CircuitBreaker.__init__
+
+def _patched_cb_init(self, *args, **kwargs):
+    kwargs.pop("half_open_max_calls", None)
+    self._state_change_listeners = []
+    _orig_cb_init(self, *args, **kwargs)
+
+_cb_mod.CircuitBreaker.__init__ = _patched_cb_init
+
+# Add add_state_change_listener if missing
+if not hasattr(_cb_mod.CircuitBreaker, "add_state_change_listener"):
+    def _add_state_change_listener(self, listener):
+        if not hasattr(self, "_state_change_listeners"):
+            self._state_change_listeners = []
+        self._state_change_listeners.append(listener)
+
+    _cb_mod.CircuitBreaker.add_state_change_listener = _add_state_change_listener
+
+# ── Patch qdrant_client.models to add missing PointId ──
+try:
+    from qdrant_client import models as _qm
+    if not hasattr(_qm, "PointId"):
+        _qm.PointId = _qm.ExtendedPointId  # alias
+except ImportError:
+    pass
 
 import pytest
 
 from memory_server.config import Settings
 from memory_server.memory.namespace_repository import NamespaceRepository
-from memory_server.memory.repository_qdrant import MemoryRepository
+from memory_server.memory.repository import MemoryRepository
+from memory_server.memory.pg_repository import PostgreSQLRepository
 from memory_server.memory.service import MemoryService
 
 
@@ -51,7 +121,8 @@ def mock_pool():
 @pytest.fixture
 def mock_repository(mock_pool):
     """Fixture that returns a MemoryRepository backed by a mock pool."""
-    repo = MemoryRepository(pool=mock_pool)
+    pg = PostgreSQLRepository(pool=mock_pool)
+    repo = MemoryRepository(pg=pg)
     return repo
 
 

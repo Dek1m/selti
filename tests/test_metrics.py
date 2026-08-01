@@ -11,10 +11,13 @@ from prometheus_client import Counter, Gauge, Histogram
 from memory_server.metrics import (
     DB_POOL_AVAILABLE,
     DB_POOL_SIZE,
+    DEDUP_RATIO,
+    EMBEDDING_CACHE_HIT_RATIO,
     EMBEDDING_DURATION,
     HTTP_REQUESTS_TOTAL,
     HTTP_REQUEST_DURATION,
     MEMORY_COUNT,
+    MEMORY_GROWTH_RATE,
     SEARCH_RESULTS,
 )
 
@@ -43,6 +46,15 @@ class TestMetricsTypes:
     def test_memory_count_is_gauge(self):
         assert isinstance(MEMORY_COUNT, Gauge)
 
+    def test_dedup_ratio_is_gauge(self):
+        assert isinstance(DEDUP_RATIO, Gauge)
+
+    def test_memory_growth_rate_is_gauge(self):
+        assert isinstance(MEMORY_GROWTH_RATE, Gauge)
+
+    def test_embedding_cache_hit_ratio_is_gauge(self):
+        assert isinstance(EMBEDDING_CACHE_HIT_RATIO, Gauge)
+
 
 class TestMetricsLabels:
     """Проверка, что лейблы заданы корректно."""
@@ -62,6 +74,18 @@ class TestMetricsLabels:
         labels = MEMORY_COUNT._labelnames
         assert "namespace" in labels
 
+    def test_search_results_has_tool_label(self):
+        labels = SEARCH_RESULTS._labelnames
+        assert "tool" in labels
+
+    def test_dedup_ratio_has_namespace_label(self):
+        labels = DEDUP_RATIO._labelnames
+        assert "namespace" in labels
+
+    def test_memory_growth_rate_has_namespace_label(self):
+        labels = MEMORY_GROWTH_RATE._labelnames
+        assert "namespace" in labels
+
 
 class TestMetricsOperations:
     """Проверка, что метрики можно инкрементить / обновлять без ошибок."""
@@ -69,7 +93,6 @@ class TestMetricsOperations:
     def test_counter_increment(self):
         HTTP_REQUESTS_TOTAL.labels(method="GET", endpoint="/test", status="200").inc()
         HTTP_REQUESTS_TOTAL.labels(method="GET", endpoint="/test", status="200").inc(2)
-        # Проверяем, что значение изменилось
         value = HTTP_REQUESTS_TOTAL.labels(
             method="GET", endpoint="/test", status="200"
         )._value.get()
@@ -78,7 +101,7 @@ class TestMetricsOperations:
     def test_histogram_observe(self):
         HTTP_REQUEST_DURATION.labels(method="POST", endpoint="/api").observe(0.1)
         EMBEDDING_DURATION.observe(0.05)
-        SEARCH_RESULTS.observe(5)
+        SEARCH_RESULTS.labels(tool="memory_search").observe(5)
 
     def test_gauge_set_and_clear(self):
         DB_POOL_SIZE.set(10)
@@ -112,3 +135,15 @@ class TestMetricsOperations:
 
         assert get_val == 1.0
         assert post_val == 3.0
+
+    def test_dedup_ratio_gauge_set(self):
+        DEDUP_RATIO.labels(namespace="default").set(0.75)
+        assert DEDUP_RATIO.labels(namespace="default")._value.get() == 0.75
+
+    def test_memory_growth_rate_gauge_set(self):
+        MEMORY_GROWTH_RATE.labels(namespace="code_knowledge").set(12.5)
+        assert MEMORY_GROWTH_RATE.labels(namespace="code_knowledge")._value.get() == 12.5
+
+    def test_embedding_cache_hit_ratio_gauge_set(self):
+        EMBEDDING_CACHE_HIT_RATIO.set(0.85)
+        assert EMBEDDING_CACHE_HIT_RATIO._value.get() == 0.85

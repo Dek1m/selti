@@ -6,9 +6,13 @@ from enum import Enum
 from memory_server.config import Settings
 from memory_server.embedding.provider import EmbeddingProvider
 from memory_server.memory.repository_qdrant import MemoryRepository
-from memory_server.metrics import DEDUP_SKIPPED_TOTAL, DEDUP_INSERTED_TOTAL
+from memory_server.metrics import DEDUP_SKIPPED_TOTAL, DEDUP_INSERTED_TOTAL, DEDUP_RATIO
 
 logger = logging.getLogger(__name__)
+
+# Бегущие счётчики для вычисления dedup ratio (per-process).
+# Корректно в single-worker; в multiprocess — приближение (достаточно для dashboards).
+_dedup_counts: dict[str, dict[str, int]] = {}
 
 
 class DedupAction(Enum):
@@ -37,6 +41,20 @@ class DedupEngine:
         self.embedding = embedding_client
         self.config = config
 
+    @staticmethod
+    def _update_ratio(namespace: str, action: DedupAction) -> None:
+        """Обновить DEDUP_RATIO gauge после каждого dedup-решения."""
+        if namespace not in _dedup_counts:
+            _dedup_counts[namespace] = {"skipped": 0, "inserted": 0}
+        counts = _dedup_counts[namespace]
+        if action in (DedupAction.SKIP, DedupAction.UPDATE):
+            counts["skipped"] += 1
+        elif action == DedupAction.INSERT:
+            counts["inserted"] += 1
+        total = counts["skipped"] + counts["inserted"]
+        if total > 0:
+            DEDUP_RATIO.labels(namespace=namespace).set(counts["skipped"] / total)
+
     async def check(
         self,
         content: str,
@@ -50,6 +68,7 @@ class DedupEngine:
             logger.info("Dedup disabled — force INSERT", extra={
                 "namespace": namespace, "hash": content_hash[:16],
             })
+            self._update_ratio(namespace, DedupAction.INSERT)
             return DedupDecision(action=DedupAction.INSERT, content_hash=content_hash)
 
         # Exact dedup
@@ -60,6 +79,7 @@ class DedupEngine:
                 "namespace": namespace, "action": action.value, "id": existing.id,
             })
             DEDUP_SKIPPED_TOTAL.labels(namespace=namespace, reason="exact").inc()
+            self._update_ratio(namespace, action)
             return DedupDecision(
                 action=action,
                 existing_id=existing.id,
@@ -93,6 +113,7 @@ class DedupEngine:
                     "namespace": namespace, "score": best.score, "id": best.id,
                 })
                 DEDUP_SKIPPED_TOTAL.labels(namespace=namespace, reason="semantic").inc()
+                self._update_ratio(namespace, DedupAction.SKIP)
                 return DedupDecision(
                     action=DedupAction.SKIP,
                     existing_id=best.id,
@@ -101,6 +122,7 @@ class DedupEngine:
                 )
 
         DEDUP_INSERTED_TOTAL.labels(namespace=namespace).inc()
+        self._update_ratio(namespace, DedupAction.INSERT)
         logger.info("Dedup INSERT", extra={"namespace": namespace, "hash": content_hash[:16]})
         return DedupDecision(
             action=DedupAction.INSERT,
@@ -143,6 +165,7 @@ class DedupEngine:
                 if existing is not None:
                     action = DedupAction.UPDATE if ns == "user_facts" else DedupAction.SKIP
                     DEDUP_SKIPPED_TOTAL.labels(namespace=ns, reason="exact").inc()
+                    self._update_ratio(ns, action)
                     decisions[idx] = DedupDecision(
                         action=action,
                         existing_id=existing.id,
@@ -184,6 +207,7 @@ class DedupEngine:
                 else:
                     best = results[0]
                     DEDUP_SKIPPED_TOTAL.labels(namespace=ns, reason="semantic").inc()
+                    self._update_ratio(ns, DedupAction.SKIP)
                     decisions[global_i] = DedupDecision(
                         action=DedupAction.SKIP,
                         existing_id=best.id,
@@ -193,6 +217,7 @@ class DedupEngine:
                     continue
 
             DEDUP_INSERTED_TOTAL.labels(namespace=ns).inc()
+            self._update_ratio(ns, DedupAction.INSERT)
             decisions[global_i] = DedupDecision(
                 action=DedupAction.INSERT,
                 content_hash=h,

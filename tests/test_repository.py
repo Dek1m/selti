@@ -4,19 +4,21 @@ from unittest.mock import AsyncMock
 import pytest
 
 from memory_server.db import queries as q
-from memory_server.memory.repository_qdrant import MemoryRepository
+from memory_server.memory.repository import MemoryRepository
+from memory_server.memory.pg_repository import PostgreSQLRepository
 from memory_server.models import MemoryListResult, MemoryRecord, SearchResult
 
 
 @pytest.fixture
 def repo(mock_pool):
-    return MemoryRepository(pool=mock_pool)
+    pg = PostgreSQLRepository(pool=mock_pool)
+    return MemoryRepository(pg=pg)
 
 
 @pytest.fixture
 def conn(repo):
     """Shortcut to the mock connection inside the pool."""
-    return repo.pool.acquire.return_value.__aenter__.return_value
+    return repo.pg.pool.acquire.return_value.__aenter__.return_value
 
 
 class TestInsert:
@@ -131,6 +133,7 @@ class TestSearch:
             limit=10,
             threshold=0.7,
             namespace="ns",
+            query_text="search query",
         )
 
         assert len(results) == 2
@@ -139,10 +142,9 @@ class TestSearch:
         assert results[0].score == 0.95
         conn.fetch.assert_awaited_once_with(
             q.SEARCH_MEMORIES,
-            [0.1, 0.2, 0.3],
+            "search query",
             "u1",
             "ns",
-            0.7,
             10,
         )
 
@@ -156,16 +158,27 @@ class TestSearch:
             limit=5,
             threshold=0.5,
             namespace=None,
+            query_text="search query",
         )
 
         conn.fetch.assert_awaited_once_with(
             q.SEARCH_MEMORIES,
-            [0.1, 0.2, 0.3],
+            "search query",
             "u1",
             None,
-            0.5,
             5,
         )
+
+    @pytest.mark.asyncio
+    async def test_search_no_query_text_returns_empty(self, repo):
+        """Without query_text and without qdrant, search returns empty."""
+        results = await repo.search(
+            query_embedding=[0.1, 0.2, 0.3],
+            user_id="u1",
+            limit=10,
+            threshold=0.7,
+        )
+        assert results == []
 
 
 class TestUpdate:
@@ -189,7 +202,6 @@ class TestUpdate:
         record = await repo.update(
             memory_id="mem-1",
             content="new content",
-            embedding=[0.5, 0.6, 0.7],
             metadata={"k": "v"},
         )
 
@@ -199,7 +211,6 @@ class TestUpdate:
             q.UPDATE_MEMORY,
             "mem-1",
             "new content",
-            [0.5, 0.6, 0.7],
             {"k": "v"},
             None,
         )
@@ -252,44 +263,41 @@ class TestList:
                     "created_at": now,
                     "updated_at": now,
                     "content_hash": None,
+                    "total_count": 5,
                 },
             ]
         )
-        conn.fetchrow = AsyncMock(return_value=[5])  # total count
 
         result = await repo.list(user_id="u1", namespace="ns", limit=10, offset=0)
 
         assert isinstance(result, MemoryListResult)
         assert len(result.items) == 1
         assert result.total == 5
-        conn.fetch.assert_awaited_once_with(q.LIST_MEMORIES, "u1", "ns", 10, 0)
-        conn.fetchrow.assert_awaited_with(q.COUNT_MEMORIES, "u1", "ns")
+        conn.fetch.assert_awaited_once_with(q.LIST_WITH_COUNT, "u1", "ns", 10, 0)
 
     @pytest.mark.asyncio
     async def test_list_no_filters(self, repo, conn):
         conn.fetch = AsyncMock(return_value=[])
-        conn.fetchrow = AsyncMock(return_value=[0])
 
         result = await repo.list()
         assert result.total == 0
-        conn.fetch.assert_awaited_once_with(q.LIST_MEMORIES, None, None, 50, 0)
-        conn.fetchrow.assert_awaited_with(q.COUNT_MEMORIES, None, None)
+        conn.fetch.assert_awaited_once_with(q.LIST_WITH_COUNT, None, None, 50, 0)
 
 
 class TestForget:
     @pytest.mark.asyncio
     async def test_forget_returns_count(self, repo, conn):
-        conn.execute = AsyncMock(return_value="DELETE 3")
+        conn.fetchval = AsyncMock(return_value=3)
 
         deleted = await repo.forget(user_id="u1", namespace="ns")
 
         assert deleted == 3
-        conn.execute.assert_awaited_once_with(q.FORGET_MEMORIES, "u1", "ns")
+        conn.fetchval.assert_awaited_once_with(q.MEMORY_FORGET_SOFT, "u1", "ns")
 
     @pytest.mark.asyncio
     async def test_forget_without_namespace(self, repo, conn):
-        conn.execute = AsyncMock(return_value="DELETE 0")
+        conn.fetchval = AsyncMock(return_value=0)
 
         deleted = await repo.forget(user_id="u1", namespace=None)
         assert deleted == 0
-        conn.execute.assert_awaited_once_with(q.FORGET_MEMORIES, "u1", None)
+        conn.fetchval.assert_awaited_once_with(q.MEMORY_FORGET_SOFT, "u1", None)

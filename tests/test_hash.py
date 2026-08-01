@@ -211,7 +211,7 @@ class TestHashTools:
 
         ctx, _ = mock_ctx
 
-        with pytest.raises(ValueError, match="Invalid content_hash format"):
+        with pytest.raises(RuntimeError, match="Invalid content_hash format"):
             await hash_upsert(
                 source_type="session",
                 source_id="s1",
@@ -227,7 +227,7 @@ class TestHashTools:
         ctx, _ = mock_ctx
         huge_metadata = {"key": "x" * 70000}  # > 64KB after json.dumps
 
-        with pytest.raises(ValueError, match="metadata too large"):
+        with pytest.raises(RuntimeError, match="metadata too large"):
             await hash_upsert(
                 source_type="session",
                 source_id="s1",

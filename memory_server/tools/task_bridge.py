@@ -12,6 +12,8 @@ import time
 from celery import Celery
 from celery.result import AsyncResult
 
+from argenta_logging import request_id_var
+
 logger = logging.getLogger(__name__)
 
 # Таймаут ожидания результата задачи (5 минут)
@@ -34,7 +36,12 @@ def run_task(
         "task_name": task_name, "timeout": timeout,
     })
 
-    result: AsyncResult = app.send_task(task_name, kwargs=kwargs)
+    headers = {}
+    cid = request_id_var.get()
+    if cid:
+        headers["correlation_id"] = cid
+
+    result: AsyncResult = app.send_task(task_name, kwargs=kwargs, headers=headers or None)
 
     try:
         # Poll until ready or timeout

@@ -35,14 +35,10 @@ def mock_celery_call():
 def mock_metrics():
     """Mock all metrics to avoid prometheus errors."""
     with patch("memory_server.tools.memory_tools.SEARCH_RESULTS") as search, \
-         patch("memory_server.tools.memory_tools.MEMORY_COUNT") as count, \
-         patch("memory_server.tools.memory_tools.DEDUP_SKIPPED_TOTAL") as skipped, \
-         patch("memory_server.tools.memory_tools.DEDUP_INSERTED_TOTAL") as inserted:
+         patch("memory_server.tools.memory_tools.MEMORY_COUNT") as count:
         yield {
             "search": search,
             "count": count,
-            "skipped": skipped,
-            "inserted": inserted,
         }
 
 

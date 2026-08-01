@@ -1,17 +1,21 @@
 import asyncio
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI, Request, Response
-from prometheus_client import generate_latest, REGISTRY
+from prometheus_client import generate_latest, REGISTRY, multiprocess, CollectorRegistry
 from starlette.types import ASGIApp, Scope, Receive, Send
 
 from memory_server.config import settings
+from memory_server.db.pool import create_pool, close_pool
 from memory_server.metrics import (
     HTTP_REQUESTS_TOTAL,
     HTTP_REQUEST_DURATION,
+    HEALTH_STATUS,
+    HEALTH_CHECKS_TOTAL,
 )
 from memory_server.server import mcp, request_id_var
 
@@ -61,13 +65,29 @@ mcp_http_app = mcp.http_app(path="/", stateless_http=True)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifespan: делегируем управление MCP sub-app'у.
-    
-    mcp_http_app.lifespan сам вызывает mcp._lifespan_manager()
-    и session_manager.run() для streamable HTTP.
+    """Lifespan: pool + MCP sub-app.
+
+    Создаёт asyncpg pool для health check'ов и прочих sync-free операций.
+    MCP lifespan управляет session_manager.
     """
+    # Создаём пул для FastAPI process (отдельно от Celery workers)
+    pool = None
+    try:
+        pool = await create_pool(
+            dsn=settings.database_url,
+            min_size=settings.db_min_connections,
+            max_size=min(settings.db_max_connections, 4),
+        )
+        app.state.pool = pool
+    except Exception:
+        app.state.pool = None
+
     async with mcp_http_app.lifespan(app):
-        yield
+        try:
+            yield
+        finally:
+            if pool is not None:
+                await close_pool(pool)
 
 
 app = FastAPI(lifespan=lifespan, title=settings.mcp_server_name)
@@ -114,6 +134,7 @@ async def metrics_middleware(request: Request, call_next):
     HTTP_REQUESTS_TOTAL.labels(method=method, endpoint=endpoint, status=status).inc()
     HTTP_REQUEST_DURATION.labels(method=method, endpoint=endpoint).observe(duration)
 
+    response.headers["X-Correlation-ID"] = request_id
     return response
 
 
@@ -122,29 +143,43 @@ async def metrics_middleware(request: Request, call_next):
 async def health():
     checks = {}
 
-    # PostgreSQL — lightweight probe (не полагаемся на pool singleton)
+    # PostgreSQL — через пул соединений (не создаём новое соединение)
+    HEALTH_CHECKS_TOTAL.labels(check="postgres").inc()
     try:
-        import asyncpg
-        # asyncpg не понимает postgresql+asyncpg:// — трансформируем в postgresql://
-        dsn = settings.database_url.replace("postgresql+asyncpg://", "postgresql://")
-        conn = await asyncpg.connect(dsn)
-        await conn.fetchval("SELECT 1")
-        await conn.close()
-        checks["postgres"] = "ok"
+        pool = getattr(app.state, "pool", None)
+        if pool is None:
+            checks["postgres"] = "error: pool not available"
+            HEALTH_STATUS.labels(check="postgres").set(0)
+        else:
+            async with pool.acquire() as conn:
+                await asyncio.wait_for(conn.fetchval("SELECT 1"), timeout=3)
+            checks["postgres"] = "ok"
+            HEALTH_STATUS.labels(check="postgres").set(1)
+    except asyncio.TimeoutError:
+        checks["postgres"] = "error: timeout"
+        HEALTH_STATUS.labels(check="postgres").set(0)
     except Exception as e:
         checks["postgres"] = f"error: {e}"
+        HEALTH_STATUS.labels(check="postgres").set(0)
 
     # Redis — ping через async redis client
+    HEALTH_CHECKS_TOTAL.labels(check="redis").inc()
     try:
         import redis.asyncio as aioredis
         r = aioredis.from_url(settings.redis_url, decode_responses=True)
-        await r.ping()
+        await asyncio.wait_for(r.ping(), timeout=3)
         await r.aclose()
         checks["redis"] = "ok"
+        HEALTH_STATUS.labels(check="redis").set(1)
+    except asyncio.TimeoutError:
+        checks["redis"] = "error: timeout"
+        HEALTH_STATUS.labels(check="redis").set(0)
     except Exception as e:
         checks["redis"] = f"error: {e}"
+        HEALTH_STATUS.labels(check="redis").set(0)
 
     # Celery — inspect ping через asyncio.to_thread (sync→async)
+    HEALTH_CHECKS_TOTAL.labels(check="celery").inc()
     celery = _get_celery_app()
     if celery is not None:
         try:
@@ -155,12 +190,16 @@ async def health():
             ping_result = await asyncio.to_thread(_inspect_ping)
             if ping_result:
                 checks["celery"] = f"ok ({len(ping_result)} workers)"
+                HEALTH_STATUS.labels(check="celery").set(1)
             else:
                 checks["celery"] = "error: no workers responding"
+                HEALTH_STATUS.labels(check="celery").set(0)
         except Exception as e:
             checks["celery"] = f"error: {e}"
+            HEALTH_STATUS.labels(check="celery").set(0)
     else:
         checks["celery"] = "unavailable (celery_app not configured)"
+        HEALTH_STATUS.labels(check="celery").set(0)
 
     overall_status = "ok" if all(
         v == "ok" or v.startswith("ok") for v in checks.values()
@@ -184,10 +223,20 @@ async def health():
 # ---- Prometheus metrics endpoint ----
 @app.get("/metrics")
 async def metrics():
-    return Response(
-        content=generate_latest(REGISTRY),
-        media_type="text/plain; charset=utf-8",
-    )
+    # В multi-process режиме (PROMETHEUS_MULTIPROC_DIR установлен)
+    # собираем метрики из файлов, а не из памяти процесса
+    if os.environ.get("PROMETHEUS_MULTIPROC_DIR"):
+        registry = CollectorRegistry()
+        multiprocess.MultiProcessCollector(registry)
+        return Response(
+            content=generate_latest(registry),
+            media_type="text/plain; charset=utf-8",
+        )
+    else:
+        return Response(
+            content=generate_latest(REGISTRY),
+            media_type="text/plain; charset=utf-8",
+        )
 
 
 # ---- MCP Streamable HTTP transport ----

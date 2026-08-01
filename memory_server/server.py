@@ -2,16 +2,18 @@ import logging
 import multiprocessing
 from contextlib import asynccontextmanager
 
+import structlog
 from fastmcp import FastMCP
 
 from memory_server.config import settings
-from argenta_logging import setup_logging, request_id_var
+from memory_server.tasks.logging_config import setup_server_logging
+from argenta_logging import request_id_var
 from migrations.run import run_migrations
 
 # Инициализация логирования — каждый воркер должен иметь свой logger
-setup_logging(service=settings.mcp_server_name)
+setup_server_logging(level=settings.log_level, service=settings.mcp_server_name)
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger()
 
 # Подавляем шум MCP SDK (Terminating session, StreamableHTTP lifecycle)
 _MCP_SUPPRESSED = ("Terminating session", "StreamableHTTP session manager")

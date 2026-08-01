@@ -5,7 +5,6 @@ ACL checks and validation remain at tool level.
 """
 
 import json
-import logging
 import re
 from typing import Any
 
@@ -13,9 +12,7 @@ from fastmcp import Context
 
 from memory_server.server import mcp
 from memory_server.tools.task_bridge import celery_call
-from memory_server.utils.metrics_decorator import track_tool_metrics
-
-logger = logging.getLogger(__name__)
+from memory_server.utils.metrics_decorator import tool_handler
 
 # Валидация content_hash: SHA256 = 64 hex chars
 HASH_REGEX = re.compile(r"^[a-f0-9]{64}$")
@@ -55,7 +52,7 @@ def _check_write_auth(ctx: Context | None) -> None:
 
 
 @mcp.tool()
-@track_tool_metrics("hash_upsert")
+@tool_handler("hash_upsert")
 async def hash_upsert(
     source_type: str,
     source_id: str,
@@ -66,60 +63,36 @@ async def hash_upsert(
 ) -> dict[str, Any]:
     """Store or update a content hash for change detection.
     Used by akame verifier to skip unchanged sessions/files."""
-    logger.info("hash_upsert", extra={"source_type": source_type, "source_id": source_id})
-
-    # ACL + валидация
     _check_write_auth(ctx)
     _validate_hash(content_hash)
     _validate_metadata_size(metadata)
-
-    try:
-        result = await celery_call(
-            TASK_UPSERT_HASH,
-            source_type=source_type,
-            source_id=source_id,
-            content_hash=content_hash,
-            size_bytes=size_bytes,
-            metadata=metadata,
-        )
-        logger.info("hash_upsert: done", extra={
-            "id": result.get("id"), "created_at": str(result.get("created_at")),
-            "updated_at": str(result.get("updated_at")),
-        })
-        return result
-    except Exception as e:
-        logger.exception("Failed to upsert hash")
-        raise RuntimeError(str(e)) from e
+    return await celery_call(
+        TASK_UPSERT_HASH,
+        source_type=source_type,
+        source_id=source_id,
+        content_hash=content_hash,
+        size_bytes=size_bytes,
+        metadata=metadata,
+    )
 
 
 @mcp.tool()
-@track_tool_metrics("hash_get")
+@tool_handler("hash_get")
 async def hash_get(
     source_type: str,
     source_id: str,
     ctx: Context | None = None,
 ) -> dict[str, Any] | None:
     """Get stored hash for a specific source."""
-    logger.info("hash_get", extra={"source_type": source_type, "source_id": source_id})
-
-    try:
-        result = await celery_call(
-            TASK_GET_HASH,
-            source_type=source_type,
-            source_id=source_id,
-        )
-        if result:
-            logger.info("hash_get: found", extra={"id": result.get("id"), "hash": result.get("content_hash", "")[:16]})
-        else:
-            logger.info("hash_get: not found")
-        return result
-    except Exception as e:
-        logger.exception("Failed to get hash")
-        raise RuntimeError(str(e)) from e
+    return await celery_call(
+        TASK_GET_HASH,
+        source_type=source_type,
+        source_id=source_id,
+    )
 
 
 @mcp.tool()
-@track_tool_metrics("hash_list")
+@tool_handler("hash_list")
 async def hash_list(
     source_type: str | None = None,
     updated_since: str | None = None,
@@ -129,54 +102,27 @@ async def hash_list(
     ctx: Context | None = None,
 ) -> list[dict[str, Any]]:
     """List stored hashes with filters."""
-    logger.info("hash_list", extra={
-        "source_type": source_type, "updated_since": updated_since,
-        "project": project, "limit": limit,
-    })
-
-    # Ограничение limit
-    limit = min(limit, 500)
-
-    try:
-        results = await celery_call(
-            TASK_LIST_HASHES,
-            source_type=source_type,
-            updated_since=updated_since,
-            project=project,
-            limit=limit,
-            offset=offset,
-        )
-        logger.info("hash_list: done", extra={"count": len(results)})
-        return results
-    except Exception as e:
-        logger.exception("Failed to list hashes")
-        raise RuntimeError(str(e)) from e
+    return await celery_call(
+        TASK_LIST_HASHES,
+        source_type=source_type,
+        updated_since=updated_since,
+        project=project,
+        limit=min(limit, 500),
+        offset=offset,
+    )
 
 
 @mcp.tool()
-@track_tool_metrics("hash_delete")
+@tool_handler("hash_delete")
 async def hash_delete(
     source_type: str,
     source_id: str,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Delete a stored hash record."""
-    agent = getattr(getattr(getattr(ctx, "session", None), "client_info", None), "name", "unknown") if ctx else "unknown"
-    logger.warning("hash_delete", extra={
-        "source_type": source_type, "source_id": source_id, "agent": agent,
-    })
-
-    # ACL
     _check_write_auth(ctx)
-
-    try:
-        result = await celery_call(
-            TASK_DELETE_HASH,
-            source_type=source_type,
-            source_id=source_id,
-        )
-        logger.warning("hash_delete: done", extra={"deleted_id": result.get("id")})
-        return result
-    except Exception as e:
-        logger.exception("Failed to delete hash")
-        raise RuntimeError(str(e)) from e
+    return await celery_call(
+        TASK_DELETE_HASH,
+        source_type=source_type,
+        source_id=source_id,
+    )

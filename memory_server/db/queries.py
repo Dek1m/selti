@@ -168,6 +168,31 @@ GRAPH_STATS = """
         (SELECT cnt FROM orphan_count) AS orphans
 """
 
+# ── Stored procedures (миграция 014) ──
+
+GET_RELATIONS_UNIFIED = """
+    SELECT * FROM get_relations_unified($1, $2)
+"""
+
+LIST_WITH_COUNT = """
+    SELECT * FROM list_with_count($1, $2, $3, $4)
+"""
+
+MEMORY_FORGET_SOFT = """
+    SELECT * FROM memory_forget_soft($1, $2)
+"""
+
+
+# ── Stored procedures (миграция 009) ──
+
+TRAVERSE_FULL = """
+    SELECT * FROM graph_traverse_full($1, $2, $3)
+"""
+
+GRAPH_STATS_UNIFIED = """
+    SELECT * FROM graph_stats_unified()
+"""
+
 GRAPH_STATS_BY_NAMESPACE = """
     WITH
     active_memories AS (

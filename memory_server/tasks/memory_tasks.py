@@ -21,27 +21,44 @@ from memory_server.tasks.errors import ValidationError
 
 logger = logging.getLogger(__name__)
 
+_service: Any | None = None
+
 
 def _get_service():
-    """Get MemoryService with worker-scoped connections (Qdrant primary + SQL fallback)."""
-    from memory_server.memory.repository_qdrant import MemoryRepository
+    """Get MemoryService with worker-scoped connections (Qdrant primary + SQL fallback).
+
+    Singleton: created once per worker process, reused across all tasks.
+    MemoryService and repositories are stateless — safe to share.
+    NamespaceRepository._cache has TTL (step 3.5) — works correctly with reuse.
+    """
+    global _service
+    if _service is not None:
+        return _service
+
+    from memory_server.memory.repository import MemoryRepository
+    from memory_server.memory.pg_repository import PostgreSQLRepository
+    from memory_server.memory.qdrant_store import QdrantStore
     from memory_server.memory.namespace_repository import NamespaceRepository
     from memory_server.memory.dedup import DedupEngine
     from memory_server.memory.service import MemoryService
     from memory_server.config import settings
 
     pool = get_pool()
-    qdrant = get_qdrant()
-    repository = MemoryRepository(pool, qdrant=qdrant, qdrant_collection=settings.qdrant_collection)
+    qdrant_client = get_qdrant()
+
+    pg = PostgreSQLRepository(pool)
+    qdrant = QdrantStore(qdrant_client, collection=settings.qdrant_collection) if qdrant_client else None
+    repository = MemoryRepository(pg=pg, qdrant=qdrant)
     ns_repo = NamespaceRepository(pool)
     embedding = get_embedding()
     dedup = DedupEngine(repository, embedding, settings)
-    return MemoryService(
+    _service = MemoryService(
         repository=repository,
         embedding_provider=embedding,
         namespace_repository=ns_repo,
         config=settings,
     )
+    return _service
 
 
 # ── Store ───────────────────────────────────────────────────────
@@ -358,11 +375,8 @@ def get_stats(self, user_id: str | None = None) -> list[dict[str, Any]]:
 )
 def get_namespaces(self) -> list[dict[str, Any]]:
     """Get list of all namespaces."""
-    pool = get_pool()
-    from memory_server.memory.namespace_repository import NamespaceRepository
-
-    ns_repo = NamespaceRepository(pool)
-    namespaces = run_async(ns_repo.list_all)
+    service = _get_service()
+    namespaces = run_async(service.ns_repo.list_all)
     return [
         {"uid": ns.uid, "name": ns.name, "description": ns.description}
         for ns in namespaces
@@ -436,24 +450,19 @@ def get_relations(
     source_id: str,
     link_type: str | None = None,
 ) -> dict[str, Any]:
-    """Get incoming and outgoing relations for a granule."""
+    """Get incoming and outgoing relations for a granule. One query via UNION ALL."""
     if not source_id or not source_id.strip():
         raise ValidationError("source_id cannot be empty")
 
     service = _get_service()
-    outgoing = run_async(
-        service.repository.get_relations_by_source,
-        source_id,
-        link_type,
-    )
-    incoming = run_async(
-        service.repository.get_relations_by_target,
+    result = run_async(
+        service.repository.get_relations,
         source_id,
         link_type,
     )
     return {
-        "incoming": [r.model_dump(mode="json") for r in incoming],
-        "outgoing": [r.model_dump(mode="json") for r in outgoing],
+        "incoming": [r.model_dump(mode="json") for r in result.incoming],
+        "outgoing": [r.model_dump(mode="json") for r in result.outgoing],
     }
 
 

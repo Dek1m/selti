@@ -1,0 +1,50 @@
+# ============================================================
+# .dockerignore — исключения для Docker build context
+# ============================================================
+
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+.venv
+venv
+*.egg-info
+dist
+build
+
+# Тесты
+tests/
+
+# Окружение и секреты
+.env
+.env.*
+
+# Node (если есть фронт/скрипты)
+node_modules
+
+# Документация и планы
+plan.md
+plan-roles.md
+README.md
+LICENSE
+
+# OpenCode
+.opencode/
+
+# Мониторинг (отдельный compose)
+monitoring/
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Docker (не копируем в образ сами себя)
+Dockerfile
+docker-compose*.yml
+.dockerignore

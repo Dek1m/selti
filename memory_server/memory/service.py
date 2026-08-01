@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime
-import logging
+
+import structlog
 
 from memory_server.config import Settings
 from memory_server.embedding.provider import EmbeddingProvider
@@ -19,7 +20,7 @@ from memory_server.models import (
     TraverseResult,
 )
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger()
 
 
 class MemoryService:
@@ -294,12 +295,11 @@ class MemoryService:
     async def get_relations(
         self, memory_id: str, link_type: str | None = None
     ) -> RelationListResult:
-        """Получить входящие и исходящие связи гранулы."""
+        """Получить входящие и исходящие связи гранулы. Один запрос вместо двух."""
         logger.info("get_relations", extra={"id": memory_id, "link_type": link_type})
-        outgoing = await self.repository.get_relations_by_source(memory_id, link_type)
-        incoming = await self.repository.get_relations_by_target(memory_id, link_type)
-        logger.info("get_relations: done", extra={"incoming": len(incoming), "outgoing": len(outgoing)})
-        return RelationListResult(incoming=incoming, outgoing=outgoing)
+        result = await self.repository.get_relations(memory_id, link_type)
+        logger.info("get_relations: done", extra={"incoming": len(result.incoming), "outgoing": len(result.outgoing)})
+        return result
 
     async def delete_relation(
         self, source_id: str, target_id: str, link_type: str
@@ -315,7 +315,7 @@ class MemoryService:
     async def traverse(
         self, start_id: str, depth: int = 3, link_types: list[str] | None = None
     ) -> TraverseResult:
-        """Обход графа от начальной ноды."""
+        """Обход графа от начальной ноды. Один round-trip вместо 2N+2."""
         logger.info("traverse", extra={
             "start_id": start_id, "depth": depth, "link_types": link_types,
         })
@@ -323,31 +323,23 @@ class MemoryService:
         start = await self.repository.get_by_id(start_id)
         if start is None:
             raise NotFoundError(f"Start granule: {start_id}")
-        nodes_raw = await self.repository.traverse(start_id, depth, link_types)
-        # Загружаем полные данные для каждой ноды
-        nodes = []
-        all_edges: list[Relation] = []
-        for n in nodes_raw:
-            record = await self.repository.get_by_id(n["node_id"])
-            if record:
-                nodes.append({
-                    "id": record.id,
-                    "content": record.content[:200],
-                    "namespace": record.namespace,
-                    "depth": n["depth"],
-                })
-                # Собираем рёбра от этой ноды
-                edges = await self.repository.get_relations_by_source(
-                    n["node_id"],
-                    link_type=None,  # все типы
-                )
-                # Фильтруем только те, которые ведут в пределах обхода
-                node_ids = {nd["node_id"] for nd in nodes_raw}
-                all_edges.extend(
-                    e for e in edges if e.target_id and e.target_id in node_ids
-                )
-        logger.info("traverse: done", extra={"nodes": len(nodes), "edges": len(all_edges)})
-        return TraverseResult(nodes=nodes, edges=all_edges)
+        raw = await self.repository.traverse(start_id, depth, link_types)
+        # Парсим результат хранимки
+        nodes = raw["nodes"]  # [{id, content, namespace, importance, depth}]
+        edges = [
+            Relation(
+                id=str(e["id"]),
+                source_id=str(e["source_id"]),
+                target_id=str(e["target_id"]) if e.get("target_id") else None,
+                link_type=e["link_type"],
+                description=e.get("description"),
+                weight=float(e.get("weight", 1.0)),
+                metadata=e.get("metadata", {}),
+            )
+            for e in raw["edges"]
+        ]
+        logger.info("traverse: done", extra={"nodes": len(nodes), "edges": len(edges)})
+        return TraverseResult(nodes=nodes, edges=edges)
 
     async def get_graph_stats(self) -> GraphStats:
         """Статистика графа знаний."""
