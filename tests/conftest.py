@@ -4,7 +4,7 @@ import pytest
 
 from memory_server.config import Settings
 from memory_server.memory.namespace_repository import NamespaceRepository
-from memory_server.memory.repository import MemoryRepository
+from memory_server.memory.repository_qdrant import MemoryRepository
 from memory_server.memory.service import MemoryService
 
 

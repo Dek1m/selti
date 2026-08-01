@@ -17,7 +17,7 @@ scrape_configs:
     metrics_relabel_configs:
       # Оставляем только нужные метрики для экономия места
       - source_labels: [__name__]
-        regex: 'pg_stat_database.*|pg_locks.*|pg_replication.*|pg_vector.*'
+        regex: 'pg_stat_database.*|pg_locks.*|pg_replication.*'
         action: keep
 
   # ----- Redis exporter -----

@@ -5,7 +5,7 @@ from enum import Enum
 
 from memory_server.config import Settings
 from memory_server.embedding.provider import EmbeddingProvider
-from memory_server.memory.repository import MemoryRepository
+from memory_server.memory.repository_qdrant import MemoryRepository
 from memory_server.metrics import DEDUP_SKIPPED_TOTAL, DEDUP_INSERTED_TOTAL
 
 logger = logging.getLogger(__name__)

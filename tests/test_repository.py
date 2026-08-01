@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from memory_server.db import queries as q
-from memory_server.memory.repository import MemoryRepository
+from memory_server.memory.repository_qdrant import MemoryRepository
 from memory_server.models import MemoryListResult, MemoryRecord, SearchResult
 
 

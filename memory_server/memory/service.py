@@ -8,7 +8,7 @@ from memory_server.embedding.provider import EmbeddingProvider
 from memory_server.exceptions import NotFoundError
 from memory_server.memory.dedup import DedupAction, DedupEngine
 from memory_server.memory.namespace_repository import NamespaceRepository
-from memory_server.memory.repository import MemoryRepository
+from memory_server.memory.repository_qdrant import MemoryRepository
 from memory_server.models import (
     GraphStats,
     MemoryListResult,

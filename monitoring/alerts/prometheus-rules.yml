@@ -67,18 +67,6 @@ groups:
           summary: "Нет полного бэкапа > 2 дней"
           description: "Последний полный бэкап: {{ $value | humanizeTimestamp }}"
 
-      # ----- pgvector -----
-      - alert: PostgreSQLHNSWIndexMissing
-        expr: |
-          pg_vector_index_stats_index_type{index_type!="hnsw"} > 0
-          and on(instance)
-          pg_vector_index_stats_num_vectors > 10000
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Таблица memories > 10k записей без HNSW индекса"
-          description: "Используется {{ $labels.index_type }}, рекомендуется HNSW для 8192-dim"
 
   - name: redis
     interval: 30s

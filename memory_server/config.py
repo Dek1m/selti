@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     qdrant_url: str = "http://localhost:6333"
     qdrant_collection: str = "memories"
     qdrant_api_key: str = ""  # для Qdrant Cloud (опционально)
-    qdrant_enabled: bool = True  # False = fallback на pgvector
+    qdrant_enabled: bool = True  # False = только PostgreSQL без векторного поиска
 
     mcp_server_name: str = "athena-memory"
     mcp_host: str = "0.0.0.0"

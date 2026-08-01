@@ -6,7 +6,7 @@ import pytest
 
 from memory_server.config import Settings
 from memory_server.memory.dedup import DedupAction, DedupEngine
-from memory_server.memory.repository import MemoryRepository
+from memory_server.memory.repository_qdrant import MemoryRepository
 from memory_server.models import MemoryRecord, SearchResult
 
 
