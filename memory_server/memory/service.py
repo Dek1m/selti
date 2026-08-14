@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
-import structlog
-
 from memory_server.config import Settings
 from memory_server.embedding.provider import EmbeddingProvider
 from memory_server.exceptions import NotFoundError
+from memory_server.logger import async_measure_duration, get_logger
 from memory_server.memory.dedup import DedupAction, DedupEngine
 from memory_server.memory.namespace_repository import NamespaceRepository
 from memory_server.memory.repository_qdrant import MemoryRepository
@@ -20,7 +19,7 @@ from memory_server.models import (
     TraverseResult,
 )
 
-logger = structlog.get_logger()
+logger = get_logger(__name__)
 
 
 class MemoryService:
@@ -48,71 +47,63 @@ class MemoryService:
         importance: int | None = None,
     ) -> tuple[MemoryRecord, DedupAction]:
         namespace = namespace or "default"
-        logger.info("store: START", extra={
-            "content_len": len(content), "user_id": user_id,
-            "namespace": namespace, "importance": importance,
-        })
-        ns_record = await self.ns_repo.get_or_create(namespace)
-        content_hash: str | None = None
-        embedding: list[float] | None = None
+        async with async_measure_duration(logger, "store", namespace=namespace, user_id=user_id):
+            ns_record = await self.ns_repo.get_or_create(namespace)
+            content_hash: str | None = None
+            embedding: list[float] | None = None
 
-        if self.config.dedup_enabled:
-            decision = await self.dedup.check(content, user_id, namespace, metadata=metadata)
-            content_hash = decision.content_hash
-            embedding = decision.embedding  # кэш эмбеддинга от dedup
-            logger.info("store: dedup decision", extra={
-                "action": decision.action.value,
-                "existing_id": decision.existing_id,
-                "score": decision.existing_score,
-            })
+            if self.config.dedup_enabled:
+                decision = await self.dedup.check(content, user_id, namespace, metadata=metadata)
+                content_hash = decision.content_hash
+                embedding = decision.embedding
+                logger.info("store: dedup", extra={
+                    "action": decision.action.value,
+                    "existing_id": decision.existing_id,
+                    "score": decision.existing_score,
+                })
 
-            if decision.action == DedupAction.SKIP:
-                record = await self.repository.get_by_id(decision.existing_id)
-                if record is None:
-                    raise RuntimeError(f"Failed to retrieve existing memory: {decision.existing_id}")
-                logger.info("store: SKIP", extra={"existing_id": decision.existing_id})
-                return record, DedupAction.SKIP
+                if decision.action == DedupAction.SKIP:
+                    record = await self.repository.get_by_id(decision.existing_id)
+                    if record is None:
+                        raise RuntimeError(f"Failed to retrieve existing memory: {decision.existing_id}")
+                    return record, DedupAction.SKIP
 
-            if decision.action == DedupAction.UPDATE:
-                record = await self.repository.get_by_id(decision.existing_id)
-                if record is None:
-                    raise RuntimeError(f"Failed to retrieve memory for update: {decision.existing_id}")
-                updated = await self.repository.update(
-                    memory_id=decision.existing_id,
-                    metadata={**record.metadata, **(metadata or {})},
-                )
-                if updated is None:
-                    raise RuntimeError(f"Failed to update memory: {decision.existing_id}")
-                logger.info("store: UPDATE", extra={"existing_id": decision.existing_id})
-                return updated, DedupAction.UPDATE
+                if decision.action == DedupAction.UPDATE:
+                    record = await self.repository.get_by_id(decision.existing_id)
+                    if record is None:
+                        raise RuntimeError(f"Failed to retrieve memory for update: {decision.existing_id}")
+                    updated = await self.repository.update(
+                        memory_id=decision.existing_id,
+                        metadata={**record.metadata, **(metadata or {})},
+                    )
+                    if updated is None:
+                        raise RuntimeError(f"Failed to update memory: {decision.existing_id}")
+                    return updated, DedupAction.UPDATE
 
-        # Используем кэшированный эмбеддинг, или генерируем новый
-        if embedding is None:
-            embedding = await self.embedding.embed(content)
-        memory_id = await self.repository.insert(
-            user_id=user_id,
-            content=content,
-            embedding=embedding,
-            metadata=metadata or {},
-            namespace=namespace,
-            namespace_id=ns_record.id,
-            content_hash=content_hash,
-            importance=importance or 3,
-        )
-        record = await self.repository.get_by_id(memory_id)
-        if record is None:
-            raise RuntimeError(f"Failed to retrieve memory after insert: {memory_id}")
+            if embedding is None:
+                embedding = await self.embedding.embed(content)
+            memory_id = await self.repository.insert(
+                user_id=user_id,
+                content=content,
+                embedding=embedding,
+                metadata=metadata or {},
+                namespace=namespace,
+                namespace_id=ns_record.id,
+                content_hash=content_hash,
+                importance=importance or 3,
+            )
+            record = await self.repository.get_by_id(memory_id)
+            if record is None:
+                raise RuntimeError(f"Failed to retrieve memory after insert: {memory_id}")
 
-        # Sync metadata.links → relations если есть links
-        if metadata and "links" in metadata:
-            try:
-                synced = await self.repository.sync_links_to_relations(memory_id)
-                logger.info("store: sync_links", extra={"synced": synced, "id": memory_id})
-            except Exception as e:
-                logger.exception("store: sync_links FAILED (non-fatal)", extra={"id": memory_id})
+            if metadata and "links" in metadata:
+                try:
+                    synced = await self.repository.sync_links_to_relations(memory_id)
+                    logger.info("store: sync_links", extra={"synced": synced, "id": memory_id})
+                except Exception:
+                    logger.exception("store: sync_links FAILED (non-fatal)", extra={"id": memory_id})
 
-        logger.info("store: INSERT", extra={"id": record.id, "namespace": namespace})
-        return record, DedupAction.INSERT
+            return record, DedupAction.INSERT
 
     async def search(
         self,
@@ -122,30 +113,24 @@ class MemoryService:
         threshold: float = 0.7,
         namespace: str | None = None,
     ) -> list[SearchResult]:
-        logger.info("search: START", extra={
-            "query": query[:200], "namespace": namespace,
-            "limit": limit, "threshold": threshold, "user_id": user_id,
-        })
-        query_embedding = await self.embedding.embed(query)
-        results = await self.repository.search(
-            query_embedding=query_embedding,
-            user_id=user_id,
-            limit=limit,
-            threshold=threshold,
-            namespace=namespace,
-            query_text=query,
-        )
-        logger.info("search: done", extra={"count": len(results)})
-        return results
+        async with async_measure_duration(logger, "search", namespace=namespace, user_id=user_id):
+            query_embedding = await self.embedding.embed(query)
+            results = await self.repository.search(
+                query_embedding=query_embedding,
+                user_id=user_id,
+                limit=limit,
+                threshold=threshold,
+                namespace=namespace,
+                query_text=query,
+            )
+            return results
 
     async def get(self, memory_id: str) -> MemoryRecord:
-        logger.info("get", extra={"id": memory_id})
-        record = await self.repository.get_by_id(memory_id)
-        if record is None:
-            logger.info("get: not found", extra={"id": memory_id})
-            raise NotFoundError(memory_id)
-        logger.info("get: found", extra={"id": record.id, "namespace": record.namespace})
-        return record
+        async with async_measure_duration(logger, "get"):
+            record = await self.repository.get_by_id(memory_id)
+            if record is None:
+                raise NotFoundError(memory_id)
+            return record
 
     async def update(
         self,
@@ -154,40 +139,32 @@ class MemoryService:
         metadata: dict | None = None,
         importance: int | None = None,
     ) -> MemoryRecord:
-        logger.info("update: START", extra={
-            "id": memory_id, "has_content": content is not None,
-            "has_metadata": metadata is not None, "importance": importance,
-        })
-        embedding = None
-        if content is not None:
-            embedding = await self.embedding.embed(content)
-        record = await self.repository.update(
-            memory_id=memory_id,
-            content=content,
-            embedding=embedding,
-            metadata=metadata,
-            importance=importance,
-        )
-        if record is None:
-            logger.info("update: not found", extra={"id": memory_id})
-            raise NotFoundError(memory_id)
+        async with async_measure_duration(logger, "update"):
+            embedding = None
+            if content is not None:
+                embedding = await self.embedding.embed(content)
+            record = await self.repository.update(
+                memory_id=memory_id,
+                content=content,
+                embedding=embedding,
+                metadata=metadata,
+                importance=importance,
+            )
+            if record is None:
+                raise NotFoundError(memory_id)
 
-        # Sync metadata.links → relations если metadata обновились
-        if metadata is not None and "links" in metadata:
-            try:
-                synced = await self.repository.sync_links_to_relations(memory_id)
-                logger.info("update: sync_links", extra={"synced": synced, "id": memory_id})
-            except Exception as e:
-                logger.exception("update: sync_links FAILED (non-fatal)", extra={"id": memory_id})
+            if metadata is not None and "links" in metadata:
+                try:
+                    synced = await self.repository.sync_links_to_relations(memory_id)
+                    logger.info("update: sync_links", extra={"synced": synced, "id": memory_id})
+                except Exception:
+                    logger.exception("update: sync_links FAILED (non-fatal)", extra={"id": memory_id})
 
-        logger.info("update: done", extra={"id": record.id, "namespace": record.namespace})
-        return record
+            return record
 
     async def delete(self, memory_id: str) -> bool:
-        logger.info("delete", extra={"id": memory_id})
-        result = await self.repository.delete(memory_id)
-        logger.info("delete: done", extra={"id": memory_id, "success": result})
-        return result
+        async with async_measure_duration(logger, "delete"):
+            return await self.repository.delete(memory_id)
 
     async def list(
         self,
@@ -196,18 +173,13 @@ class MemoryService:
         limit: int = 50,
         offset: int = 0,
     ) -> MemoryListResult:
-        logger.info("list", extra={
-            "namespace": namespace, "limit": limit,
-            "offset": offset, "user_id": user_id,
-        })
-        result = await self.repository.list(
-            user_id=user_id,
-            namespace=namespace,
-            limit=limit,
-            offset=offset,
-        )
-        logger.info("list: done", extra={"total": result.total, "items": len(result.items)})
-        return result
+        async with async_measure_duration(logger, "list", namespace=namespace):
+            return await self.repository.list(
+                user_id=user_id,
+                namespace=namespace,
+                limit=limit,
+                offset=offset,
+            )
 
     async def recent(
         self,

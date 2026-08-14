@@ -8,9 +8,9 @@ from __future__ import annotations
 from datetime import datetime
 
 import asyncpg
-import structlog
 
 from memory_server.db import queries as q
+from memory_server.logger import get_logger
 from memory_server.models import (
     GraphStats,
     MemoryListResult,
@@ -20,7 +20,7 @@ from memory_server.models import (
     RelationListResult,
 )
 
-logger = structlog.get_logger()
+logger = get_logger(__name__)
 
 
 class PostgreSQLRepository:

@@ -3,11 +3,11 @@ import time
 from typing import Optional
 
 import httpx
-import structlog
 
 from memory_server.cache.redis_client import EmbeddingCache
 from memory_server.embedding.provider import EmbeddingProvider
 from memory_server.exceptions import EmbeddingError
+from memory_server.logger import get_logger
 from memory_server.metrics import (
     EMBEDDING_CACHE_HITS,
     EMBEDDING_CACHE_MISSES,
@@ -15,7 +15,7 @@ from memory_server.metrics import (
     EMBEDDING_DURATION,
 )
 
-logger = structlog.get_logger()
+logger = get_logger(__name__)
 
 
 class EmbeddingClient(EmbeddingProvider):

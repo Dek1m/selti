@@ -8,9 +8,9 @@ from __future__ import annotations
 import time
 from typing import Optional
 
-import structlog
 from qdrant_client import models as qm
 
+from memory_server.logger import get_logger
 from memory_server.metrics import (
     QDRANT_OPS_DURATION_SECONDS,
     QDRANT_OPS_TOTAL,
@@ -18,7 +18,7 @@ from memory_server.metrics import (
 )
 from memory_server.vector.circuit_breaker import CircuitBreakerQdrantClient
 
-logger = structlog.get_logger()
+logger = get_logger(__name__)
 
 
 class QdrantStore:

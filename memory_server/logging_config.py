@@ -1,83 +1,43 @@
-"""JSON logging configuration for uvicorn.
+"""Backward-compatible re-export.
 
-Used by uvicorn.run(log_config=...) to redirect all uvicorn loggers
-through structlog JSON formatter.
+All logging configuration moved to tasks/logging_config.py.
+This file exists only for imports like:
+    from memory_server.logging_config import LOGGING_CONFIG
 """
 
 import os
-import sys
-from datetime import datetime, timezone
-
-import structlog
-
-SERVICE_NAME = os.environ.get("SERVICE_NAME", "selti")
 
 
-def _add_service(logger, method_name, event_dict):
-    event_dict["service"] = SERVICE_NAME
-    return event_dict
+class _LazyFormatter:
+    """Lazy formatter — resolves LOG_FORMAT at first use."""
 
+    _inner = None
 
-def _merge_request_id(logger, method_name, event_dict):
-    try:
-        from argenta_logging import request_id_var
-        rid = request_id_var.get("")
-        if rid:
-            event_dict["request_id"] = rid
-    except ImportError:
-        pass
-    return event_dict
+    @classmethod
+    def _get_inner(cls):
+        if cls._inner is None:
+            from argenta_logging import PosixFormatter, JsonFormatter
+            svc = os.environ.get("SERVICE_NAME", "selti")
+            fmt = os.environ.get("LOG_FORMAT", "json")
+            cls._inner = PosixFormatter(service=svc) if fmt == "posix" else JsonFormatter(service=svc)
+        return cls._inner
 
+    def format(self, record):
+        return self._get_inner().format(record)
 
-def _map_level(logger, method_name, event_dict):
-    level_map = {"WARNING": "WARN", "CRITICAL": "ERROR"}
-    level = event_dict.get("level", "")
-    event_dict["level"] = level_map.get(level, level)
-    return event_dict
-
-
-def _add_timestamp(logger, method_name, event_dict):
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-    event_dict["ts"] = ts
-    return event_dict
-
-
-def _rename_event_to_msg(logger, method_name, event_dict):
-    if "event" in event_dict:
-        event_dict["msg"] = event_dict.pop("event")
-    return event_dict
-
-
-_processors = [
-    structlog.contextvars.merge_contextvars,
-    _merge_request_id,
-    structlog.stdlib.add_log_level,
-    _map_level,
-    _add_timestamp,
-    _add_service,
-]
-
-renderer = structlog.processors.JSONRenderer()
 
 LOGGING_CONFIG = {
     "version": 1,
     "disable_existing_loggers": False,
     "formatters": {
-        "json": {
-            "()": "structlog.stdlib.ProcessorFormatter",
-            "foreign_pre_chain": _processors,
-            "processors": [
-                structlog.stdlib.ExtraAdder(),
-                structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-                _rename_event_to_msg,
-                renderer,
-            ],
+        "argenta": {
+            "()": "memory_server.logging_config._LazyFormatter",
         },
     },
     "handlers": {
         "default": {
             "class": "logging.StreamHandler",
-            "formatter": "json",
+            "formatter": "argenta",
             "stream": "ext://sys.stdout",
         },
     },
@@ -86,5 +46,4 @@ LOGGING_CONFIG = {
         "uvicorn.error": {"handlers": ["default"], "level": "INFO", "propagate": False},
         "uvicorn.access": {"handlers": ["default"], "level": "INFO", "propagate": False},
     },
-    "root": {"handlers": ["default"], "level": "INFO"},
 }

@@ -25,7 +25,7 @@ class SeltiTask(Task):
 
     - Retry: exponential backoff + jitter, max 5 retries
     - Timeouts: configurable per task type
-    - Logging: structured via structlog
+    - Logging: structured via argenta-logging (Argenta Team standard)
     - Metrics: via Celery signals (signals.py)
 
     Usage:
