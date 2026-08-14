@@ -633,7 +633,7 @@ def ingest_batch(
                 service.repository.insert_batch,
                 user_ids=[user_id] * len(to_insert),
                 contents=[item["content"] for item in to_insert],
-                embeddings=[str(item["embedding"]) for item in to_insert],
+                embeddings=[item["embedding"] for item in to_insert],
                 metadatas=[item["metadata"] for item in to_insert],
                 namespaces=[item["namespace"] for item in to_insert],
                 namespace_ids=namespace_ids,
