@@ -111,9 +111,11 @@ class MemoryRepository:
 
         if self._has_qdrant() and embeddings is not None:
             points = []
+            skipped = 0
             for i, mid in enumerate(memory_ids):
                 emb = embeddings[i] if isinstance(embeddings[i], list) else None
                 if emb is None:
+                    skipped += 1
                     continue
                 points.append(
                     qm.PointStruct(
@@ -129,6 +131,9 @@ class MemoryRepository:
                         },
                     )
                 )
+            logger.info("insert_batch: qdrant upsert", extra={
+                "points": len(points), "skipped": skipped, "total": len(memory_ids),
+            })
             self.qdrant.upsert_batch(points)
 
         return memory_ids

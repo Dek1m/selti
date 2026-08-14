@@ -629,11 +629,23 @@ def ingest_batch(
 
         # Batch insert
         if to_insert:
+            emb_list = [item["embedding"] for item in to_insert]
+            emb_types = [type(e).__name__ for e in emb_list]
+            emb_sizes = [len(e) if isinstance(e, list) else -1 for e in emb_list]
+            logger.info(
+                "ingest_batch: before insert_batch",
+                extra={
+                    "count": len(to_insert),
+                    "embedding_types": emb_types[:3],
+                    "embedding_sizes": emb_sizes[:3],
+                    "has_qdrant": service.repository._has_qdrant(),
+                },
+            )
             ids = run_async(
                 service.repository.insert_batch,
                 user_ids=[user_id] * len(to_insert),
                 contents=[item["content"] for item in to_insert],
-                embeddings=[item["embedding"] for item in to_insert],
+                embeddings=emb_list,
                 metadatas=[item["metadata"] for item in to_insert],
                 namespaces=[item["namespace"] for item in to_insert],
                 namespace_ids=namespace_ids,
@@ -656,6 +668,7 @@ def ingest_batch(
         except Exception:
             logger.exception("sync_links_batch failed (non-fatal)")
 
+    logger.info("ingest_batch: DONE", extra={"summary": summary})
     return {"results": results, "summary": summary}
 
 
