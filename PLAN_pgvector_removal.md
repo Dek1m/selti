@@ -450,14 +450,14 @@ qdrant_enabled: bool = True  # Единственный векторный бэ�
 1. ✅ `verify_qdrant_migration()` = 100% migrated
 2. ✅ Все тесты с Qdrant-поиском проходят
 3. ✅ Минимум 24 часа наблюдения
-4. ✅ Бэкап БД: `pg_dump -Fc athena_memory > backup_before_pgvector_drop.dump`
+4. ✅ Бэкап БД: `pg_dump -Fc selti > backup_before_pgvector_drop.dump`
 
 ### Применение:
 1. **Остановить selti сервер** (docker compose stop memory-server)
 2. **Выполнить SQL миграцию:**
    ```bash
-   psql -U athena -d athena_memory -f migrations/011_drop_pgvector.sql
-   psql -U athena -d athena_memory -c "VACUUM ANALYZE memories;"
+   psql -U athena -d selti -f migrations/011_drop_pgvector.sql
+   psql -U athena -d selti -c "VACUUM ANALYZE memories;"
    ```
 3. **Применить Python-правки** (см. секцию 2)
 4. **Обновить Docker:**
@@ -474,7 +474,7 @@ qdrant_enabled: bool = True  # Единственный векторный бэ�
    ```bash
    curl http://localhost:8000/health
    # Проверить что расширение vector удалено:
-   psql -U athena -d athena_memory -c "SELECT * FROM pg_extension WHERE extname = 'vector';"
+   psql -U athena -d selti -c "SELECT * FROM pg_extension WHERE extname = 'vector';"
    # Должен вернуть 0 строк
    ```
 
@@ -529,7 +529,7 @@ qdrant_enabled: bool = True  # Единственный векторный бэ�
 
 ### Из БД-бэкапа (самый надёжный):
 ```bash
-pg_restore -U athena -d athena_memory backup_before_pgvector_drop.dump
+pg_restore -U athena -d selti backup_before_pgvector_drop.dump
 ```
 
 ---

@@ -235,9 +235,9 @@ MIT
 ### Пример 1: Python проект (selti)
 
 ```markdown
-# athena-memory — Semantic Memory MCP Server
+# selti — Semantic Memory MCP Server
 
-**athena-memory** — высокопроизводительный MCP-сервер семантической памяти для AI-агентов.
+**selti** — высокопроизводительный MCP-сервер семантической памяти для AI-агентов.
 
 ![Python](https://img.shields.io/badge/python-3.12-blue)
 ![Version](https://img.shields.io/badge/version-0.5.0-green)
@@ -324,7 +324,7 @@ curl http://localhost:8000/health
 
 | Переменная | Описание | По умолчанию |
 |------------|----------|--------------|
-| `DATABASE_URL` | PostgreSQL connection string | `postgresql+asyncpg://athena:athena@localhost:5432/athena_memory` |
+| `DATABASE_URL` | PostgreSQL connection string | `postgresql+asyncpg://athena:athena@localhost:5432/selti` |
 | `REDIS_URL` | Redis connection string | `redis://:@redis:6379/0` |
 | `EMBEDDING_API_URL` | URL API эмбеддингов | `http://10.0.0.21:8080/v1` |
 | `API_KEY` | Ключ аутентификации | (пусто) |
@@ -432,11 +432,11 @@ opencode (Bun/Node.js)
 akame Plugin
   ├── Collector → Granulator Engine
   ├── LLM Agent (memory-granulator / Тишь)
-  ├── Tool: granulate_output → athena-memory
+  ├── Tool: granulate_output → selti
   └── Link Enricher (пост-обработка)
   │
   ▼
-athena-memory (MCP over HTTP)
+selti (MCP over HTTP)
   └── PostgreSQL + pgvector
 ```
 
@@ -492,7 +492,7 @@ akame загружен (userId: akame)
 
 | Переменная | Описание | По умолчанию |
 |------------|----------|--------------|
-| `AKAME_MCP_URL` | URL athena-memory | `http://athena-memory:8000/mcp/` |
+| `AKAME_MCP_URL` | URL selti | `http://selti:8000/mcp/` |
 | `AKAME_API_KEY` | API-ключ | — |
 | `AKAME_USER_ID` | Владелец записей | `akame` |
 | `AKAME_COOLDOWN_MS` | Cooldown между грануляциями | `30000` |
@@ -503,7 +503,7 @@ akame загружен (userId: akame)
 
 | Tool | Описание |
 |------|----------|
-| `granulate_output` | Сохранение гранул в athena-memory |
+| `granulate_output` | Сохранение гранул в selti |
 | `code_index` | Сканирование .ts/.py файлов |
 | `code_diff` | Анализ unified diff |
 | `code_graph` | Построение графа зависимостей |

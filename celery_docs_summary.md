@@ -749,7 +749,7 @@ services:
   postgres:
     image: pgvector/pgvector:pg17
     environment:
-      POSTGRES_DB: athena_memory
+      POSTGRES_DB: selti
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     volumes:
@@ -763,7 +763,7 @@ services:
     environment:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/1
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/athena_memory
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/selti
     depends_on:
       redis:
         condition: service_healthy
@@ -792,7 +792,7 @@ services:
     environment:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/1
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/athena_memory
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/selti
     depends_on:
       - redis
       - postgres

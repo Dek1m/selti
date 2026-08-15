@@ -1,11 +1,11 @@
-# План: Переименование athena-memory → selti
+# План: Переименование selti → selti
 
 ## Решения
 
 | Компонент | Было | Стало |
 |-----------|------|-------|
 | Сервис (docker-compose) | selti | selti |
-| Контейнер сервиса | athena-memory | ${SERVICE_NAME} |
+| Контейнер сервиса | selti | ${SERVICE_NAME} |
 | Воркер (сервис) | celery-worker | celery-worker |
 | Контейнер воркера | athena-celery-worker | ${SERVICE_NAME}-worker |
 | Flower (сервис) | flower | flower |
@@ -22,8 +22,8 @@
 | Пароль PG (суперпользователь) | athena | postgres |
 | Приложение PG | athena_app | svc_athene_ai |
 | Пароль приложения | athena_app_change_me | ${SELTI_DB_PASSWORD} |
-| MCP сервер (config.py) | athena-memory | ${SERVICE_NAME} |
-| MCP URL (opencode.json) | http://athena-memory:8000/mcp/ | http://${SERVICE_NAME}:8000/mcp/ |
+| MCP сервер (config.py) | selti | ${SERVICE_NAME} |
+| MCP URL (opencode.json) | http://selti:8000/mcp/ | http://${SERVICE_NAME}:8000/mcp/ |
 
 ### Env-переменные (из .env)
 
@@ -62,7 +62,7 @@
   1. Добавить переменную `SERVICE_NAME=selti`
   2. Добавить переменную `SELTI_DB_PASSWORD=<пароль svc_athene_ai>`
   3. Заменить `DATABASE_URL=postgresql+asyncpg://athena:athena@localhost:5432/athene_memory` → `DATABASE_URL=postgresql+asyncpg://svc_athene_ai:${SELTI_DB_PASSWORD}@localhost:5432/memory`
-  4. Заменить `MCP_SERVER_NAME=athena-memory` → `MCP_SERVER_NAME=${SERVICE_NAME}`
+  4. Заменить `MCP_SERVER_NAME=selti` → `MCP_SERVER_NAME=${SERVICE_NAME}`
   5. На сервере: обновить `.env` аналогично (добавить `SERVICE_NAME`, `SELTI_DB_PASSWORD`)
 - **Проверка:** `grep SERVICE_NAME .env && grep SELTI_DB_PASSWORD .env` — переменные существуют
 - **Rollback:** `git checkout .env.example`
@@ -74,7 +74,7 @@
 
 - **Файлы:** `docker-compose.yml`
 - **Действия:**
-  1. Заменить `container_name: athena-memory` → `container_name: ${SERVICE_NAME}`
+  1. Заменить `container_name: selti` → `container_name: ${SERVICE_NAME}`
   2. Заменить `container_name: athena-celery-worker` → `container_name: ${SERVICE_NAME}-worker`
   3. Заменить `container_name: athena-flower` → `container_name: ${SERVICE_NAME}-flower`
   4. Заменить `container_name: athena-redis` → `container_name: redis`
@@ -107,7 +107,7 @@
 - **Файлы:** `memory_server/config.py`
 - **Действия:**
   1. Строка 16: `database_url: str = "postgresql+asyncpg://athena:athena@localhost:5432/athene_memory"` → `database_url: str = "postgresql+asyncpg://svc_athene_ai:changeme@localhost:5432/memory"`
-  2. Строка 31: `mcp_server_name: str = "athena-memory"` → `mcp_server_name: str = os.getenv("SERVICE_NAME", "selti")`
+  2. Строка 31: `mcp_server_name: str = "selti"` → `mcp_server_name: str = os.getenv("SERVICE_NAME", "selti")`
   3. Добавить `import os` если ещё нет
 - **Проверка:** `python -c "from memory_server.config import settings; print(settings.mcp_server_name)"` → `selti`
 - **Rollback:** `git checkout memory_server/config.py`
@@ -128,9 +128,9 @@
 
 - **Файлы:** `opencode.json` (в проекте akame, на сервере: `~/.config/opencode/opencode.json`)
 - **Действия:**
-  1. Найти MCP сервер `athena-memory` в секции `mcp`
-  2. Заменить ключ сервера: `"athena-memory"` → `"selti"`
-  3. Заменить URL: `"http://athena-memory:8000/mcp/"` → `"http://selti:8000/mcp/"`
+  1. Найти MCP сервер `selti` в секции `mcp`
+  2. Заменить ключ сервера: `"selti"` → `"selti"`
+  3. Заменить URL: `"http://selti:8000/mcp/"` → `"http://selti:8000/mcp/"`
   4. **НЕ МЕНЯТЬ** промпты агентов — opencode сам подставляет префикс `{server_name}_tool_name`
 - **Проверка:** `opencode` подключается к selti, тулы доступны как `selti_memory_search`, `selti_hash_get` и т.д.
 - **Rollback:** `git checkout opencode.json`
@@ -141,7 +141,7 @@
 - **Файлы:** `deploy.sh`, `.github/workflows/auto-deploy.yml`
 - **Действия:**
   1. В `deploy.sh`:
-     - `COMPOSE_PROJECT="athena-memory"` → `COMPOSE_PROJECT="selti"`
+     - `COMPOSE_PROJECT="selti"` → `COMPOSE_PROJECT="selti"`
      - `SERVICE_NAME="memory-server"` → `SERVICE_NAME="selti"`
   2. В `.github/workflows/auto-deploy.yml`:
      - Строка 22: `docker compose build memory-server celery-worker` → `docker compose build selti celery-worker`
@@ -200,7 +200,7 @@
 - **Файлы:** —
 - **Действия:**
   1. Остановить старые контейнеры: `docker compose down`
-  2. Удалить старые имена контейнеров (если остались): `docker rm athena-memory athena-celery-worker athena-flower athena-redis athena-postgres athena-qdrant`
+  2. Удалить старые имена контейнеров (если остались): `docker rm selti athena-celery-worker athena-flower athena-redis athena-postgres athena-qdrant`
   3. Выполнить миграцию БД (шаг 6)
   4. Запустить новый стек: `docker compose up -d`
   5. Проверить healthcheck: `curl -sf http://localhost:8000/health`

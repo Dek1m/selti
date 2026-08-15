@@ -65,7 +65,7 @@ wal-g:
     PGUSER: athena
     PGPASSWORD: ${PG_PASSWORD}
     PGHOST: postgres
-    PGDATABASE: athena_memory
+    PGDATABASE: selti
     WALG_COMPRESSION_METHOD: zstd
   volumes:
     - /var/run/postgresql:/var/run/postgresql
@@ -93,13 +93,13 @@ wal-g:
 DATE=$(date +%Y-%m-%d)
 BACKUP_DIR="/backup/dump"
 
-pg_dump -U athena -h postgres -d athena_memory \
+pg_dump -U athena -h postgres -d selti \
   --format=custom \
   --compress=zstd:3 \
-  --file="${BACKUP_DIR}/athena_memory_${DATE}.dump"
+  --file="${BACKUP_DIR}/selti_${DATE}.dump"
 
 # Залить в S3
-wal-g put "${BACKUP_DIR}/athena_memory_${DATE}.dump" "dumps/athena_memory_${DATE}.dump"
+wal-g put "${BACKUP_DIR}/selti_${DATE}.dump" "dumps/selti_${DATE}.dump"
 
 # Оставить только последние 30 дампов локально
 find ${BACKUP_DIR} -name "*.dump" -mtime +30 -delete
@@ -130,11 +130,11 @@ touch /var/lib/postgresql/data/recovery.signal
 
 ### Вариант B: Логический (конкретная таблица/строка)
 ```bash
-pg_restore -U athena -h new-host -d athena_memory \
+pg_restore -U athena -h new-host -d selti \
   --format=custom \
   --data-only \
   --table=memories \
-  "athena_memory_2026-07-20.dump"
+  "selti_2026-07-20.dump"
 ```
 
 ## Проверка

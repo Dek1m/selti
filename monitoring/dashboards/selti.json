@@ -62,7 +62,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Selti (athena-memory) observability dashboard — RED metrics, Celery, DB Pool, Qdrant, Redis, Dedup, Business",
+  "description": "Selti (selti) observability dashboard — RED metrics, Celery, DB Pool, Qdrant, Redis, Dedup, Business",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -1418,7 +1418,7 @@
   "refresh": "30s",
   "schemaVersion": 38,
   "style": "dark",
-  "tags": ["selti", "observability", "RED", "athena-memory"],
+  "tags": ["selti", "observability", "RED", "selti"],
   "templating": {
     "list": [
       {

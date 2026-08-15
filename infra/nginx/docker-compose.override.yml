@@ -1,0 +1,43 @@
+# docker-compose.override.yml — добавляет nginx reverse proxy
+# Автоматически подхватывается docker-compose up
+#
+# Сертификаты: ./certs/fullchain.pem + ./certs/privkey.pem
+# (bind mount с хоста — рекомендуется для wildcard)
+
+services:
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    container_name: nginx-proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # SSL certificates (bind mount с хоста)
+      - ./certs:/etc/nginx/certs:ro
+      # Логи (persistent volume)
+      - nginx-logs:/var/log/nginx
+    networks:
+      - app_default
+    depends_on:
+      opencode:
+        condition: service_started
+      selti:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  nginx-logs:
+    driver: local

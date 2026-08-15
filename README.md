@@ -1,6 +1,6 @@
-# athena-memory — Semantic Memory MCP Server
+# selti — Semantic Memory MCP Server
 
-**athena-memory** — высокопроизводительный MCP-сервер семантической памяти для AI-агентов. Обеспечивает векторное хранение, поиск по семантической близости и интеллектуальную дедупликацию записей на основе протокола MCP (Model Context Protocol) через SSE-транспорт.
+**selti** — высокопроизводительный MCP-сервер семантической памяти для AI-агентов. Обеспечивает векторное хранение, поиск по семантической близости и интеллектуальную дедупликацию записей на основе протокола MCP (Model Context Protocol) через SSE-транспорт.
 
 ---
 
@@ -306,7 +306,7 @@ Validation-ошибки (ValueError, InvalidNamespace) **не ретраятся
 
 | Переменная               | Описание                                   | По умолчанию                                              |
 |--------------------------|--------------------------------------------|-----------------------------------------------------------|
-| `DATABASE_URL`           | PostgreSQL connection string (asyncpg)     | `postgresql+asyncpg://athena:athena@localhost:5432/athena_memory` |
+| `DATABASE_URL`           | PostgreSQL connection string (asyncpg)     | `postgresql+asyncpg://athena:athena@localhost:5432/selti` |
 | `REDIS_URL`              | Redis connection string                    | `redis://:@redis:6379/0`                                 |
 | `EMBEDDING_API_URL`      | URL API эмбеддингов (OpenAI-совместимый)   | `http://10.0.0.21:8080/v1`                               |
 | `EMBEDDING_API_KEY`      | Ключ аутентификации API эмбеддингов        | (пусто)                                                   |
@@ -370,7 +370,7 @@ Validation-ошибки (ValueError, InvalidNamespace) **не ретраятся
 | `athena_db_pool_available`                | Gauge     | Доступные соединения в пуле                 |
 | `athena_embedding_duration_seconds`       | Histogram | Длительность вызова API эмбеддингов         |
 | `athena_search_results_count`             | Histogram | Количество результатов поиска               |
-| `athena_memory_count`                     | Gauge     | Общее количество записей (по namespace)     |
+| `selti_count`                     | Gauge     | Общее количество записей (по namespace)     |
 | `athena_mcp_tool_calls_total`             | Counter   | Вызовы MCP-инструментов (tool, status)      |
 | `athena_mcp_tool_duration_seconds`        | Histogram | Длительность выполнения MCP-инструментов    |
 | `athena_embedding_cache_hits_total`       | Counter   | Попадания в кеш эмбеддингов                 |
