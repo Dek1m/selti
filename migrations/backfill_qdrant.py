@@ -106,10 +106,11 @@ async def backfill():
         qdrant_ids = await get_qdrant_ids(qdrant, QDRANT_COLLECTION)
         log.info("Qdrant has %d points", len(qdrant_ids))
 
-        # Step 2: Get all PG IDs (not archived)
+        # Step 2: Get all PG IDs (asserted: status='asserted' AND valid_to IS NULL)
         async with pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT id::text FROM memories WHERE is_archived = false"
+                "SELECT id::text FROM memories "
+                "WHERE status = 'asserted' AND valid_to IS NULL"
             )
         pg_ids = {str(r["id"]) for r in rows}
         log.info("PostgreSQL has %d active records", len(pg_ids))
@@ -140,12 +141,12 @@ async def backfill():
             # Fetch content from PG
             async with pool.acquire() as conn:
                 rows = await conn.fetch(
-                    """SELECT id::text, user_id, content, namespace, metadata,
-                              importance, content_hash
-                       FROM memories
-                       WHERE id::text = ANY($1)
-                         AND is_archived = false
-                         AND content IS NOT NULL""",
+                    """SELECT m.id::text, m.user_id, m.content, m.namespace_id::text,
+                              m.project_id::text, m.status, m.importance, m.content_hash
+                       FROM memories m
+                       WHERE m.id::text = ANY($1)
+                         AND m.status = 'asserted' AND m.valid_to IS NULL
+                         AND m.content IS NOT NULL""",
                     batch_ids,
                 )
 
@@ -162,16 +163,19 @@ async def backfill():
                 total_failed += len(rows)
                 continue
 
-            # Build Qdrant points
+            # Build Qdrant points: payload на диете (D6) — только фильтруемые
+            # поля, БЕЗ content/metadata/namespace-строки. Полная перезаливка
+            # = setup_qdrant_collection.py --recreate + этот скрипт.
             points = []
             for row, emb in zip(rows, embeddings):
                 payload = {
                     "user_id": row["user_id"],
-                    "content": row["content"],
-                    "namespace": row["namespace"],
-                    "metadata": row["metadata"] or {},
+                    "namespace_id": row["namespace_id"],
+                    "status": row["status"],
                     "importance": row["importance"] or 3,
                 }
+                if row["project_id"]:
+                    payload["project_id"] = row["project_id"]
                 if row["content_hash"]:
                     payload["content_hash"] = row["content_hash"]
 

@@ -73,16 +73,9 @@ def create_collection(client: QdrantClient, recreate: bool = False) -> None:
     )
 
     # ── Payload индексы ──
-    # Ускоряют фильтрацию: namespace=?, user_id=?, importance>=?
-    # Без них Qdrant делает полный scan по payload
+    # Под payload-диету (D6): фильтры user_id/namespace_id/project_id/status.
+    # namespace_id/project_id — UUID-строки (KEYWORD), не TEXT-имена namespace.
     logger.info("Creating payload indexes...")
-
-    client.create_payload_index(
-        collection_name=COLLECTION,
-        field_name="namespace",
-        field_schema=qm.PayloadSchemaType.KEYWORD,
-    )
-    logger.info("  + namespace (KEYWORD)")
 
     client.create_payload_index(
         collection_name=COLLECTION,
@@ -90,6 +83,27 @@ def create_collection(client: QdrantClient, recreate: bool = False) -> None:
         field_schema=qm.PayloadSchemaType.KEYWORD,
     )
     logger.info("  + user_id (KEYWORD)")
+
+    client.create_payload_index(
+        collection_name=COLLECTION,
+        field_name="namespace_id",
+        field_schema=qm.PayloadSchemaType.KEYWORD,
+    )
+    logger.info("  + namespace_id (KEYWORD)")
+
+    client.create_payload_index(
+        collection_name=COLLECTION,
+        field_name="project_id",
+        field_schema=qm.PayloadSchemaType.KEYWORD,
+    )
+    logger.info("  + project_id (KEYWORD)")
+
+    client.create_payload_index(
+        collection_name=COLLECTION,
+        field_name="status",
+        field_schema=qm.PayloadSchemaType.KEYWORD,
+    )
+    logger.info("  + status (KEYWORD)")
 
     client.create_payload_index(
         collection_name=COLLECTION,
