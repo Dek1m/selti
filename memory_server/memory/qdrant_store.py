@@ -111,8 +111,8 @@ class QdrantStore:
             collection_name=self.collection,
             points=[qm.PointVectors(id=point_id, vector=vector)],
         )
-        QDRANT_OPS_TOTAL.labels(operation="upsert").inc()
-        QDRANT_OPS_DURATION_SECONDS.labels(operation="upsert").observe(time.monotonic() - qstart)
+        QDRANT_OPS_TOTAL.labels(operation="update_vector").inc()
+        QDRANT_OPS_DURATION_SECONDS.labels(operation="update_vector").observe(time.monotonic() - qstart)
 
     def set_payload(
         self,
@@ -125,8 +125,8 @@ class QdrantStore:
             payload=payload,
             points=[point_id],
         )
-        QDRANT_OPS_TOTAL.labels(operation="upsert").inc()
-        QDRANT_OPS_DURATION_SECONDS.labels(operation="upsert").observe(time.monotonic() - qstart)
+        QDRANT_OPS_TOTAL.labels(operation="set_payload").inc()
+        QDRANT_OPS_DURATION_SECONDS.labels(operation="set_payload").observe(time.monotonic() - qstart)
 
     # ════════════════════════════════════════════════════════════
     # DELETE
@@ -176,11 +176,24 @@ class QdrantStore:
     @staticmethod
     def build_filter(
         user_id: str | None = None,
-        namespace: str | None = None,
+        namespace_id: str | None = None,
+        project_id: str | None = None,
+        active_only: bool = True,
     ) -> qm.Filter | None:
+        """Фильтр под payload-диету (D6): user_id/namespace_id/project_id — UUID-строки.
+
+        active_only=True добавляет фильтр актуальности status='asserted'
+        (valid_to в payload не хранится: retracted/superseded закрывают окно
+        и исключаются статусом). False — для массовых операций (forget),
+        где статус не важен.
+        """
         conditions: list[qm.Condition] = []
         if user_id:
             conditions.append(qm.FieldCondition(key="user_id", match=qm.MatchValue(value=user_id)))
-        if namespace:
-            conditions.append(qm.FieldCondition(key="namespace", match=qm.MatchValue(value=namespace)))
+        if namespace_id:
+            conditions.append(qm.FieldCondition(key="namespace_id", match=qm.MatchValue(value=str(namespace_id))))
+        if project_id:
+            conditions.append(qm.FieldCondition(key="project_id", match=qm.MatchValue(value=str(project_id))))
+        if active_only:
+            conditions.append(qm.FieldCondition(key="status", match=qm.MatchValue(value="asserted")))
         return qm.Filter(must=conditions) if conditions else None

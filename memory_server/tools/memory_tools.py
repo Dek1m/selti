@@ -5,18 +5,34 @@ ACL checks and metadata coercion remain at tool level.
 """
 
 import json
-from typing import Any
+from typing import Any, get_args
 
 from fastmcp import Context
+from pydantic import TypeAdapter, ValidationError
 
 from memory_server.config import settings
 from memory_server.metrics import (
     SEARCH_RESULTS,
     MEMORY_COUNT,
 )
+from memory_server.models import LinkType
 from memory_server.server import mcp
 from memory_server.tools.task_bridge import celery_call
 from memory_server.utils.metrics_decorator import tool_handler
+
+# Валидатор link_type без сборки полного RelationCreate
+_LINK_TYPE_ADAPTER = TypeAdapter(LinkType)
+
+
+def _validate_link_type(link_type: str) -> None:
+    """Валидация link_type на входе: понятная ошибка вместо PG CHECK violation."""
+    try:
+        _LINK_TYPE_ADAPTER.validate_python(link_type)
+    except ValidationError:
+        allowed = ", ".join(get_args(LinkType))
+        raise ValueError(
+            f"link_type '{link_type}' is not allowed. Allowed: {allowed}"
+        ) from None
 
 # Имена задач
 TASK_STORE = "memory_server.tasks.memory_tasks.store_memory"
@@ -69,12 +85,16 @@ async def memory_store(
     metadata: str | dict | None = None,
     namespace: str | None = None,
     importance: int | None = None,
+    project_id: str | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Store a new memory record.
 
     Generates an embedding for the content and persists it to the database.
     Deduplication is applied automatically — returns existing record if a match is found.
+
+    project_id: optional project slug (e.g. 'akame') or UUID; binds the granule
+    to the project registry. Omit for global (cross-project) knowledge.
     """
     metadata = _coerce_metadata(metadata)
     return await celery_call(
@@ -84,6 +104,7 @@ async def memory_store(
         metadata=metadata,
         namespace=namespace,
         importance=importance,
+        project_id=project_id,
     )
 
 
@@ -95,11 +116,16 @@ async def memory_search(
     limit: int = 10,
     threshold: float = 0.7,
     namespace: str | None = None,
+    project_id: str | None = None,
     ctx: Context | None = None,
 ) -> list[dict[str, Any]]:
     """Search memories by semantic similarity.
 
     Returns memories matching the query, ordered by relevance score.
+    Only currently asserted memories are returned (status='asserted').
+
+    project_id: optional project slug or UUID to scope the search;
+    omit to search everywhere (global layer included).
     """
     results = await celery_call(
         TASK_SEARCH,
@@ -108,6 +134,7 @@ async def memory_search(
         limit=limit,
         threshold=threshold,
         namespace=namespace,
+        project_id=project_id,
     )
     SEARCH_RESULTS.labels(tool="memory_search").observe(len(results))
     return results
@@ -118,17 +145,20 @@ async def memory_search(
 async def memory_ingest_batch(
     entries: list[dict],
     user_id: str,
+    project_id: str | None = None,
     ctx: Context | None = None,
 ) -> dict:
     """Store multiple memory records in batch.
 
     Entries format: [{content, metadata?, namespace?}, ...]
+    project_id binds the whole batch to one project (slug or UUID).
     Returns summary of inserted/skipped/updated counts.
     """
     return await celery_call(
         TASK_INGEST_BATCH,
         entries=entries,
         user_id=user_id,
+        project_id=project_id,
     )
 
 
@@ -153,6 +183,7 @@ async def memory_find_similar(
     limit: int = 10,
     threshold: float = 0.7,
     namespace: str | None = None,
+    project_id: str | None = None,
     ctx: Context | None = None,
 ) -> list[dict]:
     """Find semantically similar memories without storing."""
@@ -163,6 +194,7 @@ async def memory_find_similar(
         limit=limit,
         threshold=threshold,
         namespace=namespace,
+        project_id=project_id,
     )
     SEARCH_RESULTS.labels(tool="memory_find_similar").observe(len(results))
     return results
@@ -185,11 +217,18 @@ async def memory_update(
     content: str | None = None,
     metadata: str | dict | None = None,
     importance: int | None = None,
+    project_id: str | None = None,
+    supersedes: str | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Update an existing memory record.
 
-    If content is provided, a new embedding is generated.
+    If content is provided, a new embedding is generated. Metadata is merged
+    (existing keys are kept, new ones overwrite matching keys).
+
+    project_id: optional project slug or UUID to (re)bind the granule.
+    supersedes: optional ID of a previous version this granule replaces —
+    the old granule is closed (status='superseded', valid window ends now).
     """
     metadata = _coerce_metadata(metadata)
     return await celery_call(
@@ -198,6 +237,8 @@ async def memory_update(
         content=content,
         metadata=metadata,
         importance=importance,
+        project_id=project_id,
+        supersedes=supersedes,
     )
 
 
@@ -218,6 +259,7 @@ async def memory_list(
     namespace: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    project_id: str | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """List memory records with optional filtering and pagination."""
@@ -227,6 +269,7 @@ async def memory_list(
         namespace=namespace,
         limit=limit,
         offset=offset,
+        project_id=project_id,
     )
 
 
@@ -236,6 +279,7 @@ async def memory_recent(
     namespace: str | None = None,
     limit: int = 20,
     since: str | None = None,
+    project_id: str | None = None,
     ctx: Context | None = None,
 ) -> list[dict[str, Any]]:
     """Get the most recent memory records.
@@ -244,12 +288,14 @@ async def memory_recent(
     Useful for checking what happened recently — "what did we do today", "last 10 records", etc.
     Pass 'since' as an ISO datetime string (e.g. '2026-07-25' or '2026-07-25T10:00:00')
     to filter records created after a specific point in time.
+    project_id: optional project slug or UUID to scope the records.
     """
     return await celery_call(
         TASK_RECENT,
         namespace=namespace,
         since=since,
         limit=limit,
+        project_id=project_id,
     )
 
 
@@ -260,7 +306,7 @@ async def memory_forget(
     namespace: str | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
-    """Delete all memories for a user, optionally filtered by namespace."""
+    """Retract all memories for a user (status='retracted'), optionally filtered by namespace."""
     return await celery_call(
         TASK_FORGET,
         user_id=user_id,
@@ -274,10 +320,11 @@ async def memory_archive(
     id: str,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
-    """Archive a memory record (soft delete).
+    """Retract a memory record (soft delete).
 
-    Sets is_archived = true. The record is excluded from search, list, and recent queries
-    but remains in the database for potential restoration.
+    Sets status='retracted' and closes its validity window (valid_to=now()).
+    The record is excluded from search, list, and recent queries but remains
+    in the database (and Qdrant, marked retracted) for potential restoration.
     """
     return await celery_call(TASK_ARCHIVE, memory_id=id)
 
@@ -293,16 +340,20 @@ async def memory_link(
     link_type: str = "related_to",
     description: str | None = None,
     weight: float = 1.0,
+    project_id: str | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Создать связь между двумя гранулами.
 
     link_type: depends_on | used_by | extends | implements | contains | contained_by |
-               calls | called_by | related_to | solves | tested_by | implements_adr |
-               references | follows | precedes | alternative_to | causes | prevents |
-               runs_on | exposes | mounts | derived_from | motivates | informs | informed_by |
-               connected_to | contradicts
+               calls | called_by | related_to | contradicts | solves | tested_by |
+               implements_adr | references | follows | precedes | alternative_to |
+               causes | prevents | runs_on | exposes | mounts | derived_from |
+               motivates | informs | informed_by | connected_to | supersedes |
+               supports | member_of | part_of | describes_cluster
+    project_id: опционально — валидация проекта (slug/UUID) ранней понятной ошибкой.
     """
+    _validate_link_type(link_type)
     return await celery_call(
         TASK_ADD_RELATION,
         source_id=source_id,
@@ -310,6 +361,7 @@ async def memory_link(
         link_type=link_type,
         description=description,
         weight=weight,
+        project_id=project_id,
     )
 
 

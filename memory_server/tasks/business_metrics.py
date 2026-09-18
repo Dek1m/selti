@@ -26,19 +26,21 @@ _prev_snapshot: dict[str, tuple[int, float]] = {}
 def update_business_metrics():
     """Обновить бизнес-метрики: growth rate per namespace."""
     try:
-        from memory_server.tasks.connections import get_pool
-
-        pool = get_pool()
-        import asyncpg
-
         # Синхронный запрос через run_async bridge
+        from memory_server.state import get_state
         from memory_server.tasks.async_bridge import run_async
 
+        pool = run_async(get_state().get_pool)
+
         async def _fetch_counts() -> dict[str, int]:
+            # Актуальные гранулы = status='asserted' AND valid_to IS NULL (миграция 018);
+            # namespace_id → uid через JOIN (TEXT-колонка дропается 018c)
             async with pool.acquire() as conn:
                 rows = await conn.fetch(
-                    "SELECT namespace, COUNT(*) as cnt FROM memories "
-                    "WHERE is_archived = false GROUP BY namespace"
+                    "SELECT n.uid AS namespace, COUNT(*) AS cnt "
+                    "FROM memories m JOIN namespaces n ON n.id = m.namespace_id "
+                    "WHERE m.status = 'asserted' AND m.valid_to IS NULL "
+                    "GROUP BY n.uid"
                 )
                 return {row["namespace"]: row["cnt"] for row in rows}
 

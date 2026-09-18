@@ -8,11 +8,13 @@ from memory_server.exceptions import NotFoundError
 from memory_server.logger import async_measure_duration, get_logger
 from memory_server.memory.dedup import DedupAction, DedupEngine
 from memory_server.memory.namespace_repository import NamespaceRepository
-from memory_server.memory.repository_qdrant import MemoryRepository
+from memory_server.memory.project_repository import ProjectRepository
+from memory_server.memory.repository import MemoryRepository
 from memory_server.models import (
     GraphStats,
     MemoryListResult,
     MemoryRecord,
+    ProjectContext,
     Relation,
     RelationListResult,
     SearchResult,
@@ -20,6 +22,14 @@ from memory_server.models import (
 )
 
 logger = get_logger(__name__)
+
+# Порядок секций механической сборки снапшота (D9); прочие ns — по алфавиту
+_CONTEXT_SECTION_ORDER = (
+    "project_meta",
+    "code_knowledge",
+    "dialogue_insights",
+    "infrastructure",
+)
 
 
 class MemoryService:
@@ -31,12 +41,22 @@ class MemoryService:
         embedding_provider: EmbeddingProvider,
         namespace_repository: NamespaceRepository,
         config: Settings | None = None,
+        project_repository: ProjectRepository | None = None,
     ):
         self.repository = repository
         self.embedding = embedding_provider
         self.ns_repo = namespace_repository
+        self.project_repo = project_repository
         self.config = config or Settings()
         self.dedup = DedupEngine(repository, embedding_provider, self.config)
+
+    async def resolve_project(self, project_id: str | None) -> str | None:
+        """Ключ тула (slug | UUID | None) → project_id UUID. Неизвестный slug → NotFoundError."""
+        if project_id is None:
+            return None
+        if self.project_repo is None:
+            raise RuntimeError("project_repository is not configured")
+        return await self.project_repo.resolve_id(project_id)
 
     async def store(
         self,
@@ -45,10 +65,12 @@ class MemoryService:
         metadata: dict | None = None,
         namespace: str | None = None,
         importance: int | None = None,
+        project_id: str | None = None,
     ) -> tuple[MemoryRecord, DedupAction]:
         namespace = namespace or "default"
         async with async_measure_duration(logger, "store", namespace=namespace, user_id=user_id):
             ns_record = await self.ns_repo.get_or_create(namespace)
+            resolved_project = await self.resolve_project(project_id)
             content_hash: str | None = None
             embedding: list[float] | None = None
 
@@ -87,10 +109,10 @@ class MemoryService:
                 content=content,
                 embedding=embedding,
                 metadata=metadata or {},
-                namespace=namespace,
                 namespace_id=ns_record.id,
                 content_hash=content_hash,
                 importance=importance or 3,
+                project_id=resolved_project,
             )
             record = await self.repository.get_by_id(memory_id)
             if record is None:
@@ -112,8 +134,10 @@ class MemoryService:
         limit: int = 10,
         threshold: float = 0.7,
         namespace: str | None = None,
+        project_id: str | None = None,
     ) -> list[SearchResult]:
         async with async_measure_duration(logger, "search", namespace=namespace, user_id=user_id):
+            resolved_project = await self.resolve_project(project_id)
             query_embedding = await self.embedding.embed(query)
             results = await self.repository.search(
                 query_embedding=query_embedding,
@@ -122,6 +146,7 @@ class MemoryService:
                 threshold=threshold,
                 namespace=namespace,
                 query_text=query,
+                project_id=resolved_project,
             )
             return results
 
@@ -138,8 +163,16 @@ class MemoryService:
         content: str | None = None,
         metadata: dict | None = None,
         importance: int | None = None,
+        project_id: str | None = None,
+        supersedes: str | None = None,
     ) -> MemoryRecord:
+        """Обновить гранулу: metadata merge-ится, version бампит триггер БД.
+
+        supersedes — ID замещаемой версии: старая закрывается атомарно
+        (status='superseded', valid_to=valid_from этой, superseded_by=id этой).
+        """
         async with async_measure_duration(logger, "update"):
+            resolved_project = await self.resolve_project(project_id)
             embedding = None
             if content is not None:
                 embedding = await self.embedding.embed(content)
@@ -149,6 +182,8 @@ class MemoryService:
                 embedding=embedding,
                 metadata=metadata,
                 importance=importance,
+                project_id=resolved_project,
+                supersedes=supersedes,
             )
             if record is None:
                 raise NotFoundError(memory_id)
@@ -172,13 +207,16 @@ class MemoryService:
         namespace: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        project_id: str | None = None,
     ) -> MemoryListResult:
         async with async_measure_duration(logger, "list", namespace=namespace):
+            resolved_project = await self.resolve_project(project_id)
             return await self.repository.list(
                 user_id=user_id,
                 namespace=namespace,
                 limit=limit,
                 offset=offset,
+                project_id=resolved_project,
             )
 
     async def recent(
@@ -186,12 +224,15 @@ class MemoryService:
         namespace: str | None = None,
         since: datetime | None = None,
         limit: int = 20,
+        project_id: str | None = None,
     ) -> list[MemoryRecord]:
         logger.info("recent", extra={"namespace": namespace, "limit": limit, "since": str(since)})
+        resolved_project = await self.resolve_project(project_id)
         results = await self.repository.recent(
             namespace=namespace,
             since=since,
             limit=limit,
+            project_id=resolved_project,
         )
         logger.info("recent: done", extra={"count": len(results)})
         return results
@@ -216,7 +257,11 @@ class MemoryService:
         return result
 
     async def archive(self, memory_id: str) -> bool:
-        """Мягкое удаление: установить is_archived = true."""
+        """Отзыв гранулы: status='retracted', valid_to=now().
+
+        Гранула уходит из выдачи, но остаётся в БД и Qdrant (с пометкой
+        статуса) — восстановима и доступна для time-travel (Фаза 1.3).
+        """
         logger.info("archive", extra={"id": memory_id})
         record = await self.repository.get_by_id(memory_id)
         if record is None:
@@ -225,6 +270,60 @@ class MemoryService:
         result = await self.repository.archive(memory_id)
         logger.info("archive: done", extra={"id": memory_id, "success": result})
         return result
+
+    # ── Project context («облачко знаний», D9) ──
+
+    async def get_project_context(self, project: str, refresh: bool = False) -> ProjectContext:
+        """Снапшот контекста проекта. refresh=True — немедленный пересчёт.
+
+        Fast-path без пересчёта; Redis-кеш ctx:{slug} и Celery-обвязка — Фаза 6.
+        """
+        project_id = await self.resolve_project(project)
+        if project_id is None:
+            raise NotFoundError(project, message="project is required for context")
+        if not refresh:
+            existing = await self.repository.get_project_context(project_id)
+            if existing is not None:
+                return ProjectContext.model_validate(existing)
+        return await self._rebuild_context(project_id)
+
+    async def rebuild_project_context(self, project: str) -> ProjectContext:
+        """Пересчитать снапшот из топ-гранул проекта (хранимка 019)."""
+        project_id = await self.resolve_project(project)
+        if project_id is None:
+            raise NotFoundError(project, message="project is required for context")
+        return await self._rebuild_context(project_id)
+
+    async def _rebuild_context(self, project_id: str) -> ProjectContext:
+        """Механическая сборка снапшота: секции по namespace, без прозы.
+
+        Проза Тиши (sections.prose) — Фаза 6; этот формат — её fallback.
+        """
+        rows = await self.repository.fetch_project_context(project_id)
+        sections: dict[str, list[str]] = {}
+        for row in rows:
+            sections.setdefault(row["namespace"], []).append(row["content"])
+
+        ordered = [ns for ns in _CONTEXT_SECTION_ORDER if ns in sections]
+        ordered += sorted(ns for ns in sections if ns not in _CONTEXT_SECTION_ORDER)
+        content = "\n\n".join(
+            f"## {ns}\n" + "\n".join(f"- {item}" for item in sections[ns])
+            for ns in ordered
+        )
+
+        saved = await self.repository.upsert_project_context(
+            project_id,
+            content=content,
+            sections=sections,
+            granule_count=len(rows),
+        )
+        return ProjectContext(
+            project_id=project_id,
+            content=content,
+            sections=sections,
+            granule_count=len(rows),
+            computed_at=saved.get("computed_at"),
+        )
 
     # ── Relations ──
 
@@ -235,8 +334,13 @@ class MemoryService:
             record = await self.repository.get_by_id(granule_id)
             if record is not None:
                 return record
-        except Exception:
-            pass  # не UUID — ищем дальше
+        except Exception as exc:
+            # Ожидаемо для не-UUID входа, но сюда же попадает сбой БД — не молчим
+            logger.warning("resolve_granule: uuid lookup failed, fallback to entity_name", extra={
+                "input": granule_id,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            })
 
         # Fallback: ищем по entity_name
         record = await self.repository.find_by_entity_name(granule_id)
@@ -244,6 +348,11 @@ class MemoryService:
             logger.info("resolve: found by entity_name", extra={
                 "input": granule_id, "resolved_id": record.id,
             })
+            return record
+
+        logger.warning("resolve_granule: not found by uuid nor entity_name", extra={
+            "input": granule_id,
+        })
         return record
 
     async def add_relation(
@@ -255,12 +364,19 @@ class MemoryService:
         description: str | None = None,
         weight: float = 1.0,
         metadata: dict | None = None,
+        project_id: str | None = None,
     ) -> str | None:
-        """Создать связь между гранулами. Поддерживает строковые entity_name как ID."""
+        """Создать связь между гранулами. Поддерживает строковые entity_name как ID.
+
+        project_id — только ранняя валидация проекта (понятная ошибка при
+        неизвестном slug); связи фильтром проекта не ограничены.
+        """
         logger.info("add_relation", extra={
             "source": source_id, "target": target_id,
             "type": link_type, "weight": weight,
         })
+        if project_id is not None:
+            await self.resolve_project(project_id)
 
         # Resolve source
         source = await self._resolve_granule(source_id)

@@ -1,3 +1,4 @@
+import importlib
 import logging
 import multiprocessing
 from contextlib import asynccontextmanager
@@ -7,6 +8,7 @@ from fastmcp import FastMCP
 from memory_server.config import settings
 from memory_server.logger import get_logger, request_id_var
 from memory_server.tasks.logging_config import setup_server_logging
+from memory_server.tools import TOOL_MODULES
 from migrations.run import run_migrations
 
 # Инициализация логирования — каждый воркер должен иметь свой logger
@@ -32,8 +34,7 @@ async def lifespan(server: FastMCP):
     # Миграции — создают extension vector, таблицы, индексы
     await run_migrations()
 
-    # MemoryService, EmbeddingClient, QdrantClient, pool —
-    # теперь worker-scoped singletons в connections.py.
+    # Зависимости процесса — в SeltiState (state.py).
     # MCP tools отправляют задачи через Celery (task_bridge.py).
     if multiprocessing.current_process().name == "MainProcess":
         logger.info("Memory server started", extra={"model": settings.embedding_model})
@@ -50,6 +51,6 @@ mcp = FastMCP(
     lifespan=lifespan,
 )
 
-# Import tools to register them (decorators execute on import)
-import memory_server.tools.memory_tools  # noqa: F401, E402
-import memory_server.tools.hash_tools  # noqa: F401, E402
+# Регистрация тулов через реестр модулей (декораторы срабатывают на импорте)
+for _tool_module in TOOL_MODULES:
+    importlib.import_module(_tool_module)

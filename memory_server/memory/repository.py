@@ -2,6 +2,14 @@
 
 Реализует MemoryRepositoryProtocol.
 Делегирует PG-операции → PostgreSQLRepository, Qdrant-операции → QdrantStore.
+
+Контракт волны 2 (Фаза 0.4):
+  * Вышестоящие слои (service, dedup, tasks) работают со строковыми uid
+    namespace; резолв uid → namespace_id UUID выполняет ЗДЕСЬ через
+    NamespaceRepository (TTL-кеш). Незарегистрированный uid = пустой
+    результат, без auto-register на пути чтения.
+  * Qdrant payload — диета (D6): без content/metadata; user_id,
+    namespace_id, project_id, status, content_hash, importance.
 """
 from __future__ import annotations
 
@@ -10,6 +18,7 @@ from datetime import datetime
 from qdrant_client import models as qm
 
 from memory_server.logger import get_logger
+from memory_server.memory.namespace_repository import NamespaceRepository
 from memory_server.memory.pg_repository import PostgreSQLRepository
 from memory_server.memory.qdrant_store import QdrantStore
 from memory_server.models import (
@@ -25,6 +34,18 @@ from memory_server.models import (
 logger = get_logger(__name__)
 
 
+class _UnknownNamespace:
+    """Сентинел: uid не зарегистрирован → пустой результат запроса."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "<unknown-namespace>"
+
+
+_UNKNOWN_NS = _UnknownNamespace()
+
+
 class MemoryRepository:
     """Facade: PostgreSQL (метаданные) + Qdrant (вектора).
 
@@ -35,12 +56,51 @@ class MemoryRepository:
         self,
         pg: PostgreSQLRepository,
         qdrant: QdrantStore | None = None,
+        ns_repo: NamespaceRepository | None = None,
     ):
         self.pg = pg
         self.qdrant = qdrant
+        self.ns_repo = ns_repo
 
     def _has_qdrant(self) -> bool:
         return self.qdrant is not None
+
+    async def _ns_id(
+        self, namespace: str | None
+    ) -> str | None | _UnknownNamespace:
+        """uid → namespace_id. None-вход → None-фильтр; неизвестный uid → сентинел."""
+        if namespace is None:
+            return None
+        record = await self.ns_repo.get_by_uid(namespace)
+        if record is None:
+            logger.warning(
+                "namespace not registered: empty result",
+                extra={"namespace": namespace},
+            )
+            return _UNKNOWN_NS
+        return record.id
+
+    @staticmethod
+    def _point_payload(
+        user_id: str,
+        namespace_id: str,
+        importance: int,
+        project_id: str | None = None,
+        content_hash: str | None = None,
+        status: str = "asserted",
+    ) -> dict:
+        """Qdrant payload на диете (D6): только фильтруемые поля, без content."""
+        payload: dict = {
+            "user_id": user_id,
+            "namespace_id": str(namespace_id),
+            "status": status,
+            "importance": importance,
+        }
+        if project_id:
+            payload["project_id"] = str(project_id)
+        if content_hash:
+            payload["content_hash"] = content_hash
+        return payload
 
     # ════════════════════════════════════════════════════════════
     # INSERT
@@ -52,35 +112,38 @@ class MemoryRepository:
         content: str,
         embedding: list[float] | None = None,
         metadata: dict | None = None,
-        namespace: str = "default",
         namespace_id: str | None = None,
         content_hash: str | None = None,
         importance: int = 3,
+        project_id: str | None = None,
+        confidence: float | None = None,
+        frozen: bool = False,
+        supersedes: str | None = None,
     ) -> str:
-        metadata = metadata or {}
-
         memory_id = await self.pg.insert(
             user_id=user_id,
             content=content,
             metadata=metadata,
-            namespace=namespace,
             namespace_id=namespace_id,
             content_hash=content_hash,
             importance=importance,
+            project_id=project_id,
+            confidence=confidence,
+            frozen=frozen,
+            supersedes=supersedes,
         )
 
         if self._has_qdrant() and embedding is not None:
             self.qdrant.upsert_vector(
                 point_id=memory_id,
                 vector=embedding,
-                payload={
-                    "user_id": user_id,
-                    "content": content,
-                    "namespace": namespace,
-                    "metadata": metadata,
-                    "importance": importance,
-                    "content_hash": content_hash,
-                },
+                payload=self._point_payload(
+                    user_id=user_id,
+                    namespace_id=namespace_id or "",
+                    importance=importance,
+                    project_id=project_id,
+                    content_hash=content_hash,
+                ),
             )
 
         return memory_id
@@ -89,9 +152,9 @@ class MemoryRepository:
         self,
         user_ids: list[str],
         contents: list[str],
-        namespaces: list[str],
         namespace_ids: list[str],
         content_hashes: list[str | None],
+        project_ids: list[str | None],
         embeddings: list[list[float]] | list[str] | None = None,
         metadatas: list[dict] | None = None,
         importances: list[int] | None = None,
@@ -102,9 +165,9 @@ class MemoryRepository:
         memory_ids = await self.pg.insert_batch(
             user_ids=user_ids,
             contents=contents,
-            namespaces=namespaces,
             namespace_ids=namespace_ids,
             content_hashes=content_hashes,
+            project_ids=project_ids,
             metadatas=metadatas,
             importances=importances,
         )
@@ -121,14 +184,13 @@ class MemoryRepository:
                     qm.PointStruct(
                         id=mid,
                         vector=emb,
-                        payload={
-                            "user_id": user_ids[i],
-                            "content": contents[i],
-                            "namespace": namespaces[i],
-                            "metadata": metadatas[i] if metadatas else {},
-                            "importance": importances[i],
-                            "content_hash": content_hashes[i],
-                        },
+                        payload=self._point_payload(
+                            user_id=user_ids[i],
+                            namespace_id=namespace_ids[i],
+                            importance=importances[i],
+                            project_id=project_ids[i] if project_ids else None,
+                            content_hash=content_hashes[i] if content_hashes else None,
+                        ),
                     )
                 )
             logger.info("insert_batch: qdrant upsert", extra={
@@ -150,9 +212,16 @@ class MemoryRepository:
         threshold: float = 0.7,
         namespace: str | None = None,
         query_text: str | None = None,
+        project_id: str | None = None,
     ) -> list[SearchResult]:
+        namespace_id = await self._ns_id(namespace)
+        if isinstance(namespace_id, _UnknownNamespace):
+            return []
+
         if self._has_qdrant():
-            search_filter = QdrantStore.build_filter(user_id=user_id, namespace=namespace)
+            search_filter = QdrantStore.build_filter(
+                user_id=user_id, namespace_id=namespace_id, project_id=project_id
+            )
             qdrant_results = self.qdrant.search(
                 query_vector=query_embedding,
                 limit=limit,
@@ -180,6 +249,8 @@ class MemoryRepository:
                             metadata=row["metadata"] or {},
                             importance=row["importance"],
                             score=scores[qid],
+                            project_id=row["project_id"],
+                            status=row["status"],
                         )
                     )
             return results
@@ -189,7 +260,8 @@ class MemoryRepository:
             rows = await self.pg.search_fts(
                 query_text=query_text,
                 user_id=user_id,
-                namespace=namespace,
+                namespace_id=namespace_id,
+                project_id=project_id,
                 limit=limit,
             )
             return [
@@ -199,12 +271,14 @@ class MemoryRepository:
                     metadata=r["metadata"],
                     importance=r["importance"],
                     score=r["score"],
+                    project_id=r.get("project_id"),
+                    status=r.get("status", "asserted"),
                 )
                 for r in rows
             ]
 
     # ════════════════════════════════════════════════════════════
-    # UPDATE
+    # UPDATE / SUPERSESSION
     # ════════════════════════════════════════════════════════════
 
     async def update(
@@ -214,28 +288,45 @@ class MemoryRepository:
         embedding: list[float] | None = None,
         metadata: dict | None = None,
         importance: int | None = None,
+        project_id: str | None = None,
+        confidence: float | None = None,
+        frozen: bool | None = None,
+        supersedes: str | None = None,
     ) -> MemoryRecord | None:
-        row = await self.pg.update(
+        record = await self.pg.update(
             memory_id=memory_id,
             content=content,
             metadata=metadata,
             importance=importance,
+            project_id=project_id,
+            confidence=confidence,
+            frozen=frozen,
+            supersedes=supersedes,
         )
+        if record is None:
+            return None
 
-        if self._has_qdrant() and embedding is not None:
-            self.qdrant.update_vector(point_id=memory_id, vector=embedding)
-            if content is not None:
-                payload: dict = {"content": content}
-                if metadata:
-                    payload.update(metadata)
-                if importance is not None:
-                    payload["importance"] = importance
+        if self._has_qdrant():
+            if embedding is not None:
+                self.qdrant.update_vector(point_id=memory_id, vector=embedding)
+            # content в payload больше нет (D6) — синхронизируем только фильтры
+            payload: dict = {}
+            if importance is not None:
+                payload["importance"] = importance
+            if project_id is not None:
+                payload["project_id"] = str(project_id)
+            if payload:
                 self.qdrant.set_payload(point_id=memory_id, payload=payload)
+            if supersedes is not None:
+                # Замещённая версия уходит из выдачи фильтром status
+                self.qdrant.set_payload(
+                    point_id=supersedes, payload={"status": "superseded"}
+                )
 
-        return row
+        return record
 
     # ════════════════════════════════════════════════════════════
-    # DELETE
+    # DELETE / RETRACT
     # ════════════════════════════════════════════════════════════
 
     async def delete(self, memory_id: str) -> bool:
@@ -249,18 +340,27 @@ class MemoryRepository:
         user_id: str,
         namespace: str | None = None,
     ) -> int:
-        count = await self.pg.forget_soft(user_id, namespace)
+        namespace_id = await self._ns_id(namespace)
+        if isinstance(namespace_id, _UnknownNamespace):
+            return 0
+        count = await self.pg.forget_soft(user_id, namespace_id)
         if self._has_qdrant():
-            search_filter = QdrantStore.build_filter(user_id=user_id, namespace=namespace)
+            # active_only=False: забвение стирает вектора независимо от статуса
+            search_filter = QdrantStore.build_filter(
+                user_id=user_id, namespace_id=namespace_id, active_only=False
+            )
             if search_filter:
                 self.qdrant.delete_by_filter(search_filter)
         return count
 
     async def archive(self, memory_id: str) -> bool:
-        archived = await self.pg.archive(memory_id)
-        if archived and self._has_qdrant():
-            self.qdrant.delete(point_ids=[memory_id])
-        return archived
+        """Отзыв: status='retracted'. Точка остаётся для time-travel, уходит из выдачи."""
+        retracted = await self.pg.archive(memory_id)
+        if retracted and self._has_qdrant():
+            self.qdrant.set_payload(
+                point_id=memory_id, payload={"status": "retracted"}
+            )
+        return retracted
 
     # ════════════════════════════════════════════════════════════
     # READ (delegate to PG)
@@ -275,6 +375,9 @@ class MemoryRepository:
     async def find_by_content_hash(
         self, namespace: str, content_hash: str
     ) -> MemoryRecord | None:
+        namespace_id = await self._ns_id(namespace)
+        if isinstance(namespace_id, _UnknownNamespace):
+            return None
         return await self.pg.find_by_content_hash(namespace, content_hash)
 
     async def list(
@@ -283,19 +386,61 @@ class MemoryRepository:
         namespace: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        project_id: str | None = None,
     ) -> MemoryListResult:
-        return await self.pg.list(user_id=user_id, namespace=namespace, limit=limit, offset=offset)
+        namespace_id = await self._ns_id(namespace)
+        if isinstance(namespace_id, _UnknownNamespace):
+            return MemoryListResult(items=[], total=0)
+        return await self.pg.list(
+            user_id=user_id,
+            namespace_id=namespace_id,
+            project_id=project_id,
+            limit=limit,
+            offset=offset,
+        )
 
     async def recent(
         self,
         namespace: str | None = None,
         since: datetime | None = None,
         limit: int = 20,
+        project_id: str | None = None,
     ) -> list[MemoryRecord]:
-        return await self.pg.recent(namespace=namespace, since=since, limit=limit)
+        namespace_id = await self._ns_id(namespace)
+        if isinstance(namespace_id, _UnknownNamespace):
+            return []
+        return await self.pg.recent(
+            namespace_id=namespace_id,
+            project_id=project_id,
+            since=since,
+            limit=limit,
+        )
 
     async def get_stats(self, user_id: str | None = None) -> list[MemoryStatsItem]:
         return await self.pg.get_stats(user_id)
+
+    # ════════════════════════════════════════════════════════════
+    # PROJECT CONTEXTS («облачко знаний», D9)
+    # ════════════════════════════════════════════════════════════
+
+    async def fetch_project_context(
+        self, project_id: str, limit_per_ns: int = 15
+    ) -> list[dict]:
+        return await self.pg.fetch_project_context(project_id, limit_per_ns)
+
+    async def upsert_project_context(
+        self,
+        project_id: str,
+        content: str | None = None,
+        sections: dict | None = None,
+        granule_count: int = 0,
+    ) -> dict:
+        return await self.pg.upsert_project_context(
+            project_id, content=content, sections=sections, granule_count=granule_count
+        )
+
+    async def get_project_context(self, project_id: str) -> dict | None:
+        return await self.pg.get_project_context(project_id)
 
     # ════════════════════════════════════════════════════════════
     # RELATIONS (delegate to PG)

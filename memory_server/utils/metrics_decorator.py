@@ -4,12 +4,12 @@
 """
 
 import functools
-import logging
 import time
 
+from memory_server.logger import get_logger, request_id_var
 from memory_server.metrics import MCP_TOOL_CALLS_TOTAL, MCP_TOOL_DURATION_SECONDS
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def tool_handler(tool_name: str):
@@ -33,9 +33,15 @@ def tool_handler(tool_name: str):
                 return result
             except Exception as e:
                 duration = time.monotonic() - start
-                logger.error(f"{tool_name}: error", extra={"error": str(e), "duration_ms": round(duration * 1000, 1)})
+                # Не глотаем: полный контекст (request_id + тип ошибки) в лог, затем re-raise
+                logger.error(f"{tool_name}: error", extra={
+                    "request_id": request_id_var.get(),
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "duration_ms": round(duration * 1000, 1),
+                })
                 MCP_TOOL_CALLS_TOTAL.labels(tool=tool_name, status="error").inc()
                 MCP_TOOL_DURATION_SECONDS.labels(tool=tool_name).observe(duration)
-                raise RuntimeError(str(e)) from e
+                raise RuntimeError(f"{tool_name}: {e}") from e
         return wrapper
     return decorator

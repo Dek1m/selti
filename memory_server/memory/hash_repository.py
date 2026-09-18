@@ -47,17 +47,17 @@ class HashRepository:
         self,
         source_type: str | None = None,
         updated_since: datetime | None = None,
-        project: str | None = None,
+        project_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict]:
-        """Список с фильтрами."""
+        """Список с фильтрами. project_id — UUID-строка (резолв slug делает вызываящий)."""
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 q.LIST_RESOURCE_HASHES,
                 source_type,
                 updated_since,
-                project,
+                project_id,
                 limit,
                 offset,
             )

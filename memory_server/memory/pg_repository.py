@@ -1,7 +1,11 @@
 """PostgreSQL-only repository for memory records.
 
-Хранит: метаданные, контент, связи, граф.
+Хранит: метаданные, контент, связи, граф, контексты проектов.
 НЕ хранит вектора — для этого QdrantStore.
+
+Контракт волны 2 (Фаза 0.4): namespace приходит как namespace_id UUID
+(резолв имени → id делает фасад через NamespaceRepository), актуальность
+гранулы = status='asserted' AND valid_to IS NULL.
 """
 from __future__ import annotations
 
@@ -24,10 +28,34 @@ logger = get_logger(__name__)
 
 
 class PostgreSQLRepository:
-    """Data access layer for PostgreSQL — метаданные, связи, граф."""
+    """Data access layer for PostgreSQL — метаданные, связи, граф, контексты."""
 
     def __init__(self, pool: asyncpg.Pool):
         self.pool = pool
+
+    @staticmethod
+    def _to_record(row: asyncpg.Record) -> MemoryRecord:
+        """Row канонической проекции (_MEMORY_COLUMNS) → MemoryRecord."""
+        return MemoryRecord(
+            id=str(row["id"]),
+            user_id=row["user_id"],
+            content=row["content"],
+            metadata=row["metadata"] or {},
+            namespace=row["namespace"],
+            importance=row["importance"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            content_hash=row["content_hash"],
+            project_id=row["project_id"],
+            status=row["status"],
+            valid_from=row["valid_from"],
+            valid_to=row["valid_to"],
+            ingested_at=row["ingested_at"],
+            confidence=row["confidence"],
+            supersedes=row["supersedes"],
+            superseded_by=row["superseded_by"],
+            frozen=row["frozen"],
+        )
 
     # ════════════════════════════════════════════════════════════
     # INSERT
@@ -38,10 +66,13 @@ class PostgreSQLRepository:
         user_id: str,
         content: str,
         metadata: dict | None = None,
-        namespace: str = "default",
         namespace_id: str | None = None,
         content_hash: str | None = None,
         importance: int = 3,
+        project_id: str | None = None,
+        confidence: float | None = None,
+        frozen: bool = False,
+        supersedes: str | None = None,
     ) -> str:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -49,10 +80,13 @@ class PostgreSQLRepository:
                 user_id,
                 content,
                 metadata or {},
-                namespace,
-                namespace_id or "",
+                namespace_id,
                 content_hash,
                 importance,
+                project_id,
+                confidence,
+                frozen,
+                supersedes,
             )
             return str(row["id"])
 
@@ -60,24 +94,22 @@ class PostgreSQLRepository:
         self,
         user_ids: list[str],
         contents: list[str],
-        namespaces: list[str],
         namespace_ids: list[str],
         content_hashes: list[str | None],
+        project_ids: list[str | None],
         metadatas: list[dict] | None = None,
         importances: list[int] | None = None,
     ) -> list[str]:
-        if importances is None:
-            importances = [3] * len(user_ids)
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 q.INSERT_MEMORY_BATCH,
                 user_ids,
                 contents,
                 metadatas or [{}] * len(user_ids),
-                namespaces,
                 namespace_ids,
                 content_hashes,
-                importances,
+                importances or [3] * len(user_ids),
+                project_ids,
             )
             return [str(row["id"]) for row in rows]
 
@@ -89,16 +121,18 @@ class PostgreSQLRepository:
         self,
         query_text: str,
         user_id: str | None = None,
-        namespace: str | None = None,
+        namespace_id: str | None = None,
+        project_id: str | None = None,
         limit: int = 10,
-    ) -> list:
+    ) -> list[dict]:
         """Full-text search fallback — когда Qdrant недоступен."""
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 q.SEARCH_MEMORIES,
                 query_text,
                 user_id,
-                namespace,
+                namespace_id,
+                project_id,
                 limit,
             )
             return [
@@ -106,7 +140,10 @@ class PostgreSQLRepository:
                     "id": str(row["id"]),
                     "content": row["content"],
                     "metadata": row["metadata"] or {},
+                    "namespace": row["namespace"],
                     "importance": row["importance"],
+                    "project_id": row["project_id"],
+                    "status": row["status"],
                     "score": float(row["score"]),
                 }
                 for row in rows
@@ -119,119 +156,62 @@ class PostgreSQLRepository:
     async def get_by_id(self, memory_id: str) -> MemoryRecord | None:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(q.SELECT_MEMORY_BY_ID, memory_id)
-            if row is None:
-                return None
-            return MemoryRecord(
-                id=str(row["id"]),
-                user_id=row["user_id"],
-                content=row["content"],
-                metadata=row["metadata"] or {},
-                namespace=row["namespace"],
-                importance=row["importance"],
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
-                content_hash=row["content_hash"],
-            )
+            return self._to_record(row) if row is not None else None
 
     async def find_by_entity_name(self, entity_name: str) -> MemoryRecord | None:
         """Найти гранулу по entity_name в metadata (fallback для строковых ID)."""
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(q.SELECT_MEMORY_BY_ENTITY_NAME, entity_name)
-            if row is None:
-                return None
-            return MemoryRecord(
-                id=str(row["id"]),
-                user_id=row["user_id"],
-                content=row["content"],
-                metadata=row["metadata"] or {},
-                namespace=row["namespace"],
-                importance=row["importance"],
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
-                content_hash=row["content_hash"],
-            )
+            return self._to_record(row) if row is not None else None
 
     async def find_by_content_hash(
         self, namespace: str, content_hash: str
     ) -> MemoryRecord | None:
+        """Exact-dedup lookup: uid → namespace_id резолвит БД (JOIN по UNIQUE-индексу)."""
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 q.SELECT_MEMORY_BY_CONTENT_HASH, namespace, content_hash
             )
-            if row is None:
-                return None
-            return MemoryRecord(
-                id=str(row["id"]),
-                user_id=row["user_id"],
-                content=row["content"],
-                metadata=row["metadata"] or {},
-                namespace=row["namespace"],
-                importance=row["importance"],
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
-                content_hash=row["content_hash"],
-            )
+            return self._to_record(row) if row is not None else None
 
     async def fetch_by_ids(self, ids: list[str]) -> list[dict]:
-        """Batch fetch metadata по IDs (для Qdrant search results)."""
+        """Batch fetch метаданных по IDs (для Qdrant-выдачи).
+
+        Фильтр актуальности (status/valid_to) применён в SQL — ретрактнутые
+        гранулы не съедают лимит выдачи.
+        """
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                """SELECT id, user_id, content, metadata, namespace, importance,
-                          created_at, updated_at, content_hash
-                   FROM memories
-                   WHERE id = ANY($1::uuid[]) AND is_archived = false""",
-                ids,
-            )
+            rows = await conn.fetch(q.FETCH_MEMORIES_BY_IDS, ids)
             return [dict(row) for row in rows]
 
     async def list(
         self,
         user_id: str | None = None,
-        namespace: str | None = None,
+        namespace_id: str | None = None,
+        project_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> MemoryListResult:
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch(q.LIST_WITH_COUNT, user_id, namespace, limit, offset)
-            items = [
-                MemoryRecord(
-                    id=str(row["id"]),
-                    user_id=row["user_id"],
-                    content=row["content"],
-                    metadata=row["metadata"] or {},
-                    namespace=row["namespace"],
-                    importance=row["importance"],
-                    created_at=row["created_at"],
-                    updated_at=row["updated_at"],
-                    content_hash=row["content_hash"],
-                )
-                for row in rows
-            ]
+            rows = await conn.fetch(
+                q.LIST_MEMORIES, user_id, namespace_id, project_id, limit, offset
+            )
+            items = [self._to_record(row) for row in rows]
             total = rows[0]["total_count"] if rows else 0
             return MemoryListResult(items=items, total=total)
 
     async def recent(
         self,
-        namespace: str | None = None,
+        namespace_id: str | None = None,
+        project_id: str | None = None,
         since: datetime | None = None,
         limit: int = 20,
     ) -> list[MemoryRecord]:
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch(q.RECENT_MEMORIES, namespace, since, limit)
-            return [
-                MemoryRecord(
-                    id=str(row["id"]),
-                    user_id=row["user_id"],
-                    content=row["content"],
-                    metadata=row["metadata"] or {},
-                    namespace=row["namespace"],
-                    importance=row["importance"],
-                    created_at=row["created_at"],
-                    updated_at=row["updated_at"],
-                    content_hash=row["content_hash"],
-                )
-                for row in rows
-            ]
+            rows = await conn.fetch(
+                q.RECENT_MEMORIES, namespace_id, project_id, since, limit
+            )
+            return [self._to_record(row) for row in rows]
 
     async def get_stats(self, user_id: str | None = None) -> list[MemoryStatsItem]:
         async with self.pool.acquire() as conn:
@@ -246,7 +226,7 @@ class PostgreSQLRepository:
             ]
 
     # ════════════════════════════════════════════════════════════
-    # UPDATE
+    # UPDATE / SUPERSESSION
     # ════════════════════════════════════════════════════════════
 
     async def update(
@@ -255,31 +235,37 @@ class PostgreSQLRepository:
         content: str | None = None,
         metadata: dict | None = None,
         importance: int | None = None,
+        project_id: str | None = None,
+        confidence: float | None = None,
+        frozen: bool | None = None,
+        supersedes: str | None = None,
     ) -> MemoryRecord | None:
+        """Обновление гранулы: metadata merge-ится (dict-merge), version бампит триггер БД.
+
+        При передаче supersedes закрывает старую гранулу атомарно (одна транзакция):
+        status='superseded', valid_to=valid_from новой, superseded_by=memory_id.
+        """
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                q.UPDATE_MEMORY,
-                memory_id,
-                content,
-                metadata,
-                importance,
-            )
-        if row is None:
-            return None
-        return MemoryRecord(
-            id=str(row["id"]),
-            user_id=row["user_id"],
-            content=row["content"],
-            metadata=row["metadata"] or {},
-            namespace=row["namespace"],
-            importance=row["importance"],
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-            content_hash=row["content_hash"],
-        )
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    q.UPDATE_MEMORY,
+                    memory_id,
+                    content,
+                    metadata,
+                    importance,
+                    project_id,
+                    confidence,
+                    frozen,
+                    supersedes,
+                )
+                if row is None:
+                    return None
+                if supersedes is not None:
+                    await conn.fetchrow(q.SUPERSEDE_MEMORY, supersedes, memory_id)
+        return self._to_record(row)
 
     # ════════════════════════════════════════════════════════════
-    # DELETE
+    # DELETE / RETRACT
     # ════════════════════════════════════════════════════════════
 
     async def delete(self, memory_id: str) -> bool:
@@ -288,13 +274,49 @@ class PostgreSQLRepository:
             return row is not None
 
     async def archive(self, memory_id: str) -> bool:
+        """Отзыв гранулы: status='retracted', valid_to=now() (бывший is_archived)."""
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(q.ARCHIVE_MEMORY, memory_id)
+            row = await conn.fetchrow(q.RETRACT_MEMORY, memory_id)
             return row is not None
 
-    async def forget_soft(self, user_id: str, namespace: str | None = None) -> int:
+    async def forget_soft(self, user_id: str, namespace_id: str | None = None) -> int:
+        """Мягкое забвение всех гранул пользователя: status='retracted'."""
         async with self.pool.acquire() as conn:
-            return await conn.fetchval(q.MEMORY_FORGET_SOFT, user_id, namespace)
+            return await conn.fetchval(q.FORGET_MEMORIES, user_id, namespace_id)
+
+    # ════════════════════════════════════════════════════════════
+    # PROJECT CONTEXTS («облачко знаний», D9)
+    # ════════════════════════════════════════════════════════════
+
+    async def fetch_project_context(
+        self, project_id: str, limit_per_ns: int = 15
+    ) -> list[dict]:
+        """Топ-гранулы проекта с квотами per namespace (хранимка 019)."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(q.FETCH_PROJECT_CONTEXT, project_id, limit_per_ns)
+            return [dict(row) for row in rows]
+
+    async def upsert_project_context(
+        self,
+        project_id: str,
+        content: str | None = None,
+        sections: dict | None = None,
+        granule_count: int = 0,
+    ) -> dict:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                q.UPSERT_PROJECT_CONTEXT,
+                project_id,
+                content,
+                sections or {},
+                granule_count,
+            )
+            return dict(row)
+
+    async def get_project_context(self, project_id: str) -> dict | None:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(q.SELECT_PROJECT_CONTEXT, project_id)
+            return dict(row) if row is not None else None
 
     # ════════════════════════════════════════════════════════════
     # RELATIONS
@@ -328,40 +350,14 @@ class PostgreSQLRepository:
     ) -> list[Relation]:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(q.SELECT_RELATIONS_BY_SOURCE, source_id, link_type)
-            return [
-                Relation(
-                    id=str(row["id"]),
-                    source_id=str(row["source_id"]),
-                    target_id=str(row["target_id"]) if row["target_id"] else None,
-                    target_name=row["target_name"],
-                    link_type=row["link_type"],
-                    description=row["description"],
-                    weight=float(row["weight"]),
-                    metadata=row["metadata"] or {},
-                    created_at=row["created_at"],
-                )
-                for row in rows
-            ]
+            return [self._to_relation(row) for row in rows]
 
     async def get_relations_by_target(
         self, target_id: str, link_type: str | None = None
     ) -> list[Relation]:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(q.SELECT_RELATIONS_BY_TARGET, target_id, link_type)
-            return [
-                Relation(
-                    id=str(row["id"]),
-                    source_id=str(row["source_id"]),
-                    target_id=str(row["target_id"]) if row["target_id"] else None,
-                    target_name=row["target_name"],
-                    link_type=row["link_type"],
-                    description=row["description"],
-                    weight=float(row["weight"]),
-                    metadata=row["metadata"] or {},
-                    created_at=row["created_at"],
-                )
-                for row in rows
-            ]
+            return [self._to_relation(row) for row in rows]
 
     async def get_relations(
         self, memory_id: str, link_type: str | None = None
@@ -372,17 +368,7 @@ class PostgreSQLRepository:
         outgoing: list[Relation] = []
         incoming: list[Relation] = []
         for row in rows:
-            rel = Relation(
-                id=str(row["id"]),
-                source_id=str(row["source_id"]),
-                target_id=str(row["target_id"]) if row["target_id"] else None,
-                target_name=row["target_name"],
-                link_type=row["link_type"],
-                description=row["description"],
-                weight=float(row["weight"]),
-                metadata=row["metadata"] or {},
-                created_at=row["created_at"],
-            )
+            rel = self._to_relation(row)
             if row["direction"] == "outgoing":
                 outgoing.append(rel)
             else:
@@ -408,20 +394,21 @@ class PostgreSQLRepository:
     ) -> list[Relation]:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(q.FIND_RELATIONS_BETWEEN, source_id, target_id)
-            return [
-                Relation(
-                    id=str(row["id"]),
-                    source_id=str(row["source_id"]),
-                    target_id=str(row["target_id"]) if row["target_id"] else None,
-                    target_name=row["target_name"],
-                    link_type=row["link_type"],
-                    description=row["description"],
-                    weight=float(row["weight"]),
-                    metadata=row["metadata"] or {},
-                    created_at=row["created_at"],
-                )
-                for row in rows
-            ]
+            return [self._to_relation(row) for row in rows]
+
+    @staticmethod
+    def _to_relation(row: asyncpg.Record) -> Relation:
+        return Relation(
+            id=str(row["id"]),
+            source_id=str(row["source_id"]),
+            target_id=str(row["target_id"]) if row["target_id"] else None,
+            target_name=row["target_name"],
+            link_type=row["link_type"],
+            description=row["description"],
+            weight=float(row["weight"]),
+            metadata=row["metadata"] or {},
+            created_at=row["created_at"],
+        )
 
     # ════════════════════════════════════════════════════════════
     # GRAPH

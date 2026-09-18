@@ -52,7 +52,10 @@ class MemoryRepositoryProtocol(Protocol):
     """Контракт для хранилища гранул памяти.
 
     Объединяет PostgreSQL (метаданные) + Qdrant (вектора).
-    Методы разделены на: INSERT, SEARCH, UPDATE, DELETE, READ, RELATIONS, GRAPH.
+    Методы разделены на: INSERT, SEARCH, UPDATE, DELETE, READ, CONTEXT, RELATIONS, GRAPH.
+
+    Семантика статусов (миграция 018, D3): актуальность гранулы =
+    status='asserted' AND valid_to IS NULL; отзыв = status='retracted'.
     """
 
     # ── INSERT ──
@@ -63,21 +66,24 @@ class MemoryRepositoryProtocol(Protocol):
         content: str,
         embedding: list[float] | None = None,
         metadata: dict | None = None,
-        namespace: str = "default",
         namespace_id: str | None = None,
         content_hash: str | None = None,
         importance: int = 3,
+        project_id: str | None = None,
+        confidence: float | None = None,
+        frozen: bool = False,
+        supersedes: str | None = None,
     ) -> str:
-        """Создать новую запись. Возвращает ID."""
+        """Создать новую гранулу. Возвращает ID."""
         ...
 
     async def insert_batch(
         self,
         user_ids: list[str],
         contents: list[str],
-        namespaces: list[str],
         namespace_ids: list[str],
         content_hashes: list[str | None],
+        project_ids: list[str | None],
         embeddings: list[list[float]] | list[str] | None = None,
         metadatas: list[dict] | None = None,
         importances: list[int] | None = None,
@@ -95,6 +101,7 @@ class MemoryRepositoryProtocol(Protocol):
         threshold: float = 0.7,
         namespace: str | None = None,
         query_text: str | None = None,
+        project_id: str | None = None,
     ) -> list[SearchResult]:
         """Векторный поиск по embedding. Если Qdrant недоступен — SQL FTS fallback."""
         ...
@@ -108,8 +115,12 @@ class MemoryRepositoryProtocol(Protocol):
         embedding: list[float] | None = None,
         metadata: dict | None = None,
         importance: int | None = None,
+        project_id: str | None = None,
+        confidence: float | None = None,
+        frozen: bool | None = None,
+        supersedes: str | None = None,
     ) -> MemoryRecord | None:
-        """Обновить запись. Если content изменился + Qdrant — обновляем и вектор."""
+        """Обновить гранулу (metadata merge-ится). supersedes — закрыть старую версию."""
         ...
 
     # ── DELETE ──
@@ -123,23 +134,23 @@ class MemoryRepositoryProtocol(Protocol):
         user_id: str,
         namespace: str | None = None,
     ) -> int:
-        """Soft delete: установить is_archived = true. Qdrant — hard delete."""
+        """Мягкое забвение: status='retracted', valid_to=now(). Qdrant — hard delete."""
         ...
 
     async def archive(self, memory_id: str) -> bool:
-        """Мягкое удаление: установить is_archived = true."""
+        """Отзыв гранулы: status='retracted', valid_to=now()."""
         ...
 
     # ── READ ──
 
     async def get_by_id(self, memory_id: str) -> MemoryRecord | None:
-        """Получить запись по ID."""
+        """Получить запись по ID (любого статуса — для истории/восстановления)."""
         ...
 
     async def find_by_content_hash(
         self, namespace: str, content_hash: str
     ) -> MemoryRecord | None:
-        """Найти запись по content_hash в namespace."""
+        """Найти актуальную запись по content_hash в namespace (exact-dedup)."""
         ...
 
     async def list(
@@ -148,8 +159,9 @@ class MemoryRepositoryProtocol(Protocol):
         namespace: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        project_id: str | None = None,
     ) -> MemoryListResult:
-        """Список memories с общим счётчиком."""
+        """Список актуальных гранул с общим счётчиком."""
         ...
 
     async def recent(
@@ -157,12 +169,35 @@ class MemoryRepositoryProtocol(Protocol):
         namespace: str | None = None,
         since: datetime | None = None,
         limit: int = 20,
+        project_id: str | None = None,
     ) -> list[MemoryRecord]:
-        """Последние записи по времени."""
+        """Последние актуальные записи по времени."""
         ...
 
     async def get_stats(self, user_id: str | None = None) -> list[MemoryStatsItem]:
-        """Статистика по namespace."""
+        """Статистика по namespace (только актуальные гранулы)."""
+        ...
+
+    # ── PROJECT CONTEXTS («облачко знаний», D9) ──
+
+    async def fetch_project_context(
+        self, project_id: str, limit_per_ns: int = 15
+    ) -> list[dict]:
+        """Топ-гранулы проекта с квотами per namespace (хранимка 019)."""
+        ...
+
+    async def upsert_project_context(
+        self,
+        project_id: str,
+        content: str | None = None,
+        sections: dict | None = None,
+        granule_count: int = 0,
+    ) -> dict:
+        """Сохранить/обновить снапшот контекста проекта."""
+        ...
+
+    async def get_project_context(self, project_id: str) -> dict | None:
+        """Прочитать снапшот контекста проекта (None — ещё не построен)."""
         ...
 
     # ── RELATIONS ──

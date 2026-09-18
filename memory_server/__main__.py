@@ -10,7 +10,6 @@ from prometheus_client import generate_latest, REGISTRY, multiprocess, Collector
 from starlette.types import ASGIApp, Scope, Receive, Send
 
 from memory_server.config import settings
-from memory_server.db.pool import create_pool, close_pool
 from memory_server.metrics import (
     HTTP_REQUESTS_TOTAL,
     HTTP_REQUEST_DURATION,
@@ -18,6 +17,7 @@ from memory_server.metrics import (
     HEALTH_CHECKS_TOTAL,
 )
 from memory_server.server import mcp, request_id_var
+from memory_server.state import get_state
 
 # Lazy import Celery app — может быть не установлен при первом запуске
 _celery_app = None
@@ -65,20 +65,15 @@ mcp_http_app = mcp.http_app(path="/", stateless_http=True)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifespan: pool + MCP sub-app.
+    """Lifespan: SeltiState (pool для health) + MCP sub-app session manager.
 
-    Создаёт asyncpg pool для health check'ов и прочих sync-free операций.
-    MCP lifespan управляет session_manager.
+    Все зависимости процесса — в SeltiState (state.py): pool, Redis, Qdrant,
+    сервисы. MCP tools работают через Celery (task_bridge.py), web-процессу
+    из инфраструктуры нужен только pool для health-проверок.
     """
-    # Создаём пул для FastAPI process (отдельно от Celery workers)
-    pool = None
+    state = get_state()
     try:
-        pool = await create_pool(
-            dsn=settings.database_url,
-            min_size=settings.db_min_connections,
-            max_size=min(settings.db_max_connections, 4),
-        )
-        app.state.pool = pool
+        app.state.pool = await state.get_pool()
     except Exception:
         app.state.pool = None
 
@@ -86,8 +81,7 @@ async def lifespan(app: FastAPI):
         try:
             yield
         finally:
-            if pool is not None:
-                await close_pool(pool)
+            await state.aclose()
 
 
 app = FastAPI(lifespan=lifespan, title=settings.mcp_server_name)
@@ -162,13 +156,11 @@ async def health():
         checks["postgres"] = f"error: {e}"
         HEALTH_STATUS.labels(check="postgres").set(0)
 
-    # Redis — ping через async redis client
+    # Redis — ping через singleton-клиент из SeltiState
     HEALTH_CHECKS_TOTAL.labels(check="redis").inc()
     try:
-        import redis.asyncio as aioredis
-        r = aioredis.from_url(settings.redis_url, decode_responses=True)
-        await asyncio.wait_for(r.ping(), timeout=3)
-        await r.aclose()
+        redis_client = await get_state().get_redis()
+        await asyncio.wait_for(redis_client.ping(), timeout=3)
         checks["redis"] = "ok"
         HEALTH_STATUS.labels(check="redis").set(1)
     except asyncio.TimeoutError:
@@ -257,7 +249,7 @@ app.mount("/mcp/", AuthASGIMiddleware(mcp_http_app))
 
 
 if __name__ == "__main__":
-    from memory_server.logging_config import LOGGING_CONFIG
+    from memory_server.tasks.logging_config import UVICORN_LOG_CONFIG
 
     uvicorn.run(
         "memory_server.__main__:app",
@@ -269,5 +261,5 @@ if __name__ == "__main__":
         timeout_graceful_shutdown=30,
         backlog=2048,
         access_log=False,
-        log_config=LOGGING_CONFIG,
+        log_config=UVICORN_LOG_CONFIG,
     )

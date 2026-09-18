@@ -14,9 +14,9 @@ from typing import Any
 
 from celery import shared_task
 
+from memory_server.state import get_state
 from memory_server.tasks.async_bridge import run_async
 from memory_server.tasks.base import SeltiTask
-from memory_server.tasks.connections import get_pool, get_qdrant, get_embedding
 from memory_server.tasks.errors import ValidationError
 
 logger = logging.getLogger(__name__)
@@ -25,39 +25,15 @@ _service: Any | None = None
 
 
 def _get_service():
-    """Get MemoryService with worker-scoped connections (Qdrant primary + SQL fallback).
+    """Get MemoryService via process-wide SeltiState (composition root).
 
-    Singleton: created once per worker process, reused across all tasks.
-    MemoryService and repositories are stateless — safe to share.
-    NamespaceRepository._cache has TTL (step 3.5) — works correctly with reuse.
+    Singleton на модуль: сборка один раз, дальше мгновенный возврат инстанса.
+    MemoryService и репозитории stateless — безопасно шарить между задачами;
+    TTL-кеш NamespaceRepository корректно живёт с переиспользованием.
     """
     global _service
-    if _service is not None:
-        return _service
-
-    from memory_server.memory.repository import MemoryRepository
-    from memory_server.memory.pg_repository import PostgreSQLRepository
-    from memory_server.memory.qdrant_store import QdrantStore
-    from memory_server.memory.namespace_repository import NamespaceRepository
-    from memory_server.memory.dedup import DedupEngine
-    from memory_server.memory.service import MemoryService
-    from memory_server.config import settings
-
-    pool = get_pool()
-    qdrant_client = get_qdrant()
-
-    pg = PostgreSQLRepository(pool)
-    qdrant = QdrantStore(qdrant_client, collection=settings.qdrant_collection) if qdrant_client else None
-    repository = MemoryRepository(pg=pg, qdrant=qdrant)
-    ns_repo = NamespaceRepository(pool)
-    embedding = get_embedding()
-    dedup = DedupEngine(repository, embedding, settings)
-    _service = MemoryService(
-        repository=repository,
-        embedding_provider=embedding,
-        namespace_repository=ns_repo,
-        config=settings,
-    )
+    if _service is None:
+        _service = run_async(get_state().get_memory_service)
     return _service
 
 
@@ -87,6 +63,7 @@ def store_memory(
     metadata: dict | None = None,
     namespace: str | None = None,
     importance: int | None = None,
+    project_id: str | None = None,
 ) -> dict[str, Any]:
     """Store a new memory record with deduplication."""
     if not content or not content.strip():
@@ -102,6 +79,7 @@ def store_memory(
         metadata=metadata,
         namespace=namespace,
         importance=importance,
+        project_id=project_id,
     )
     result = record.model_dump(mode="json")
     result["_dedup_action"] = action.value
@@ -162,8 +140,13 @@ def update_memory(
     content: str | None = None,
     metadata: dict | None = None,
     importance: int | None = None,
+    project_id: str | None = None,
+    supersedes: str | None = None,
 ) -> dict[str, Any]:
-    """Update an existing memory record."""
+    """Update an existing memory record.
+
+    supersedes: ID замещаемой версии — старая закрывается (status='superseded').
+    """
     if not memory_id or not memory_id.strip():
         raise ValidationError("memory_id cannot be empty")
 
@@ -174,6 +157,8 @@ def update_memory(
         content=content,
         metadata=metadata,
         importance=importance,
+        project_id=project_id,
+        supersedes=supersedes,
     )
     return record.model_dump(mode="json")
 
@@ -233,6 +218,7 @@ def search_memories(
     limit: int = 10,
     threshold: float = 0.7,
     namespace: str | None = None,
+    project_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Search memories by semantic similarity."""
     if not query or not query.strip():
@@ -246,6 +232,7 @@ def search_memories(
         limit=limit,
         threshold=threshold,
         namespace=namespace,
+        project_id=project_id,
     )
     return [r.model_dump(mode="json") for r in results]
 
@@ -275,6 +262,7 @@ def list_memories(
     namespace: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    project_id: str | None = None,
 ) -> dict[str, Any]:
     """List memory records with pagination."""
     service = _get_service()
@@ -284,6 +272,7 @@ def list_memories(
         namespace=namespace,
         limit=limit,
         offset=offset,
+        project_id=project_id,
     )
     return {
         "items": [r.model_dump(mode="json") for r in result.items],
@@ -315,6 +304,7 @@ def get_recent(
     namespace: str | None = None,
     since: str | None = None,
     limit: int = 20,
+    project_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Get recent memory records."""
     since_dt = datetime.fromisoformat(since) if since else None
@@ -324,6 +314,7 @@ def get_recent(
         namespace=namespace,
         since=since_dt,
         limit=limit,
+        project_id=project_id,
     )
     return [r.model_dump(mode="json") for r in results]
 
@@ -409,6 +400,7 @@ def find_similar(
     limit: int = 10,
     threshold: float = 0.7,
     namespace: str | None = None,
+    project_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Find semantically similar memories without storing."""
     if not content or not content.strip():
@@ -422,6 +414,7 @@ def find_similar(
         limit=limit,
         threshold=threshold,
         namespace=namespace,
+        project_id=project_id,
     )
     return [r.model_dump(mode="json") for r in results]
 
@@ -557,8 +550,9 @@ def ingest_batch(
     self,
     entries: list[dict],
     user_id: str,
+    project_id: str | None = None,
 ) -> dict[str, Any]:
-    """Store multiple memory records in batch."""
+    """Store multiple memory records in batch (project_id — один на весь батч)."""
     if not entries:
         raise ValidationError("entries cannot be empty")
     if not user_id or not user_id.strip():
@@ -615,50 +609,39 @@ def ingest_batch(
         ]
 
         if texts_to_embed:
-            embedding = get_embedding()
-            embeddings = run_async(embedding.embed_many, texts_to_embed)
+            embeddings = run_async(service.embedding.embed_many, texts_to_embed)
             for idx, emb in zip(indices_to_embed, embeddings):
                 to_insert[idx]["embedding"] = emb
 
-        # Resolve namespace_ids
+        # Resolve namespace ids + project id
         ns_names = [item["namespace"] for item in to_insert]
         ns_records = [
             run_async(service.ns_repo.get_or_create, ns) for ns in ns_names
         ]
         namespace_ids = [ns_record.id for ns_record in ns_records]
+        resolved_project = run_async(service.resolve_project, project_id)
+        project_ids = [resolved_project] * len(to_insert)
 
         # Batch insert
-        if to_insert:
-            emb_list = [item["embedding"] for item in to_insert]
-            emb_types = [type(e).__name__ for e in emb_list]
-            emb_sizes = [len(e) if isinstance(e, list) else -1 for e in emb_list]
-            logger.info(
-                "ingest_batch: before insert_batch",
-                extra={
-                    "count": len(to_insert),
-                    "embedding_types": emb_types[:3],
-                    "embedding_sizes": emb_sizes[:3],
-                    "has_qdrant": service.repository._has_qdrant(),
-                },
-            )
-            ids = run_async(
-                service.repository.insert_batch,
-                user_ids=[user_id] * len(to_insert),
-                contents=[item["content"] for item in to_insert],
-                embeddings=emb_list,
-                metadatas=[item["metadata"] for item in to_insert],
-                namespaces=[item["namespace"] for item in to_insert],
-                namespace_ids=namespace_ids,
-                content_hashes=[item["content_hash"] for item in to_insert],
-                importances=[item["importance"] for item in to_insert],
-            )
-            for rid, item in zip(ids, to_insert):
-                summary["insert"] += 1
-                results.append({
-                    "id": rid,
-                    "action": "insert",
-                    "namespace": item["namespace"],
-                })
+        emb_list = [item["embedding"] for item in to_insert]
+        ids = run_async(
+            service.repository.insert_batch,
+            user_ids=[user_id] * len(to_insert),
+            contents=[item["content"] for item in to_insert],
+            embeddings=emb_list,
+            metadatas=[item["metadata"] for item in to_insert],
+            namespace_ids=namespace_ids,
+            content_hashes=[item["content_hash"] for item in to_insert],
+            project_ids=project_ids,
+            importances=[item["importance"] for item in to_insert],
+        )
+        for rid, item in zip(ids, to_insert):
+            summary["insert"] += 1
+            results.append({
+                "id": rid,
+                "action": "insert",
+                "namespace": item["namespace"],
+            })
 
     # Sync links
     all_ids = [r["id"] for r in results if r["id"]]
@@ -762,6 +745,7 @@ def add_relation(
     description: str | None = None,
     weight: float = 1.0,
     metadata: dict | None = None,
+    project_id: str | None = None,
 ) -> dict[str, Any]:
     """Create a relation between two granules."""
     if not source_id or not source_id.strip():
@@ -777,6 +761,7 @@ def add_relation(
         description=description,
         weight=weight,
         metadata=metadata,
+        project_id=project_id,
     )
     return {"ok": True, "relation_id": rel_id}
 

@@ -60,7 +60,8 @@ def run_async(coro_func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
 def close_worker_loop() -> None:
     """Закрыть persistent event loop при shutdown worker process.
 
-    Вызывается из connections.close_all() после закрытия всех ресурсов.
+    Вызывается в worker_process_shutdown после SeltiState.aclose():
+    сначала закрываем async-ресурсы на loop, затем сам loop.
     """
     global _worker_loop
     if _worker_loop is not None and not _worker_loop.is_closed():

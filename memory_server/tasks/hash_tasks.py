@@ -13,20 +13,17 @@ from typing import Any
 
 from celery import shared_task
 
+from memory_server.state import get_state
 from memory_server.tasks.async_bridge import run_async
 from memory_server.tasks.base import SeltiTask
-from memory_server.tasks.connections import get_pool
 from memory_server.tasks.errors import HashTaskError, ValidationError
 
 logger = logging.getLogger(__name__)
 
 
 def _get_hash_repo():
-    """Get HashRepository with worker-scoped pool."""
-    from memory_server.memory.hash_repository import HashRepository
-
-    pool = get_pool()
-    return HashRepository(pool)
+    """Get HashRepository via process-wide SeltiState (composition root)."""
+    return run_async(get_state().get_hash_repository)
 
 
 # ── Upsert ──────────────────────────────────────────────────────
@@ -172,16 +169,25 @@ def list_hashes(
     limit: int = 50,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
-    """List stored hashes with filters."""
+    """List stored hashes with filters.
+
+    project: slug или UUID — резолвится в project_id (единый формат с
+    memories), фильтр по metadata->>'project_id'.
+    """
     since = datetime.fromisoformat(updated_since) if updated_since else None
     limit = min(limit, 500)
+
+    project_id = None
+    if project:
+        state = get_state()
+        project_id = run_async(state.get_project_repository().resolve_id, project)
 
     repo = _get_hash_repo()
     return run_async(
         repo.list,
         source_type=source_type,
         updated_since=since,
-        project=project,
+        project_id=project_id,
         limit=limit,
         offset=offset,
     )

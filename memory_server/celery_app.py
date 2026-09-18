@@ -128,13 +128,13 @@ try:
 except ImportError:
     logger.warning("Celery signals not available")
 
-# Подключаем signals lifecycle для connection singletons (от Норы)
+# Подключаем lifecycle воркера: прогрев/aclose SeltiState (composition root)
 try:
-    from memory_server.tasks.connections import setup_connection_signals
-    setup_connection_signals(app)
-    logger.info("Connection lifecycle signals connected")
+    from memory_server.state import setup_worker_signals
+    setup_worker_signals(app)
+    logger.info("Worker lifecycle signals connected (SeltiState)")
 except ImportError:
-    logger.warning("Connection signals not available")
+    logger.warning("Worker lifecycle signals not available")
 
 logger.info(
     "Celery app created",
