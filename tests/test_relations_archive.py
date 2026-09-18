@@ -217,9 +217,9 @@ class TestBatchInsert:
             contents=["text1", "text2"],
             embeddings=[[0.1, 0.2], [0.3, 0.4]],
             metadatas=[{"k": "v"}, {}],
-            namespaces=["ns1", "ns2"],
             namespace_ids=["ns1-uuid", "ns2-uuid"],
             content_hashes=[None, None],
+            project_ids=[None, None],
         )
 
         assert result == ["id1", "id2"]

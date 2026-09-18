@@ -156,13 +156,17 @@ def mock_embedding():
 
 @pytest.fixture(autouse=True)
 def patch_service(mock_memory_service, mock_embedding):
-    """Patch _get_service to return our mock for all task tests."""
+    """Patch _get_service to return our mock for all task tests.
+
+    Волна 2 (SeltiState): embedding-провайдер и резолв project живут внутри
+    service (service.embedding / service.resolve_project), а не отдельными
+    функциями get_embedding в memory_tasks — пaтчим атрибуты сервиса.
+    """
+    mock_memory_service.embedding = mock_embedding
+    mock_memory_service.resolve_project = AsyncMock(side_effect=lambda pid: pid)
     with patch(
         "memory_server.tasks.memory_tasks._get_service",
         return_value=mock_memory_service,
-    ), patch(
-        "memory_server.tasks.memory_tasks.get_embedding",
-        return_value=mock_embedding,
     ), patch(
         "memory_server.tasks.hash_tasks._get_hash_repo",
     ) as mock_hash_repo:

@@ -64,11 +64,43 @@ if not hasattr(_cb_mod.CircuitBreaker, "add_state_change_listener"):
 
 import pytest
 
+from datetime import datetime, timezone
+
 from memory_server.config import Settings
 from memory_server.memory.namespace_repository import NamespaceRepository
 from memory_server.memory.repository import MemoryRepository
 from memory_server.memory.pg_repository import PostgreSQLRepository
 from memory_server.memory.service import MemoryService
+
+
+def memory_row(**overrides) -> dict:
+    """Полная каноническая строка memories — мок asyncpg.Record из SQL-проекции.
+
+    Соответствует _MEMORY_COLUMNS (db/queries.py): все новые колонки 018.
+    """
+    now = datetime.now(timezone.utc)
+    row = {
+        "id": "00000000-0000-0000-0000-000000000001",
+        "user_id": "u1",
+        "content": "data",
+        "metadata": {},
+        "namespace": "default",
+        "importance": 3,
+        "created_at": now,
+        "updated_at": now,
+        "content_hash": None,
+        "project_id": None,
+        "status": "asserted",
+        "confidence": 1.0,
+        "valid_from": now,
+        "valid_to": None,
+        "ingested_at": now,
+        "supersedes": None,
+        "superseded_by": None,
+        "frozen": False,
+    }
+    row.update(overrides)
+    return row
 
 
 # ── Celery fixtures ─────────────────────────────────────────────
@@ -108,14 +140,54 @@ def mock_pool():
     acm.__aexit__.return_value = None
 
     pool.acquire.return_value = acm
+
+    # asyncpg.Connection.transaction() — обычный (не-корутиновый) метод,
+    # возвращающий асинхронный контекстный менеджер. Нужен update()
+    # (атомарность supersession, pg_repository.py → async with conn.transaction()).
+    txn = AsyncMock()
+    txn.__aenter__.return_value = conn
+    txn.__aexit__.return_value = None
+    conn.transaction = MagicMock(return_value=txn)
+
     return pool
 
 
 @pytest.fixture
-def mock_repository(mock_pool):
+def mock_ns_resolver(mock_pool):
+    """NamespaceRepository с мок-резолвом uid → фиксированный namespace_id UUID."""
+    from memory_server.memory.namespace_repository import NamespaceRecord
+
+    ns_repo = NamespaceRepository(pool=mock_pool)
+
+    async def mock_get_by_uid(uid: str):
+        rec = NamespaceRecord(
+            id="00000000-0000-0000-0000-0000000000aa",
+            uid=uid,
+            name=uid,
+            description="",
+        )
+        ns_repo._cache[uid] = rec
+        return rec
+
+    ns_repo.get_by_uid = mock_get_by_uid
+    return ns_repo
+
+
+@pytest.fixture
+def mock_project_repository():
+    """ProjectRepository-мок: резолв passthrough (slug/UUID → то же значение)."""
+    from unittest.mock import AsyncMock
+
+    project_repo = MagicMock()
+    project_repo.resolve_id = AsyncMock(side_effect=lambda key: key)
+    return project_repo
+
+
+@pytest.fixture
+def mock_repository(mock_pool, mock_ns_resolver):
     """Fixture that returns a MemoryRepository backed by a mock pool."""
     pg = PostgreSQLRepository(pool=mock_pool)
-    repo = MemoryRepository(pg=pg)
+    repo = MemoryRepository(pg=pg, ns_repo=mock_ns_resolver)
     return repo
 
 
@@ -165,13 +237,14 @@ def mock_namespace_repository(mock_pool):
 
 
 @pytest.fixture
-def mock_service(mock_repository, mock_embedding_provider, mock_namespace_repository):
+def mock_service(mock_repository, mock_embedding_provider, mock_namespace_repository, mock_project_repository):
     """Fixture that returns a MemoryService with mocked deps."""
     service = MemoryService(
         repository=mock_repository,
         embedding_provider=mock_embedding_provider,
         namespace_repository=mock_namespace_repository,
         config=Settings(dedup_enabled=False),
+        project_repository=mock_project_repository,
     )
     return service
 

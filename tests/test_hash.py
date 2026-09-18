@@ -141,7 +141,7 @@ class TestHashRepository:
         ])
 
         repo = HashRepository(pool)
-        result = await repo.list(project="akame")
+        result = await repo.list(project_id="akame")
 
         assert len(result) == 1
         assert result[0]["metadata"]["project_id"] == "akame"

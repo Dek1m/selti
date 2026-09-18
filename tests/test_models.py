@@ -103,7 +103,15 @@ def test_search_result_create():
 def test_search_result_serialization():
     sr = SearchResult(id="s1", content="text", metadata={"k": "v"}, score=0.8)
     dumped = sr.model_dump(mode="json")
-    assert dumped == {"id": "s1", "content": "text", "metadata": {"k": "v"}, "importance": 3, "score": 0.8}
+    assert dumped == {
+        "id": "s1",
+        "content": "text",
+        "metadata": {"k": "v"},
+        "importance": 3,
+        "score": 0.8,
+        "project_id": None,
+        "status": "asserted",
+    }
 
 
 def test_memory_list_result():

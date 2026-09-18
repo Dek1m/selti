@@ -1,18 +1,21 @@
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
 
 from memory_server.db import queries as q
-from memory_server.memory.repository import MemoryRepository
 from memory_server.memory.pg_repository import PostgreSQLRepository
+from memory_server.memory.repository import MemoryRepository
 from memory_server.models import MemoryListResult, MemoryRecord, SearchResult
+from tests.conftest import memory_row
+
+# Фиксированный namespace_id из mock_ns_resolver (conftest)
+NS_ID = "00000000-0000-0000-0000-0000000000aa"
 
 
 @pytest.fixture
-def repo(mock_pool):
+def repo(mock_pool, mock_ns_resolver):
     pg = PostgreSQLRepository(pool=mock_pool)
-    return MemoryRepository(pg=pg)
+    return MemoryRepository(pg=pg, ns_repo=mock_ns_resolver)
 
 
 @pytest.fixture
@@ -31,8 +34,8 @@ class TestInsert:
             content="Hello",
             embedding=[0.1, 0.2, 0.3],
             metadata={"source": "test"},
-            namespace="ns1",
             namespace_id="ns1-uuid-456",
+            project_id="11111111-1111-1111-1111-111111111111",
         )
 
         assert result == "new-uuid-123"
@@ -41,29 +44,25 @@ class TestInsert:
             "u1",
             "Hello",
             {"source": "test"},
-            "ns1",
             "ns1-uuid-456",
             None,
             3,
+            "11111111-1111-1111-1111-111111111111",
+            None,
+            False,
+            None,
         )
 
 
 class TestGetById:
     @pytest.mark.asyncio
     async def test_get_by_id_found(self, repo, conn):
-        now = datetime.now(timezone.utc)
         conn.fetchrow = AsyncMock(
-            return_value={
-                "id": "550e8400-e29b-41d4-a716-446655440000",
-                "user_id": "u1",
-                "content": "data",
-                "metadata": {"k": "v"},
-                "namespace": "default",
-                "importance": 3,
-                "created_at": now,
-                "updated_at": now,
-                "content_hash": None,
-            }
+            return_value=memory_row(
+                id="550e8400-e29b-41d4-a716-446655440000",
+                metadata={"k": "v"},
+                content="data",
+            )
         )
 
         record = await repo.get_by_id("550e8400-e29b-41d4-a716-446655440000")
@@ -71,6 +70,7 @@ class TestGetById:
         assert isinstance(record, MemoryRecord)
         assert record.id == "550e8400-e29b-41d4-a716-446655440000"
         assert record.content == "data"
+        assert record.status == "asserted"
         conn.fetchrow.assert_awaited_once_with(
             q.SELECT_MEMORY_BY_ID,
             "550e8400-e29b-41d4-a716-446655440000",
@@ -85,20 +85,7 @@ class TestGetById:
 
     @pytest.mark.asyncio
     async def test_get_by_id_null_metadata(self, repo, conn):
-        now = datetime.now(timezone.utc)
-        conn.fetchrow = AsyncMock(
-            return_value={
-                "id": "id-1",
-                "user_id": "u1",
-                "content": "c",
-                "metadata": None,
-                "namespace": "default",
-                "importance": 3,
-                "created_at": now,
-                "updated_at": now,
-                "content_hash": None,
-            }
-        )
+        conn.fetchrow = AsyncMock(return_value=memory_row(metadata=None))
 
         record = await repo.get_by_id("id-1")
         assert record is not None
@@ -114,15 +101,21 @@ class TestSearch:
                     "id": "1",
                     "content": "result a",
                     "metadata": {"score": 0.95},
+                    "namespace": "ns",
                     "importance": 4,
                     "score": 0.95,
+                    "project_id": None,
+                    "status": "asserted",
                 },
                 {
                     "id": "2",
                     "content": "result b",
                     "metadata": {},
+                    "namespace": "ns",
                     "importance": 2,
                     "score": 0.87,
+                    "project_id": None,
+                    "status": "asserted",
                 },
             ]
         )
@@ -144,7 +137,8 @@ class TestSearch:
             q.SEARCH_MEMORIES,
             "search query",
             "u1",
-            "ns",
+            NS_ID,
+            None,
             10,
         )
 
@@ -166,6 +160,7 @@ class TestSearch:
             "search query",
             "u1",
             None,
+            None,
             5,
         )
 
@@ -180,23 +175,26 @@ class TestSearch:
         )
         assert results == []
 
+    @pytest.mark.asyncio
+    async def test_search_unknown_namespace_returns_empty(self, repo, mock_ns_resolver):
+        """Незарегистрированный uid → пустой результат без SQL."""
+        async def missing(uid):
+            return None
+
+        mock_ns_resolver.get_by_uid = missing
+        results = await repo.search(
+            query_embedding=[0.1, 0.2, 0.3],
+            query_text="x",
+            namespace="ghost",
+        )
+        assert results == []
+
 
 class TestUpdate:
     @pytest.mark.asyncio
     async def test_update_full(self, repo, conn):
-        now = datetime.now(timezone.utc)
         conn.fetchrow = AsyncMock(
-            return_value={
-                "id": "mem-1",
-                "user_id": "u1",
-                "content": "new content",
-                "metadata": {"k": "v"},
-                "namespace": "default",
-                "importance": 3,
-                "created_at": now,
-                "updated_at": now,
-                "content_hash": None,
-            }
+            return_value=memory_row(id="mem-1", content="new content", metadata={"k": "v"})
         )
 
         record = await repo.update(
@@ -213,7 +211,22 @@ class TestUpdate:
             "new content",
             {"k": "v"},
             None,
+            None,
+            None,
+            None,
+            None,
         )
+
+    @pytest.mark.asyncio
+    async def test_update_with_supersedes_closes_old(self, repo, conn):
+        """supersedes → второй запрос SUPERSEDE_MEMORY в той же транзакции."""
+        conn.fetchrow = AsyncMock(return_value=memory_row(id="mem-new"))
+
+        record = await repo.update(memory_id="mem-new", supersedes="mem-old")
+
+        assert record is not None
+        assert conn.fetchrow.await_count == 2
+        conn.fetchrow.assert_any_await(q.SUPERSEDE_MEMORY, "mem-old", "mem-new")
 
     @pytest.mark.asyncio
     async def test_update_partial(self, repo, conn):
@@ -250,22 +263,8 @@ class TestDelete:
 class TestList:
     @pytest.mark.asyncio
     async def test_list_returns_paginated_result(self, repo, conn):
-        now = datetime.now(timezone.utc)
         conn.fetch = AsyncMock(
-            return_value=[
-                {
-                    "id": "1",
-                    "user_id": "u1",
-                    "content": "a",
-                    "metadata": {},
-                    "namespace": "default",
-                    "importance": 3,
-                    "created_at": now,
-                    "updated_at": now,
-                    "content_hash": None,
-                    "total_count": 5,
-                },
-            ]
+            return_value=[memory_row(id="1", user_id="u1", content="a", total_count=5)]
         )
 
         result = await repo.list(user_id="u1", namespace="ns", limit=10, offset=0)
@@ -273,7 +272,7 @@ class TestList:
         assert isinstance(result, MemoryListResult)
         assert len(result.items) == 1
         assert result.total == 5
-        conn.fetch.assert_awaited_once_with(q.LIST_WITH_COUNT, "u1", "ns", 10, 0)
+        conn.fetch.assert_awaited_once_with(q.LIST_MEMORIES, "u1", NS_ID, None, 10, 0)
 
     @pytest.mark.asyncio
     async def test_list_no_filters(self, repo, conn):
@@ -281,7 +280,7 @@ class TestList:
 
         result = await repo.list()
         assert result.total == 0
-        conn.fetch.assert_awaited_once_with(q.LIST_WITH_COUNT, None, None, 50, 0)
+        conn.fetch.assert_awaited_once_with(q.LIST_MEMORIES, None, None, None, 50, 0)
 
 
 class TestForget:
@@ -292,7 +291,7 @@ class TestForget:
         deleted = await repo.forget(user_id="u1", namespace="ns")
 
         assert deleted == 3
-        conn.fetchval.assert_awaited_once_with(q.MEMORY_FORGET_SOFT, "u1", "ns")
+        conn.fetchval.assert_awaited_once_with(q.FORGET_MEMORIES, "u1", NS_ID)
 
     @pytest.mark.asyncio
     async def test_forget_without_namespace(self, repo, conn):
@@ -300,4 +299,4 @@ class TestForget:
 
         deleted = await repo.forget(user_id="u1", namespace=None)
         assert deleted == 0
-        conn.fetchval.assert_awaited_once_with(q.MEMORY_FORGET_SOFT, "u1", None)
+        conn.fetchval.assert_awaited_once_with(q.FORGET_MEMORIES, "u1", None)

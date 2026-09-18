@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from tests.conftest import memory_row
+
 from memory_server.memory.pg_repository import PostgreSQLRepository
 from memory_server.db import queries as q
 from memory_server.models import (
@@ -292,36 +294,25 @@ class TestGetRelationsUnified:
 
 
 # ══════════════════════════════════════════════════════════════════
-# 4. list (list_with_count)
+# 4. list (LIST_MEMORIES + COUNT(*) OVER())
 # ══════════════════════════════════════════════════════════════════
 
 
 class TestListWithCount:
     @pytest.mark.asyncio
     async def test_list_returns_items_and_total(self, pg, conn):
-        """list_with_count возвращает items + total_count."""
-        now = datetime.now(timezone.utc)
+        """LIST_MEMORIES возвращает items + total_count (window function)."""
         conn.fetch = AsyncMock(return_value=[
-            {
-                "id": "m1", "user_id": "u1", "content": "hello",
-                "metadata": {}, "namespace": "default", "importance": 3,
-                "created_at": now, "updated_at": now, "content_hash": None,
-                "total_count": 42,
-            },
-            {
-                "id": "m2", "user_id": "u1", "content": "world",
-                "metadata": {}, "namespace": "default", "importance": 3,
-                "created_at": now, "updated_at": now, "content_hash": None,
-                "total_count": 42,
-            },
+            memory_row(id="m1", user_id="u1", content="hello", total_count=42),
+            memory_row(id="m2", user_id="u1", content="world", total_count=42),
         ])
 
-        result = await pg.list(user_id="u1", namespace="default", limit=10, offset=0)
+        result = await pg.list(user_id="u1", namespace_id="ns-uuid", limit=10, offset=0)
 
         assert isinstance(result, MemoryListResult)
         assert len(result.items) == 2
         assert result.total == 42
-        conn.fetch.assert_awaited_once_with(q.LIST_WITH_COUNT, "u1", "default", 10, 0)
+        conn.fetch.assert_awaited_once_with(q.LIST_MEMORIES, "u1", "ns-uuid", None, 10, 0)
 
     @pytest.mark.asyncio
     async def test_list_empty_result(self, pg, conn):
@@ -340,37 +331,21 @@ class TestListWithCount:
 
         await pg.list()
 
-        conn.fetch.assert_awaited_once_with(q.LIST_WITH_COUNT, None, None, 50, 0)
+        conn.fetch.assert_awaited_once_with(q.LIST_MEMORIES, None, None, None, 50, 0)
 
     @pytest.mark.asyncio
     async def test_list_total_from_first_row(self, pg, conn):
         """total_count берётся из первой строки (window function)."""
-        now = datetime.now(timezone.utc)
-        conn.fetch = AsyncMock(return_value=[
-            {
-                "id": "m1", "user_id": "u1", "content": "a",
-                "metadata": {}, "namespace": "ns", "importance": 3,
-                "created_at": now, "updated_at": now, "content_hash": None,
-                "total_count": 100,
-            },
-        ])
+        conn.fetch = AsyncMock(return_value=[memory_row(total_count=100)])
 
-        result = await pg.list(user_id="u1", namespace="ns")
+        result = await pg.list(user_id="u1", namespace_id="ns-uuid")
 
         assert result.total == 100
 
     @pytest.mark.asyncio
     async def test_list_metadata_none_coerced_to_dict(self, pg, conn):
         """NULL metadata → {}."""
-        now = datetime.now(timezone.utc)
-        conn.fetch = AsyncMock(return_value=[
-            {
-                "id": "m1", "user_id": "u1", "content": "c",
-                "metadata": None, "namespace": "ns", "importance": 3,
-                "created_at": now, "updated_at": now, "content_hash": None,
-                "total_count": 1,
-            },
-        ])
+        conn.fetch = AsyncMock(return_value=[memory_row(metadata=None, total_count=1)])
 
         result = await pg.list(user_id="u1")
 
@@ -378,48 +353,47 @@ class TestListWithCount:
 
 
 # ══════════════════════════════════════════════════════════════════
-# 5. forget_soft (memory_forget_soft)
+# 5. forget_soft (FORGET_MEMORIES: status='retracted')
 # ══════════════════════════════════════════════════════════════════
 
 
 class TestForgetSoft:
     @pytest.mark.asyncio
     async def test_forget_soft_returns_count(self, pg, conn):
-        """memory_forget_soft возвращает количество обновлённых записей."""
+        """forget_soft возвращает количество отозванных записей."""
         conn.fetchval = AsyncMock(return_value=5)
 
-        result = await pg.forget_soft(user_id="u1", namespace="ns")
+        result = await pg.forget_soft(user_id="u1", namespace_id="ns-uuid")
 
         assert result == 5
-        conn.fetchval.assert_awaited_once_with(q.MEMORY_FORGET_SOFT, "u1", "ns")
+        conn.fetchval.assert_awaited_once_with(q.FORGET_MEMORIES, "u1", "ns-uuid")
 
     @pytest.mark.asyncio
     async def test_forget_soft_no_namespace(self, pg, conn):
         """forget_soft без namespace → все записи пользователя."""
         conn.fetchval = AsyncMock(return_value=10)
 
-        result = await pg.forget_soft(user_id="u1", namespace=None)
+        result = await pg.forget_soft(user_id="u1", namespace_id=None)
 
         assert result == 10
-        conn.fetchval.assert_awaited_once_with(q.MEMORY_FORGET_SOFT, "u1", None)
+        conn.fetchval.assert_awaited_once_with(q.FORGET_MEMORIES, "u1", None)
 
     @pytest.mark.asyncio
     async def test_forget_soft_no_matches(self, pg, conn):
         """forget_soft без совпадений → 0."""
         conn.fetchval = AsyncMock(return_value=0)
 
-        result = await pg.forget_soft(user_id="nonexistent", namespace="ns")
+        result = await pg.forget_soft(user_id="nonexistent", namespace_id="ns-uuid")
 
         assert result == 0
 
     @pytest.mark.asyncio
-    async def test_forget_soft_already_archived_not_counted(self, pg, conn):
-        """Записи с is_archived=true НЕ считаются (WHERE is_archived = false)."""
+    async def test_forget_soft_already_retracted_not_counted(self, pg, conn):
+        """Уже отозванные записи НЕ считаются (WHERE status='asserted')."""
         conn.fetchval = AsyncMock(return_value=2)
 
-        result = await pg.forget_soft(user_id="u1", namespace="ns")
+        result = await pg.forget_soft(user_id="u1", namespace_id="ns-uuid")
 
-        # Проверяем что вызов правильный — логика is_archived=false в хранимке
         assert result == 2
 
 
@@ -557,24 +531,24 @@ class TestSyncLinks:
 
 
 # ══════════════════════════════════════════════════════════════════
-# 8. Archive (мягкое удаление)
+# 8. Archive (отзыв: status='retracted')
 # ══════════════════════════════════════════════════════════════════
 
 
 class TestArchive:
     @pytest.mark.asyncio
     async def test_archive_found(self, pg, conn):
-        """archive устанавливает is_archived=true."""
+        """archive отзывает гранулу: status='retracted', valid_to=now()."""
         conn.fetchrow = AsyncMock(return_value={"id": "m1"})
 
         result = await pg.archive("m1")
 
         assert result is True
-        conn.fetchrow.assert_awaited_once_with(q.ARCHIVE_MEMORY, "m1")
+        conn.fetchrow.assert_awaited_once_with(q.RETRACT_MEMORY, "m1")
 
     @pytest.mark.asyncio
     async def test_archive_not_found(self, pg, conn):
-        """archive для несуществующей/уже архивной записи → False."""
+        """archive для несуществующей/уже отозванной записи → False."""
         conn.fetchrow = AsyncMock(return_value=None)
 
         result = await pg.archive("nonexistent")

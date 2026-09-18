@@ -53,10 +53,10 @@ class TestStore:
             content="Hello world",
             embedding=[0.1, 0.2, 0.3],
             metadata={"source": "test"},
-            namespace="ns1",
             namespace_id="00000000-0000-0000-0000-bfed25f845e5",
             content_hash=None,
             importance=3,
+            project_id=None,
         )
         service.repository.get_by_id.assert_awaited_once_with("new-id")
         assert result == expected_record
@@ -84,10 +84,10 @@ class TestStore:
             content="x",
             embedding=[0.0, 0.0, 0.0],
             metadata={},
-            namespace="default",
             namespace_id="00000000-0000-0000-0000-000000000001",
             content_hash=None,
             importance=3,
+            project_id=None,
         )
 
     @pytest.mark.asyncio
@@ -125,6 +125,7 @@ class TestSearch:
             threshold=0.8,
             namespace="ns",
             query_text="find this",
+            project_id=None,
         )
         assert result == results
 
@@ -178,6 +179,8 @@ class TestUpdate:
             embedding=[0.9, 0.8, 0.7],
             metadata={"k": "v"},
             importance=None,
+            project_id=None,
+            supersedes=None,
         )
         assert result == record
 
@@ -202,6 +205,8 @@ class TestUpdate:
             embedding=None,
             metadata={"k": "v"},
             importance=None,
+            project_id=None,
+            supersedes=None,
         )
         assert result == record
 
@@ -248,6 +253,7 @@ class TestList:
             namespace="ns",
             limit=10,
             offset=5,
+            project_id=None,
         )
         assert result == expected
 
@@ -262,6 +268,7 @@ class TestList:
             namespace=None,
             limit=50,
             offset=0,
+            project_id=None,
         )
 
 
