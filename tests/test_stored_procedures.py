@@ -544,7 +544,7 @@ class TestArchive:
         result = await pg.archive("m1")
 
         assert result is True
-        conn.fetchrow.assert_awaited_once_with(q.RETRACT_MEMORY, "m1")
+        conn.fetchrow.assert_awaited_once_with(q.RETRACT_MEMORY, "m1", None)
 
     @pytest.mark.asyncio
     async def test_archive_not_found(self, pg, conn):

@@ -133,6 +133,65 @@ SUPERSEDE_MEMORY = """
     RETURNING old.id
 """
 
+# Новая версия гранулы (Фаза 2.1): user_id/namespace_id/project_id/version
+# наследуются из старой строки INSERT-SELECT'ом — атомарнее и без лишних
+# round-trip'ов; version = old.version + 1 хранится там же, где его
+# инкрементит триггер 018. INSERT до SUPERSEDE: unique-индекс
+# idx_memories_content_hash_active видит обе asserted-строки только при
+# идентичном content_hash — этот случай отсекает service (ConflictError).
+INSERT_MEMORY_VERSION = """
+    INSERT INTO memories (
+        user_id, content, metadata, namespace_id,
+        content_hash, importance, project_id, confidence, frozen, supersedes, version
+    )
+    SELECT
+        old.user_id, $2::text, $3::jsonb, old.namespace_id,
+        $4::text, COALESCE($5::int, old.importance), old.project_id,
+        $6::float4, false, old.id, old.version + 1
+    FROM memories old
+    WHERE old.id = $1::uuid
+    RETURNING id, namespace_id
+"""
+
+# Supersession-цепочка в обе стороны (Фаза 2.1): назад по supersedes
+# (dist < 0), вперёд по superseded_by (dist > 0); старт — 0. UNION + min
+# дедупит стартовый узел, ORDER BY dist — от старейшей к новейшей.
+# Миграций не требует: обычный запрос по колонкам 018.
+# Рекурсивный шаг джойнится по next_id — у CTE НЕТ колонок supersedes/
+# superseded_by (якорь переименовал их в next_id): b.supersedes в JOIN —
+# UndefinedColumnError (регрессия приёмки Фазы 2).
+GET_HISTORY = f"""
+    WITH RECURSIVE
+    backwards AS (
+        SELECT id, supersedes AS next_id, 0 AS dist
+        FROM memories WHERE id = $1::uuid
+        UNION ALL
+        SELECT m.id, m.supersedes, b.dist - 1
+        FROM memories m JOIN backwards b ON m.id = b.next_id
+    ),
+    forwards AS (
+        SELECT id, superseded_by AS next_id, 0 AS dist
+        FROM memories WHERE id = $1::uuid
+        UNION ALL
+        SELECT m.id, m.superseded_by, f.dist + 1
+        FROM memories m JOIN forwards f ON m.id = f.next_id
+    ),
+    chain AS (
+        SELECT id, min(dist) AS dist
+        FROM (
+            SELECT id, dist FROM backwards
+            UNION
+            SELECT id, dist FROM forwards
+        ) u
+        GROUP BY id
+    )
+    SELECT {_MEMORY_COLUMNS}
+    FROM chain c
+    JOIN memories m ON m.id = c.id
+    JOIN namespaces n ON n.id = m.namespace_id
+    ORDER BY c.dist ASC, m.created_at ASC
+"""
+
 DELETE_MEMORY = """
     DELETE FROM memories WHERE id = $1
     RETURNING id
@@ -213,12 +272,131 @@ BUMP_ACCESS_MEMORIES = """
     WHERE id = ANY($1::uuid[])
 """
 
-# Отзыв гранулы (бывший ARCHIVE_MEMORY → is_archived).
+# Отзыв гранулы (бывший ARCHIVE_MEMORY → is_archived). $2 — причина
+# (опционально): metadata.reason merge-ится, историю отзыва сохраняем
+# в самой грануле (Фаза 2.1: единый путь retract для всех тулов).
 RETRACT_MEMORY = """
     UPDATE memories
-    SET status = 'retracted', valid_to = now(), updated_at = now()
+    SET status = 'retracted',
+        valid_to = now(),
+        updated_at = now(),
+        metadata = CASE
+            WHEN $2::text IS NULL THEN metadata
+            ELSE metadata || jsonb_build_object('reason', $2::text)
+        END
     WHERE id = $1 AND status = 'asserted'
     RETURNING id
+"""
+
+
+# ── Фаза 2.2: физический жизненный цикл (decay / stale / GC) ──
+
+# Ежедневное затухание уверенности: один батч-SQL, без выборки в Python.
+# rate per-namespace приходит из config.recency_decay_rates (unnest-массивы
+# JOIN'ятся по uid — точное сопоставление пар, не декартово произведение);
+# $3 — default-рейт для неймспейсов без override. frozen не трогаем (D4),
+# ниже floor не сползаем — там зона mark_stale/ручной ревизии. GREATEST
+# обязателен: WHERE confidence > floor не спасает от одношагового
+# проседания (0.1005 × 0.995 = 0.0999975 < 0.1).
+DECAY_CONFIDENCE = """
+    UPDATE memories AS m
+    SET confidence = GREATEST(m.confidence * COALESCE(r.rate, $3::float8), $4::float8),
+        updated_at = now()
+    FROM namespaces n
+    LEFT JOIN unnest($1::text[], $2::float8[]) AS r(uid, rate) ON r.uid = n.uid
+    WHERE m.namespace_id = n.id
+      AND m.status = 'asserted'
+      AND NOT m.frozen
+      AND m.confidence > $4::float8
+    RETURNING n.uid AS namespace
+"""
+
+# «Устаревшие» гранулы: статус НЕ меняем — только счётчик для лога/метрик
+# (динамический критерий, колонки-флага нет by design).
+COUNT_STALE = """
+    SELECT count(*)::bigint
+    FROM memories m
+    WHERE m.status = 'asserted'
+      AND m.confidence < $1::float8
+      AND COALESCE(m.last_accessed_at, m.created_at) < now() - make_interval(days => $2::int)
+"""
+
+# Кандидаты на ревизию для memory_stale_list: тот же критерий + фильтры.
+LIST_STALE = f"""
+    SELECT {_MEMORY_COLUMNS}
+    FROM memories m
+    JOIN namespaces n ON n.id = m.namespace_id
+    WHERE m.status = 'asserted'
+      AND m.confidence < $1::float8
+      AND COALESCE(m.last_accessed_at, m.created_at) < now() - make_interval(days => $2::int)
+      AND ($3::text IS NULL OR m.user_id = $3)
+      AND ($4::uuid IS NULL OR m.namespace_id = $4)
+      AND ($5::uuid IS NULL OR m.project_id = $5)
+    ORDER BY m.confidence ASC, m.created_at ASC
+    LIMIT $6
+"""
+
+# GC superseded-версий (еженедельно): ТОЛЬКО с наследником (superseded_by
+# IS NOT NULL — окно валидности живёт в цепочке) и старше retention.
+# frozen не трогаем (D4): замороженный факт — вечный, GC его не жерёт.
+SELECT_GC_SUPERSEDED = """
+    SELECT id::text
+    FROM memories
+    WHERE status = 'superseded'
+      AND superseded_by IS NOT NULL
+      AND NOT frozen
+      AND updated_at < now() - make_interval(days => $1::int)
+"""
+
+# Второй шаг GC: связи, целиком теряющие адрес после SET NULL
+# (target_id удаляемой гранулы + нет target_name для soft-resolve),
+# удаляем ДО memories — не оставляем полностью безадресных рёбер.
+DELETE_GC_DANGLING_RELATIONS = """
+    DELETE FROM relations
+    WHERE target_id = ANY($1::uuid[])
+      AND target_name IS NULL
+    RETURNING id
+"""
+
+DELETE_GC_SUPERSEDED = """
+    DELETE FROM memories
+    WHERE id = ANY($1::uuid[])
+      AND status = 'superseded'
+      AND superseded_by IS NOT NULL
+      AND NOT frozen
+    RETURNING id::text
+"""
+
+# Orphans: несуществующих source/target по FK (005: CASCADE/SET NULL) не
+# бывает; мусор — связи, полностью лишённые адреса после SET NULL.
+DELETE_ORPHAN_RELATIONS = """
+    DELETE FROM relations
+    WHERE target_id IS NULL
+      AND target_name IS NULL
+    RETURNING id
+"""
+
+
+# ── Фаза 2.3: кластеризация Level 2 (миграция 022 — Нора) ──
+
+# Сигнатура — миграция 022: assign_clusters(p_namespace_id UUID, p_threshold REAL
+# DEFAULT 0.92) RETURNS TABLE(cluster_id, member_count, coherence); threshold
+# пробрасываем из конфига явно. До применения 022 — SchemaPendingError (graceful).
+REFRESH_CLUSTERS = """
+    SELECT * FROM assign_clusters($1::uuid, $2::real)
+"""
+
+LIST_CLUSTERS = """
+    SELECT c.id::text, n.uid AS namespace, c.label, c.summary,
+           c.member_count, c.coherence, c.last_computed_at
+    FROM clusters c
+    JOIN namespaces n ON n.id = c.namespace_id
+    WHERE ($1::text IS NULL OR n.uid = $1)
+      AND ($2::uuid IS NULL OR EXISTS (
+          SELECT 1 FROM memories mm
+          WHERE mm.cluster_id = c.id AND mm.project_id = $2::uuid
+      ))
+    ORDER BY c.member_count DESC
 """
 
 

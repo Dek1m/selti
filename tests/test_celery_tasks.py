@@ -102,8 +102,8 @@ def mock_memory_service():
     traverse_result.edges = []
     svc.traverse = AsyncMock(return_value=traverse_result)
 
-    # archive
-    svc.archive = AsyncMock(return_value=True)
+    # retract (единый путь отзыва, Фаза 2.1; archive-тул вызывает retract)
+    svc.retract = AsyncMock(return_value=True)
 
     # forget
     svc.forget = AsyncMock(return_value=3)

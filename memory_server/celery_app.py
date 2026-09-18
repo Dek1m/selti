@@ -57,9 +57,11 @@ app.conf.task_default_routing_key = "default"
 # Memory tasks → memory queue
 # Batch tasks → batch queue
 # Hash tasks → hash queue
+# Lifecycle tasks (Фаза 2.2: decay/stale/GC/clusters) → memory queue
 app.conf.task_routes = {
     "memory_server.tasks.memory_tasks.*": {"queue": "memory"},
     "memory_server.tasks.hash_tasks.*": {"queue": "hash"},
+    "memory_server.tasks.lifecycle_tasks.*": {"queue": "memory"},
 }
 
 # ── Production Worker Settings ──
@@ -94,7 +96,11 @@ app.conf.task_max_retries = 5
 # ── Result Settings ──
 app.conf.result_expires = 3600  # 1 hour — результаты автоматически чистятся
 
-# ── Beat Schedule: periodic worker stats + business metrics ──
+# ── Beat Schedule: periodic worker stats + business metrics + memory lifecycle ──
+# Жизненный цикл гранул (Фаза 2.2/2.3): кластеры → decay → stale ежедневно;
+# GC и чистка сирот — еженедельно в воскресенье (низкая нагрузка, UTC).
+from celery.schedules import crontab
+
 app.conf.beat_schedule = {
     "update-worker-stats": {
         "task": "worker_stats.update",
@@ -103,6 +109,26 @@ app.conf.beat_schedule = {
     "update-business-metrics": {
         "task": "business_metrics.update",
         "schedule": 3600.0,  # раз в час
+    },
+    "refresh-clusters": {
+        "task": "memory_server.tasks.lifecycle_tasks.refresh_clusters",
+        "schedule": crontab(hour=2, minute=0),  # ежедневно 02:00 UTC
+    },
+    "confidence-decay": {
+        "task": "memory_server.tasks.lifecycle_tasks.confidence_decay",
+        "schedule": crontab(hour=3, minute=0),  # ежедневно 03:00 UTC
+    },
+    "mark-stale": {
+        "task": "memory_server.tasks.lifecycle_tasks.mark_stale",
+        "schedule": crontab(hour=4, minute=0),  # ежедневно 04:00 UTC
+    },
+    "gc-superseded": {
+        "task": "memory_server.tasks.lifecycle_tasks.gc_superseded",
+        "schedule": crontab(day_of_week="sun", hour=5, minute=0),  # воскр. 05:00 UTC
+    },
+    "orphans-cleanup": {
+        "task": "memory_server.tasks.lifecycle_tasks.orphans_cleanup",
+        "schedule": crontab(day_of_week="sun", hour=5, minute=30),  # воскр. 05:30 UTC
     },
 }
 

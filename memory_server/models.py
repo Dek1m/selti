@@ -86,6 +86,27 @@ class ForgetResult(BaseModel):
     deleted_count: int
 
 
+class MemoryHistory(BaseModel):
+    """Supersession-цепочка гранулы (Фаза 2.1, D3).
+
+    items — от старейшей к новейшей версии; current_id — актуальная
+    версия (status='asserted'), None — если вся цепочка закрыта.
+    """
+    items: list[MemoryRecord]
+    current_id: str | None = None
+
+
+class ClusterRecord(BaseModel):
+    """Кластер схожих гранул Level 2 (Фаза 2.3, миграция 022)."""
+    id: str
+    namespace: str
+    label: str | None = None
+    summary: str | None = None
+    member_count: int = 0
+    coherence: float | None = None
+    last_computed_at: datetime | None = None
+
+
 class MemoryStatsItem(BaseModel):
     namespace: str
     count: int

@@ -765,12 +765,12 @@ def forget_memories(
     routing_key="memory",
 )
 def archive_memory(self, memory_id: str) -> dict[str, Any]:
-    """Archive a memory record (soft delete)."""
+    """Retract a memory record (soft delete) — единый путь service.retract."""
     if not memory_id or not memory_id.strip():
         raise ValidationError("memory_id cannot be empty")
 
     service = _get_service()
-    success = run_async(service.archive, memory_id=memory_id)
+    success = run_async(service.retract, memory_id=memory_id)
     return {"success": success}
 
 
@@ -864,3 +864,170 @@ def delete_relation(
         link_type=link_type,
     )
     return {"ok": deleted}
+
+
+# ── Supersession / lifecycle tools (Фаза 2.1) ──────────────────
+
+
+@shared_task(
+    bind=True,
+    base=SeltiTask,
+    name="memory_server.tasks.memory_tasks.supersede_memory",
+    max_retries=5,
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+    default_retry_delay=30,
+    soft_time_limit=240,
+    time_limit=300,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    queue="memory",
+    routing_key="memory",
+)
+def supersede_memory(
+    self,
+    granule_id: str,
+    content: str,
+    metadata: dict | None = None,
+    importance: int | None = None,
+) -> dict[str, Any]:
+    """Create a new version of a granule (fact conflict resolution).
+
+    Старая закрывается (status='superseded', valid_to=valid_from новой);
+    новая наследует user/namespace/project/version+1/metadata, confidence ×0.9.
+    """
+    if not granule_id or not granule_id.strip():
+        raise ValidationError("granule_id cannot be empty")
+    if not content or not content.strip():
+        raise ValidationError("content cannot be empty")
+
+    service = _get_service()
+    record = run_async(
+        service.create_version,
+        granule_id=granule_id,
+        new_content=content,
+        metadata_merge=metadata,
+        importance=importance,
+    )
+    return record.model_dump(mode="json")
+
+
+@shared_task(
+    bind=True,
+    base=SeltiTask,
+    name="memory_server.tasks.memory_tasks.get_memory_history",
+    max_retries=5,
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+    default_retry_delay=30,
+    soft_time_limit=240,
+    time_limit=300,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    queue="memory",
+    routing_key="memory",
+)
+def get_memory_history(self, granule_id: str) -> dict[str, Any]:
+    """Supersession-цепочка гранулы: от старейшей к новейшей, current_id помечен."""
+    if not granule_id or not granule_id.strip():
+        raise ValidationError("granule_id cannot be empty")
+
+    service = _get_service()
+    history = run_async(service.get_history, granule_id=granule_id)
+    return {
+        "items": [r.model_dump(mode="json") for r in history.items],
+        "current_id": history.current_id,
+    }
+
+
+@shared_task(
+    bind=True,
+    base=SeltiTask,
+    name="memory_server.tasks.memory_tasks.freeze_memory",
+    max_retries=5,
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+    default_retry_delay=30,
+    soft_time_limit=240,
+    time_limit=300,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    queue="memory",
+    routing_key="memory",
+)
+def freeze_memory(self, granule_id: str, frozen: bool) -> dict[str, Any]:
+    """Ручная заморозка вечных фактов (D4): защита от decay/GC."""
+    if not granule_id or not granule_id.strip():
+        raise ValidationError("granule_id cannot be empty")
+
+    service = _get_service()
+    record = run_async(service.freeze, memory_id=granule_id, frozen=frozen)
+    return record.model_dump(mode="json")
+
+
+@shared_task(
+    bind=True,
+    base=SeltiTask,
+    name="memory_server.tasks.memory_tasks.stale_list",
+    max_retries=5,
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+    default_retry_delay=30,
+    soft_time_limit=240,
+    time_limit=300,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    queue="memory",
+    routing_key="memory",
+)
+def stale_list(
+    self,
+    user_id: str | None = None,
+    namespace: str | None = None,
+    project_id: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Кандидаты на ревизию: asserted, confidence < порога, нет доступа N дней."""
+    service = _get_service()
+    records = run_async(
+        service.stale_list,
+        user_id=user_id,
+        namespace=namespace,
+        project_id=project_id,
+        limit=limit,
+    )
+    return [r.model_dump(mode="json") for r in records]
+
+
+@shared_task(
+    bind=True,
+    base=SeltiTask,
+    name="memory_server.tasks.memory_tasks.cluster_list",
+    max_retries=5,
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+    default_retry_delay=30,
+    soft_time_limit=240,
+    time_limit=300,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    queue="memory",
+    routing_key="memory",
+)
+def cluster_list(
+    self,
+    namespace: str | None = None,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    """Обзор кластеров Level 2 (graceful до миграции 022)."""
+    service = _get_service()
+    return run_async(
+        service.cluster_list,
+        namespace=namespace,
+        project_id=project_id,
+    )

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from memory_server.config import Settings
 from memory_server.embedding.provider import EmbeddingProvider
-from memory_server.exceptions import NotFoundError
+from memory_server.exceptions import ConflictError, NotFoundError, SchemaPendingError
 from memory_server.logger import async_measure_duration, get_logger
 from memory_server.memory.dedup import DedupAction, DedupEngine
 from memory_server.memory.namespace_repository import NamespaceRepository
@@ -19,7 +19,9 @@ from memory_server.memory.search_fusion import (
     rrf_fuse,
 )
 from memory_server.models import (
+    ClusterRecord,
     GraphStats,
+    MemoryHistory,
     MemoryListResult,
     MemoryRecord,
     ProjectContext,
@@ -318,6 +320,110 @@ class MemoryService:
         async with async_measure_duration(logger, "delete"):
             return await self.repository.delete(memory_id)
 
+    # ── Supersession API (Фаза 2.1, D3) ──
+
+    async def create_version(
+        self,
+        granule_id: str,
+        new_content: str,
+        metadata_merge: dict | None = None,
+        importance: int | None = None,
+    ) -> MemoryRecord:
+        """Главная операция факта-конфликта (правило Graphiti): новая версия
+        гранулы, старая закрывается её valid_from'ом.
+
+        Наследуются: user/namespace/project/version+1 (SQL), metadata
+        (dict-merge), importance (без override). Confidence наследуется
+        ×supersession_confidence_factor (cap 0..1) — каждое перепрохождение
+        факта стоит части уверенности. Новая версия не frozen (заморозка —
+        осознанный ручной акт через freeze).
+        """
+        async with async_measure_duration(logger, "create_version"):
+            old = await self.repository.get_by_id(granule_id)
+            if old is None:
+                raise NotFoundError(granule_id)
+            if old.status != "asserted":
+                raise ConflictError(
+                    granule_id, f"only asserted granules can be superseded (status={old.status})"
+                )
+            content_hash = hashlib.sha256(new_content.encode()).hexdigest()
+            if content_hash == old.content_hash:
+                # unique-индекс idx_memories_content_hash_active увидит обе
+                # asserted-строки с одним hash — отсекаем до SQL
+                raise ConflictError(granule_id, "new version content is identical to the current one")
+            # Чужая активная гранула с тем же hash в namespace: без pre-check
+            # INSERT абортируется сырым UniqueViolationError (индекс 020) —
+            # отдаём конфликт с id виновника. Свой lookup (hash-рассинхрон
+            # старой строки) конфликтом не считается.
+            twin = await self.repository.find_by_content_hash(old.namespace, content_hash)
+            if twin is not None and twin.id != granule_id:
+                raise ConflictError(
+                    twin.id, "content is already active in this namespace (exact-dedup)"
+                )
+            confidence = min(
+                max(old.confidence * self.config.supersession_confidence_factor, 0.0),
+                1.0,
+            )
+            embedding = await self.embedding.embed(new_content)
+            record = await self.repository.create_version(
+                old_id=granule_id,
+                content=new_content,
+                embedding=embedding,
+                metadata={**old.metadata, **(metadata_merge or {})},
+                content_hash=content_hash,
+                importance=importance,
+                confidence=confidence,
+            )
+            if record is None:
+                raise NotFoundError(granule_id)
+            logger.info("create_version: done", extra={
+                "old_id": granule_id, "new_id": record.id,
+                "confidence": confidence,
+            })
+            return record
+
+    async def get_history(self, granule_id: str) -> MemoryHistory:
+        """Вся supersession-цепочка гранулы: от старейшей к новейшей, текущая помечена."""
+        async with async_measure_duration(logger, "get_history"):
+            start = await self.repository.get_by_id(granule_id)
+            if start is None:
+                raise NotFoundError(granule_id)
+            items = await self.repository.get_history(granule_id)
+            current = next(
+                (r for r in items if r.status == "asserted" and r.valid_to is None), None
+            )
+            return MemoryHistory(
+                items=items,
+                current_id=current.id if current else None,
+            )
+
+    async def retract(self, memory_id: str, reason: str | None = None) -> bool:
+        """Отзыв гранулы: status='retracted', valid_to=now(), metadata.reason.
+
+        Единый путь retract для всех тулов (разовый memory_archive и
+        причина отзыва для аудита).
+        """
+        logger.info("retract", extra={"id": memory_id, "reason": reason})
+        record = await self.repository.get_by_id(memory_id)
+        if record is None:
+            logger.info("retract: not found", extra={"id": memory_id})
+            raise NotFoundError(memory_id)
+        result = await self.repository.archive(memory_id, reason=reason)
+        logger.info("retract: done", extra={"id": memory_id, "success": result})
+        return result
+
+    async def freeze(self, memory_id: str, frozen: bool) -> MemoryRecord:
+        """Ручная заморозка вечных фактов (D4): защита от decay и GC.
+
+        Замороженные не затухают (SQL decay фильтрует frozen) — вечные
+        факты не требуют периодического подтверждения.
+        """
+        async with async_measure_duration(logger, "freeze"):
+            record = await self.repository.update(memory_id=memory_id, frozen=frozen)
+            if record is None:
+                raise NotFoundError(memory_id)
+            return record
+
     async def list(
         self,
         user_id: str | None = None,
@@ -374,19 +480,136 @@ class MemoryService:
         return result
 
     async def archive(self, memory_id: str) -> bool:
-        """Отзыв гранулы: status='retracted', valid_to=now().
+        """Разовый отзыв без причины — сводится на единый путь retract (Фаза 2.1)."""
+        return await self.retract(memory_id)
 
-        Гранула уходит из выдачи, но остаётся в БД и Qdrant (с пометкой
-        статуса) — восстановима и доступна для time-travel (Фаза 1.3).
+    # ── Жизненный цикл (Фаза 2.2): decay / stale / GC / orphans ──
+
+    async def decay_confidence(self) -> dict[str, int]:
+        """Ежедневное затухание уверенности: батч-SQL, per-namespace rate.
+
+        rates берутся из config.recency_decay_rates (единый источник
+        скоростей затухания с ранжированием D4); метрика — счёт по namespace.
         """
-        logger.info("archive", extra={"id": memory_id})
-        record = await self.repository.get_by_id(memory_id)
-        if record is None:
-            logger.info("archive: not found", extra={"id": memory_id})
-            raise NotFoundError(memory_id)
-        result = await self.repository.archive(memory_id)
-        logger.info("archive: done", extra={"id": memory_id, "success": result})
-        return result
+        rates = self.config.recency_decay_rates
+        touched = await self.repository.decay_confidence(
+            ns_uids=list(rates.keys()),
+            rates=list(rates.values()),
+            default_rate=self.config.recency_decay_rate,
+            floor=self.config.confidence_decay_floor,
+        )
+        logger.info("decay_confidence: done", extra={"touched_total": sum(touched.values())})
+        return touched
+
+    async def mark_stale(self) -> int:
+        """Счётчик устаревших кандидатов (статус НЕ меняется — ревизия ручная).
+
+        Кандидат: asserted, confidence < stale_threshold, нет доступа
+        дольше stale_days. Warning-лог — сигнал для memory_stale_list.
+        """
+        count = await self.repository.count_stale(
+            self.config.stale_threshold, self.config.stale_days
+        )
+        if count:
+            logger.warning("mark_stale: candidates for revision", extra={"count": count})
+        return count
+
+    async def stale_list(
+        self,
+        user_id: str | None = None,
+        namespace: str | None = None,
+        project_id: str | None = None,
+        limit: int = 100,
+    ) -> list[MemoryRecord]:
+        """Кандидаты на ревизию (динамический запрос, колонки-флага нет)."""
+        namespace_id = await self._ns_id_or_none(namespace)
+        resolved_project = await self.resolve_project(project_id)
+        return await self.repository.list_stale(
+            threshold=self.config.stale_threshold,
+            stale_days=self.config.stale_days,
+            user_id=user_id,
+            namespace_id=namespace_id,
+            project_id=resolved_project,
+            limit=limit,
+        )
+
+    async def gc_superseded(self) -> dict[str, int | bool]:
+        """GC закрытых версий (еженедельно): только superseded с наследником
+        и старше gc_retention_days. dry-run (gc_dry_run=True) — только счётчик;
+        окно валидности живёт в цепочке, история не теряется.
+        """
+        ids = await self.repository.select_gc_superseded(self.config.gc_retention_days)
+        dry_run = self.config.gc_dry_run
+        if not ids:
+            return {"dry_run": dry_run, "selected": 0, "deleted": 0}
+        if dry_run:
+            logger.warning("gc_superseded: DRY-RUN, candidates only", extra={
+                "selected": len(ids), "retention_days": self.config.gc_retention_days,
+            })
+            return {"dry_run": True, "selected": len(ids), "deleted": 0}
+        deleted = await self.repository.purge_memories(ids)
+        logger.info("gc_superseded: deleted", extra={"selected": len(ids), "deleted": deleted})
+        return {"dry_run": False, "selected": len(ids), "deleted": deleted}
+
+    async def orphans_cleanup(self) -> int:
+        """Связи без адреса целиком (после SET NULL от GC). Идемпотентно."""
+        removed = await self.repository.delete_orphan_relations()
+        logger.info("orphans_cleanup: done", extra={"removed": removed})
+        return removed
+
+    # ── Кластеризация Level 2 (Фаза 2.3, миграция 022) ──
+
+    async def refresh_clusters(self, namespace: str) -> dict:
+        """Пересчёт кластеров неймспейса хранимкой assign_clusters.
+
+        До применения миграции 022 на проде — graceful: SchemaPendingError
+        превращается в понятный ok=False, beat-расписание не ломается.
+        """
+        ns_record = await self.ns_repo.get_by_uid(namespace)
+        if ns_record is None:
+            raise NotFoundError(namespace, message=f"namespace is not registered: {namespace}")
+        try:
+            rows = await self.repository.refresh_clusters(
+                ns_record.id, self.config.cluster_threshold
+            )
+        except SchemaPendingError:
+            logger.warning("refresh_clusters: assign_clusters not available (migration 022 pending)")
+            return {"ok": False, "reason": "migration 022 pending", "clusters": []}
+        logger.info("refresh_clusters: done", extra={"namespace": namespace, "clusters": len(rows)})
+        return {"ok": True, "clusters": rows}
+
+    async def cluster_list(
+        self, namespace: str | None = None, project_id: str | None = None
+    ) -> dict:
+        """Обзор кластеров Level 2. Graceful до миграции 022."""
+        resolved_project = await self.resolve_project(project_id)
+        try:
+            rows = await self.repository.list_clusters(namespace, resolved_project)
+        except SchemaPendingError:
+            logger.warning("cluster_list: clusters table not available (migration 022 pending)")
+            return {"ok": False, "reason": "migration 022 pending", "clusters": []}
+        return {
+            "ok": True,
+            "clusters": [
+                ClusterRecord(
+                    id=row["id"],
+                    namespace=row["namespace"],
+                    label=row.get("label"),
+                    summary=row.get("summary"),
+                    member_count=row.get("member_count", 0),
+                    coherence=row.get("coherence"),
+                    last_computed_at=row.get("last_computed_at"),
+                ).model_dump(mode="json")
+                for row in rows
+            ],
+        }
+
+    async def _ns_id_or_none(self, namespace: str | None) -> str | None:
+        """uid → namespace_id (None-вход → None-фильтр); для lifecycle-запросов."""
+        if namespace is None:
+            return None
+        record = await self.ns_repo.get_by_uid(namespace)
+        return record.id if record else None
 
     # ── Project context («облачко знаний», D9) ──
 

@@ -53,6 +53,11 @@ TASK_FORGET = "memory_server.tasks.memory_tasks.forget_memories"
 TASK_ARCHIVE = "memory_server.tasks.memory_tasks.archive_memory"
 TASK_ADD_RELATION = "memory_server.tasks.memory_tasks.add_relation"
 TASK_DELETE_RELATION = "memory_server.tasks.memory_tasks.delete_relation"
+TASK_SUPERSEDE = "memory_server.tasks.memory_tasks.supersede_memory"
+TASK_GET_HISTORY = "memory_server.tasks.memory_tasks.get_memory_history"
+TASK_FREEZE = "memory_server.tasks.memory_tasks.freeze_memory"
+TASK_STALE_LIST = "memory_server.tasks.memory_tasks.stale_list"
+TASK_CLUSTER_LIST = "memory_server.tasks.memory_tasks.cluster_list"
 
 
 def _coerce_metadata(metadata) -> dict | None:
@@ -476,3 +481,110 @@ async def memory_namespaces(
     Используй для динамического определения допустимых namespace.
     """
     return await celery_call(TASK_NAMESPACES)
+
+
+# ── Lifecycle tools (Фаза 2 плана редизайна: судьба гранулы) ──
+
+
+@mcp.tool()
+@tool_handler("memory_supersede")
+async def memory_supersede(
+    granule_id: str,
+    content: str,
+    metadata: str | dict | None = None,
+    importance: int | None = None,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Создать новую версию гранулы — разрешение конфликта фактов.
+
+    Старая закрывается по правилу Graphiti: status='superseded',
+    valid_to = valid_from новой (окно старой заканчивается моментом
+    появления новой). Новая наследует user/namespace/project_id/metadata
+    (dict-merge), version = старая+1, confidence = старая ×0.9 (cap 0..1),
+    frozen=false. Используй для ФАКТОВ-КОНФЛИКТОВ (утверждение заменило
+    опровергнутое); для быстрой правки на месте — memory_update.
+
+    granule_id: ID замещаемой гранулы (должна быть asserted).
+    """
+    metadata = _coerce_metadata(metadata)
+    return await celery_call(
+        TASK_SUPERSEDE,
+        granule_id=granule_id,
+        content=content,
+        metadata=metadata,
+        importance=importance,
+    )
+
+
+@mcp.tool()
+@tool_handler("memory_get_history")
+async def memory_get_history(
+    granule_id: str,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Supersession-цепочка гранулы (рекурсивный обход supersedes/superseded_by).
+
+    Возвращает {items: [от старейшей к новейшей версии], current_id} —
+    current_id помечает актуальную версию (status='asserted');
+    None — если вся цепочка закрыта (superseded/retracted).
+    """
+    return await celery_call(TASK_GET_HISTORY, granule_id=granule_id)
+
+
+@mcp.tool()
+@tool_handler("memory_freeze")
+async def memory_freeze(
+    granule_id: str,
+    frozen: bool,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Заморозить/разморозить гранулу — вечный факт (D4).
+
+    Замороженные не затухают (confidence decay их не трогает) и не
+    попадают под чистку — вечные факты не требуют подтверждения.
+    """
+    return await celery_call(TASK_FREEZE, granule_id=granule_id, frozen=frozen)
+
+
+@mcp.tool()
+@tool_handler("memory_stale_list")
+async def memory_stale_list(
+    user_id: str | None = None,
+    namespace: str | None = None,
+    project_id: str | None = None,
+    limit: int = 100,
+    ctx: Context | None = None,
+) -> list[dict[str, Any]]:
+    """Кандидаты на ревизию: устаревшие знания (Фаза 2.2).
+
+    Критерий (динамический, без колонки-флага): status='asserted',
+    confidence < stale_threshold (config, default 0.3) и нет доступа
+    дольше stale_days (config, default 30). Статус НЕ меняется —
+    решение за вызывающим (supersede/retract/freeze).
+    """
+    return await celery_call(
+        TASK_STALE_LIST,
+        user_id=user_id,
+        namespace=namespace,
+        project_id=project_id,
+        limit=limit,
+    )
+
+
+@mcp.tool()
+@tool_handler("memory_cluster_list")
+async def memory_cluster_list(
+    namespace: str | None = None,
+    project_id: str | None = None,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Обзор кластеров Level 2 — тематические группы схожих гранул.
+
+    Кластеры пересчитываются ночью хранимкой assign_clusters (миграция 022).
+    До применения миграции возвращает {ok: false, reason: 'migration 022 pending'}.
+    """
+    return await celery_call(
+        TASK_CLUSTER_LIST,
+        namespace=namespace,
+        project_id=project_id,
+    )

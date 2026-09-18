@@ -23,3 +23,25 @@ class EmbeddingError(MemoryError):
 class DatabaseError(MemoryError):
     """Wrapper for database-related errors."""
     pass
+
+
+class ConflictError(MemoryError):
+    """Raised when an operation conflicts with the granule lifecycle state.
+
+    Фаза 2: нельзя суперседить не-asserted гранулу, нельзя создавать
+    новую версию с идентичным контентом (unique-индекс дедупа).
+    """
+
+    def __init__(self, granule_id: str, reason: str):
+        self.id = granule_id
+        super().__init__(f"Lifecycle conflict for {granule_id}: {reason}")
+
+
+class SchemaPendingError(MemoryError):
+    """Required DB objects are not migrated yet (graceful degradation).
+
+    Фаза 2.3: кластеризация кодится под миграцию 022 (Нора); до её
+    применения на проде SQL кластеров деградирует в понятный ответ,
+    а не в 500.
+    """
+    pass

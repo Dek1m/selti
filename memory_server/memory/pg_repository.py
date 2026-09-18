@@ -14,6 +14,7 @@ from datetime import datetime
 import asyncpg
 
 from memory_server.db import queries as q
+from memory_server.exceptions import ConflictError, DatabaseError, SchemaPendingError
 from memory_server.logger import get_logger
 from memory_server.models import (
     GraphStats,
@@ -301,6 +302,61 @@ class PostgreSQLRepository:
                     await conn.fetchrow(q.SUPERSEDE_MEMORY, supersedes, memory_id)
         return self._to_record(row)
 
+    async def create_version(
+        self,
+        old_id: str,
+        content: str,
+        metadata: dict | None = None,
+        content_hash: str | None = None,
+        importance: int | None = None,
+        confidence: float | None = None,
+    ) -> tuple[MemoryRecord, str] | None:
+        """Новая версия гранулы (Фаза 2.1, D3): INSERT-SELECT наследует
+        user_id/namespace_id/project_id/version+1 из старой строки, затем
+        старая закрывается валидным окном (valid_to=valid_from новой).
+
+        Одна транзакция: гонка «старая перестала быть asserted между чтением
+        и записью» откатывает вставку новой (DatabaseError наружу).
+        Возвращает (новая запись, namespace_id) — id нужен фасаду для
+        Qdrant-payload.
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                try:
+                    inserted = await conn.fetchrow(
+                        q.INSERT_MEMORY_VERSION,
+                        old_id,
+                        content,
+                        metadata or {},
+                        content_hash,
+                        importance,
+                        confidence,
+                    )
+                except asyncpg.exceptions.UniqueViolationError as exc:
+                    # Гонка мимо pre-check service: между find_by_content_hash
+                    # и INSERT кто-то вклинил тот же active hash — индекс 020
+                    # абортирует транзакцию, наружу отдаём доменный конфликт.
+                    raise ConflictError(
+                        old_id, f"content hash conflict: {exc.constraint_name}"
+                    ) from exc
+                if inserted is None:
+                    return None
+                new_id = str(inserted["id"])
+                closed = await conn.fetchrow(q.SUPERSEDE_MEMORY, old_id, new_id)
+                if closed is None:
+                    # INSERT прошёл, но старая уже не asserted → откат всей транзакции
+                    raise DatabaseError(
+                        f"supersession conflict: granule {old_id} is not asserted"
+                    )
+                record_row = await conn.fetchrow(q.SELECT_MEMORY_BY_ID, new_id)
+        return self._to_record(record_row), str(inserted["namespace_id"])
+
+    async def get_history(self, granule_id: str) -> list[MemoryRecord]:
+        """Supersession-цепочка (рекурсивный CTE, обе стороны): от старейшей к новейшей."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(q.GET_HISTORY, granule_id)
+            return [self._to_record(row) for row in rows]
+
     # ════════════════════════════════════════════════════════════
     # DELETE / RETRACT
     # ════════════════════════════════════════════════════════════
@@ -310,10 +366,14 @@ class PostgreSQLRepository:
             row = await conn.fetchrow(q.DELETE_MEMORY, memory_id)
             return row is not None
 
-    async def archive(self, memory_id: str) -> bool:
-        """Отзыв гранулы: status='retracted', valid_to=now() (бывший is_archived)."""
+    async def archive(self, memory_id: str, reason: str | None = None) -> bool:
+        """Отзыв гранулы: status='retracted', valid_to=now(); metadata.reason merge.
+
+        Единый путь retract (Фаза 2.1) — сюда сводятся и разовый отзыв,
+        и причина отзыва для аудита.
+        """
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(q.RETRACT_MEMORY, memory_id)
+            row = await conn.fetchrow(q.RETRACT_MEMORY, memory_id, reason)
             return row is not None
 
     async def forget_soft(self, user_id: str, namespace_id: str | None = None) -> int:
@@ -490,3 +550,105 @@ class PostgreSQLRepository:
                 by_namespace=row["p_by_namespace"] or {},
                 by_link_type=row["p_by_link_type"] or {},
             )
+
+    # ════════════════════════════════════════════════════════════
+    # LIFECYCLE (Фаза 2.2: decay / stale / GC / orphans)
+    # ════════════════════════════════════════════════════════════
+
+    async def decay_confidence(
+        self, ns_uids: list[str], rates: list[float], default_rate: float, floor: float
+    ) -> dict[str, int]:
+        """Ежедневное затухание уверенности — один батч-SQL (Фаза 2.2).
+
+        frozen не трогает SQL; ниже floor не сползает (WHERE confidence > floor).
+        Возвращает счётчик затронутых по namespace (RETURNING, без выборки тел).
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(q.DECAY_CONFIDENCE, ns_uids, rates, default_rate, floor)
+        touched: dict[str, int] = {}
+        for row in rows:
+            ns = row["namespace"]
+            touched[ns] = touched.get(ns, 0) + 1
+        return touched
+
+    async def count_stale(self, threshold: float, stale_days: int) -> int:
+        """Счётчик устаревших кандидатов (status не меняется — only metric)."""
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(q.COUNT_STALE, threshold, stale_days)
+
+    async def list_stale(
+        self,
+        threshold: float,
+        stale_days: int,
+        user_id: str | None = None,
+        namespace_id: str | None = None,
+        project_id: str | None = None,
+        limit: int = 100,
+    ) -> list[MemoryRecord]:
+        """Кандидаты на ревизию для memory_stale_list (динамический критерий)."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                q.LIST_STALE, threshold, stale_days, user_id, namespace_id, project_id, limit
+            )
+            return [self._to_record(row) for row in rows]
+
+    async def select_gc_superseded(self, retention_days: int) -> list[str]:
+        """ID superseded-гранул под GC: с наследником и старше retention."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(q.SELECT_GC_SUPERSEDED, retention_days)
+            return [row["id"] for row in rows]
+
+    async def delete_gc_superseded(self, granule_ids: list[str]) -> int:
+        """Hard delete superseded-гранул + их полностью безадресных связей.
+
+        Одная транзакция: сначала relations без target_name (иначе SET NULL
+        оставит ребро без адреса), потом memories (source_id-связи снимет
+        CASCADE). Идемпотентно: повтор по пустому списку — no-op.
+        """
+        if not granule_ids:
+            return 0
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.fetch(q.DELETE_GC_DANGLING_RELATIONS, granule_ids)
+                deleted = await conn.fetch(q.DELETE_GC_SUPERSEDED, granule_ids)
+                return len(deleted)
+
+    async def delete_orphan_relations(self) -> int:
+        """Связи без адреса целиком (target_id IS NULL AND target_name IS NULL).
+
+        Несуществующих source/target по FK (005: CASCADE/SET NULL) не бывает;
+        кластеры member_count=0 — TODO после 022 (таблицы ещё нет).
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(q.DELETE_ORPHAN_RELATIONS)
+            return len(rows)
+
+    # ════════════════════════════════════════════════════════════
+    # CLUSTERS (Фаза 2.3, миграция 022 — graceful до её применения)
+    # ════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _raise_if_schema_pending(exc: Exception) -> None:
+        """Undefined* ошибки PG → SchemaPendingError (деградация, не 500)."""
+        if isinstance(exc, (asyncpg.exceptions.UndefinedFunctionError, asyncpg.exceptions.UndefinedTableError)):
+            raise SchemaPendingError(str(exc)) from exc
+
+    async def refresh_clusters(self, namespace_id: str, threshold: float) -> list[dict]:
+        """Пересчёт кластеров неймспейса хранимкой assign_clusters (022)."""
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(q.REFRESH_CLUSTERS, namespace_id, threshold)
+                return [dict(row) for row in rows]
+        except (asyncpg.exceptions.UndefinedFunctionError, asyncpg.exceptions.UndefinedTableError) as exc:
+            self._raise_if_schema_pending(exc)
+
+    async def list_clusters(
+        self, namespace: str | None = None, project_id: str | None = None
+    ) -> list[dict]:
+        """Обзор кластеров Level 2 (таблица clusters, миграция 022)."""
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(q.LIST_CLUSTERS, namespace, project_id)
+                return [dict(row) for row in rows]
+        except (asyncpg.exceptions.UndefinedFunctionError, asyncpg.exceptions.UndefinedTableError) as exc:
+            self._raise_if_schema_pending(exc)

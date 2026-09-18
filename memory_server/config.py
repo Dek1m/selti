@@ -54,6 +54,21 @@ class Settings(BaseSettings):
 
     traverse_max_nodes: int = 500  # cap узлов обхода графа (Фаза 1.5)
 
+    # ── Фаза 2: жизненный цикл гранул (D3/D4) ──
+    # Supersession: уверенность наследуется ×0.9 (cap 0..1) — каждое
+    # перепрохождение факта через систему стоит части уверенности.
+    supersession_confidence_factor: float = 0.9
+    # Physical decay: confidence *= recency_decay_rates[namespace] ежедневно;
+    # ниже floor гранула не затухает дальше (кандидат в mark_stale/GC-ревизию).
+    confidence_decay_floor: float = 0.1
+    stale_threshold: float = 0.3  # confidence ниже порога + нет доступа N дней
+    stale_days: int = 30          # «нет доступа» = COALESCE(last_accessed_at, created_at) старше
+    # GC superseded-версий: hard delete только с наследником и старше retention.
+    gc_retention_days: int = 90
+    gc_dry_run: bool = True       # dry-run первый месяц (Рэй переключит на проде)
+    # Кластеризация Level 2 (022): порог триграммной близости assign_clusters.
+    cluster_threshold: float = 0.92
+
     dedup_enabled: bool = True
     dedup_threshold: float = 0.95
     dedup_thresholds: dict[str, float] = {

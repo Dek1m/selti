@@ -140,6 +140,25 @@ class MemoryRepositoryProtocol(Protocol):
         """Обновить гранулу (metadata merge-ится). supersedes — закрыть старую версию."""
         ...
 
+    async def create_version(
+        self,
+        old_id: str,
+        content: str,
+        embedding: list[float] | None = None,
+        metadata: dict | None = None,
+        content_hash: str | None = None,
+        importance: int | None = None,
+        confidence: float | None = None,
+    ) -> MemoryRecord | None:
+        """Новая версия факта-конфликта (Фаза 2.1, D3): INSERT-SELECT
+        наследует user/namespace/project/version+1, старая закрывается
+        valid_from'ом новой. None — старая не найдена."""
+        ...
+
+    async def get_history(self, granule_id: str) -> list[MemoryRecord]:
+        """Supersession-цепочка (CTE, обе стороны) — от старейшей к новейшей."""
+        ...
+
     # ── DELETE ──
 
     async def delete(self, memory_id: str) -> bool:
@@ -154,8 +173,54 @@ class MemoryRepositoryProtocol(Protocol):
         """Мягкое забвение: status='retracted', valid_to=now(). Qdrant — hard delete."""
         ...
 
-    async def archive(self, memory_id: str) -> bool:
-        """Отзыв гранулы: status='retracted', valid_to=now()."""
+    async def archive(self, memory_id: str, reason: str | None = None) -> bool:
+        """Отзыв гранулы: status='retracted', valid_to=now(), metadata.reason."""
+        ...
+
+    # ── LIFECYCLE (Фаза 2.2) / CLUSTERS (Фаза 2.3) ──
+
+    async def decay_confidence(
+        self, ns_uids: list[str], rates: list[float], default_rate: float, floor: float
+    ) -> dict[str, int]:
+        """Ежедневное затухание уверенности (батч-SQL): счёт по namespace."""
+        ...
+
+    async def count_stale(self, threshold: float, stale_days: int) -> int:
+        """Счётчик устаревших кандидатов (статус не меняется)."""
+        ...
+
+    async def list_stale(
+        self,
+        threshold: float,
+        stale_days: int,
+        user_id: str | None = None,
+        namespace_id: str | None = None,
+        project_id: str | None = None,
+        limit: int = 100,
+    ) -> list[MemoryRecord]:
+        """Кандидаты на ревизию (динамический критерий, колонки-флага нет)."""
+        ...
+
+    async def select_gc_superseded(self, retention_days: int) -> list[str]:
+        """ID superseded-гранул под GC: с наследником и старше retention."""
+        ...
+
+    async def purge_memories(self, granule_ids: list[str]) -> int:
+        """Hard delete гранул + Qdrant-точек + безадресных связей (GC)."""
+        ...
+
+    async def delete_orphan_relations(self) -> int:
+        """Удалить связи без адреса целиком. Идемпотентно."""
+        ...
+
+    async def refresh_clusters(self, namespace_id: str, threshold: float) -> list[dict]:
+        """Пересчёт кластеров хранимкой assign_clusters (022)."""
+        ...
+
+    async def list_clusters(
+        self, namespace: str | None = None, project_id: str | None = None
+    ) -> list[dict]:
+        """Обзор кластеров Level 2 (022)."""
         ...
 
     # ── READ ──

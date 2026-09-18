@@ -431,6 +431,56 @@ class MemoryRepository:
 
         return record
 
+    async def create_version(
+        self,
+        old_id: str,
+        content: str,
+        embedding: list[float] | None = None,
+        metadata: dict | None = None,
+        content_hash: str | None = None,
+        importance: int | None = None,
+        confidence: float | None = None,
+    ) -> MemoryRecord | None:
+        """Новая версия факта-конфликта (Фаза 2.1, правило Graphiti).
+
+        PG-транзакция (INSERT-SELECT наследует user/namespace/project/version+1
+        + закрывает старую valid_from'ом новой) → после коммита Qdrant:
+        upsert новой точки, старой — status='superseded' в payload.
+        """
+        created = await self.pg.create_version(
+            old_id=old_id,
+            content=content,
+            metadata=metadata,
+            content_hash=content_hash,
+            importance=importance,
+            confidence=confidence,
+        )
+        if created is None:
+            return None
+        record, namespace_id = created
+
+        if self._has_qdrant():
+            if embedding is not None:
+                self.qdrant.upsert_vector(
+                    point_id=record.id,
+                    vector=embedding,
+                    payload=self._point_payload(
+                        user_id=record.user_id,
+                        namespace_id=namespace_id,
+                        importance=record.importance,
+                        project_id=record.project_id,
+                        content_hash=content_hash,
+                    ),
+                )
+            # Замещённая версия уходит из выдачи фильтром status
+            self.qdrant.set_payload(point_id=old_id, payload={"status": "superseded"})
+
+        return record
+
+    async def get_history(self, granule_id: str) -> list[MemoryRecord]:
+        """Supersession-цепочка (CTE, обе стороны) — от старейшей к новейшей."""
+        return await self.pg.get_history(granule_id)
+
     # ════════════════════════════════════════════════════════════
     # DELETE / RETRACT
     # ════════════════════════════════════════════════════════════
@@ -459,14 +509,66 @@ class MemoryRepository:
                 self.qdrant.delete_by_filter(search_filter)
         return count
 
-    async def archive(self, memory_id: str) -> bool:
-        """Отзыв: status='retracted'. Точка остаётся для time-travel, уходит из выдачи."""
-        retracted = await self.pg.archive(memory_id)
+    async def archive(self, memory_id: str, reason: str | None = None) -> bool:
+        """Отзыв: status='retracted' (+metadata.reason). Точка остаётся для time-travel."""
+        retracted = await self.pg.archive(memory_id, reason=reason)
         if retracted and self._has_qdrant():
             self.qdrant.set_payload(
                 point_id=memory_id, payload={"status": "retracted"}
             )
         return retracted
+
+    # ════════════════════════════════════════════════════════════
+    # LIFECYCLE (Фаза 2.2) / CLUSTERS (Фаза 2.3) — delegate to PG
+    # ════════════════════════════════════════════════════════════
+
+    async def decay_confidence(
+        self, ns_uids: list[str], rates: list[float], default_rate: float, floor: float
+    ) -> dict[str, int]:
+        """Ежедневное затухание уверенности (батч-SQL). Метрика: счёт по namespace."""
+        return await self.pg.decay_confidence(ns_uids, rates, default_rate, floor)
+
+    async def count_stale(self, threshold: float, stale_days: int) -> int:
+        return await self.pg.count_stale(threshold, stale_days)
+
+    async def list_stale(
+        self,
+        threshold: float,
+        stale_days: int,
+        user_id: str | None = None,
+        namespace_id: str | None = None,
+        project_id: str | None = None,
+        limit: int = 100,
+    ) -> list[MemoryRecord]:
+        return await self.pg.list_stale(
+            threshold, stale_days, user_id, namespace_id, project_id, limit
+        )
+
+    async def select_gc_superseded(self, retention_days: int) -> list[str]:
+        return await self.pg.select_gc_superseded(retention_days)
+
+    async def purge_memories(self, granule_ids: list[str]) -> int:
+        """Hard delete гранул + их Qdrant-точек (GC Фазы 2.2).
+
+        PG-транзакция (безадресные relations → memories); Qdrant — после
+        успеха PG: точки без PG-записи тоже мусор, удаление безопасно
+        (сверка — reconciliation Фазы 0).
+        """
+        deleted = await self.pg.delete_gc_superseded(granule_ids)
+        if deleted and self._has_qdrant():
+            self.qdrant.delete(point_ids=granule_ids)
+        return deleted
+
+    async def delete_orphan_relations(self) -> int:
+        return await self.pg.delete_orphan_relations()
+
+    async def refresh_clusters(self, namespace_id: str, threshold: float) -> list[dict]:
+        return await self.pg.refresh_clusters(namespace_id, threshold)
+
+    async def list_clusters(
+        self, namespace: str | None = None, project_id: str | None = None
+    ) -> list[dict]:
+        return await self.pg.list_clusters(namespace, project_id)
 
     # ════════════════════════════════════════════════════════════
     # READ (delegate to PG)
