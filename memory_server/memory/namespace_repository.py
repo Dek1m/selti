@@ -73,7 +73,8 @@ class NamespaceRepository:
                     uid,
                     display_name,
                 )
-                logger.info("Auto-registered namespace", extra={"name": display_name, "uid": uid})
+                # «name» конфликтует с зарезервированным атрибутом LogRecord (KeyError на Py3.14)
+                logger.info("Auto-registered namespace", extra={"namespace_name": display_name, "uid": uid})
 
             rec = NamespaceRecord(
                 id=str(row["id"]),

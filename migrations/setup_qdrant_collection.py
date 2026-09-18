@@ -12,6 +12,7 @@ setup_qdrant_collection.py — Создание и настройка колле
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 
@@ -23,6 +24,13 @@ load_dotenv()
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 COLLECTION = os.environ.get("QDRANT_COLLECTION", "memories")
 EMBEDDING_DIM = int(os.environ.get("EMBEDDING_DIMENSION", "4096"))
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("setup")
 
 
 def create_collection(client: QdrantClient, recreate: bool = False) -> None:
@@ -59,8 +67,8 @@ def create_collection(client: QdrantClient, recreate: bool = False) -> None:
             flush_interval_sec=30,
             # Максимум потоков для оптимизации
             max_optimization_threads=2,
-            # Количество сегментов на shard
-            segments_count=2,
+            # segments_count удалён в qdrant-client 1.19 (recreate падал на проде);
+            # число сегментов отдаём дефолту Qdrant
         ),
         # Single-node, replication=1
         replication_factor=1,
@@ -132,15 +140,6 @@ def collection_info(client: QdrantClient) -> None:
             logger.info("    - %s: %s", name, idx.data_type)
     except Exception as e:
         logger.error("Collection '%s' not found: %s", COLLECTION, e)
-
-
-import logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger("setup")
 
 
 def main() -> None:

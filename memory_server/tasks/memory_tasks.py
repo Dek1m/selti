@@ -530,6 +530,26 @@ def traverse_graph(
 # ── Ingest Batch ────────────────────────────────────────────────
 
 
+def _split_valid_entries(entries: list[Any]) -> tuple[list[dict], list[dict]]:
+    """Валидация батча до dedup: content — обязательная непустая строка.
+
+    Голая строка нормализуется в запись (клиент мог потерять dict-обёртку);
+    malformed-записи не роняют батч — возвращаются отдельно с исходным индексом
+    для warning-лога и счётчика в результате.
+    """
+    valid: list[dict] = []
+    malformed: list[dict] = []
+    for idx, entry in enumerate(entries):
+        if isinstance(entry, str):
+            entry = {"content": entry}
+        content = entry.get("content") if isinstance(entry, dict) else None
+        if isinstance(content, str) and content.strip():
+            valid.append(entry)
+        else:
+            malformed.append({"index": idx, "error": "content must be a non-empty string"})
+    return valid, malformed
+
+
 @shared_task(
     bind=True,
     base=SeltiTask,
@@ -560,14 +580,25 @@ def ingest_batch(
 
     service = _get_service()
 
-    # Batch dedup
-    summary: dict[str, int] = {"insert": 0, "skip": 0, "update": 0}
+    # Валидация до dedup: malformed-записи пропускаем, батч не роняем
+    # (прод-инцидент: KeyError('content') в DedupEngine.check_batch)
+    valid_entries, malformed = _split_valid_entries(entries)
+    summary: dict[str, int] = {"insert": 0, "skip": 0, "update": 0, "invalid": 0}
     results = []
+    for bad in malformed:
+        summary["invalid"] += 1
+        results.append({"id": None, "action": "invalid", "error": bad["error"]})
+    if malformed:
+        logger.warning("ingest_batch: skipped malformed entries", extra={
+            "indices": [bad["index"] for bad in malformed],
+            "invalid": summary["invalid"],
+        })
+
     to_insert: list[dict] = []
 
     if service.config.dedup_enabled:
-        decisions = run_async(service.dedup.check_batch, entries, user_id)
-        for entry, decision in zip(entries, decisions):
+        decisions = run_async(service.dedup.check_batch, valid_entries, user_id)
+        for entry, decision in zip(valid_entries, decisions):
             ns = entry.get("namespace", "default")
             entry_metadata = entry.get("metadata")
             if decision.action.value in ("skip", "update"):
@@ -587,7 +618,7 @@ def ingest_batch(
                 "embedding": decision.embedding,
             })
     else:
-        for entry in entries:
+        for entry in valid_entries:
             ns = entry.get("namespace", "default")
             entry_metadata = entry.get("metadata")
             to_insert.append({
