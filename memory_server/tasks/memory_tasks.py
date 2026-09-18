@@ -219,8 +219,9 @@ def search_memories(
     threshold: float = 0.7,
     namespace: str | None = None,
     project_id: str | None = None,
+    include_historical: bool = False,
 ) -> list[dict[str, Any]]:
-    """Search memories by semantic similarity."""
+    """Search memories (hybrid: dense + FTS, Фаза 1.1)."""
     if not query or not query.strip():
         raise ValidationError("query cannot be empty")
 
@@ -233,6 +234,7 @@ def search_memories(
         threshold=threshold,
         namespace=namespace,
         project_id=project_id,
+        include_historical=include_historical,
     )
     return [r.model_dump(mode="json") for r in results]
 
@@ -509,8 +511,13 @@ def traverse_graph(
     start_id: str,
     depth: int = 3,
     link_types: list[str] | None = None,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> dict[str, Any]:
-    """Traverse the knowledge graph from a starting node."""
+    """Traverse the knowledge graph from a starting node.
+
+    limit/offset — курсорная пагинация узлов (cap traverse_max_nodes).
+    """
     if not start_id or not start_id.strip():
         raise ValidationError("start_id cannot be empty")
 
@@ -520,10 +527,14 @@ def traverse_graph(
         start_id=start_id,
         depth=depth,
         link_types=link_types,
+        limit=limit,
+        offset=offset,
     )
     return {
         "nodes": result.nodes,
         "edges": [e.model_dump(mode="json") for e in result.edges],
+        "total_nodes": result.total_nodes,
+        "truncated": result.truncated,
     }
 
 

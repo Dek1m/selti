@@ -386,7 +386,7 @@ class TestBatchDedup:
     @pytest.mark.asyncio
     async def test_batch_all_insert(self, dedup_engine, mock_pool):
         """Все записи новые → все INSERT, embed_many вызван один раз."""
-        dedup_engine.repository.find_by_content_hash = AsyncMock(return_value=None)
+        dedup_engine.repository.find_by_content_hashes = AsyncMock(return_value={})
         dedup_engine.embedding.embed_many = AsyncMock(
             return_value=[[0.1], [0.2], [0.3]]
         )
@@ -405,22 +405,30 @@ class TestBatchDedup:
         dedup_engine.embedding.embed_many.assert_awaited_once()
         call_args = dedup_engine.embedding.embed_many.call_args[0][0]
         assert call_args == ["A", "B", "C"]
+        # exact-фаза — один batch-запрос на весь батч (Фаза 1.4)
+        dedup_engine.repository.find_by_content_hashes.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_batch_exact_dedup(self, dedup_engine, mock_pool):
-        """2 из 3 — exact match → SKIP, embed_many только для 1 нового."""
+        """2 из 3 — exact match → SKIP, embed_many только для 1 нового.
+
+        Exact-фаза: ОДИН batch-запрос find_by_content_hashes на весь батч
+        (Фаза 1.4) вместо цикла find_by_content_hash.
+        """
         now = datetime.now(timezone.utc)
 
-        async def mock_find(ns, h):
-            if h == hashlib.sha256(b"A").hexdigest():
-                return MemoryRecord(id="id-a", user_id="u1", content="A",
-                                    namespace=ns, created_at=now, updated_at=now, content_hash=h)
-            if h == hashlib.sha256(b"C").hexdigest():
-                return MemoryRecord(id="id-c", user_id="u1", content="C",
-                                    namespace=ns, created_at=now, updated_at=now, content_hash=h)
-            return None
+        def mock_find_hashes(ns_uids, hashes):
+            found = {}
+            for ns, h in zip(ns_uids, hashes):
+                if h == hashlib.sha256(b"A").hexdigest():
+                    found[(ns, h)] = MemoryRecord(id="id-a", user_id="u1", content="A",
+                                                  namespace=ns, created_at=now, updated_at=now, content_hash=h)
+                if h == hashlib.sha256(b"C").hexdigest():
+                    found[(ns, h)] = MemoryRecord(id="id-c", user_id="u1", content="C",
+                                                  namespace=ns, created_at=now, updated_at=now, content_hash=h)
+            return found
 
-        dedup_engine.repository.find_by_content_hash = AsyncMock(side_effect=mock_find)
+        dedup_engine.repository.find_by_content_hashes = AsyncMock(side_effect=mock_find_hashes)
         dedup_engine.embedding.embed_many = AsyncMock(return_value=[[0.5]])
         dedup_engine.repository.search = AsyncMock(return_value=[])
 
@@ -436,6 +444,8 @@ class TestBatchDedup:
         assert decisions[1].action == DedupAction.INSERT
         assert decisions[2].action == DedupAction.SKIP
         assert decisions[2].existing_id == "id-c"
+        # один batch-запрос, не цикл
+        dedup_engine.repository.find_by_content_hashes.assert_awaited_once()
         # embed_many вызван только для B
         dedup_engine.embedding.embed_many.assert_awaited_once()
         call_args = dedup_engine.embedding.embed_many.call_args[0][0]
@@ -444,21 +454,19 @@ class TestBatchDedup:
     @pytest.mark.asyncio
     async def test_batch_semantic_dedup(self, dedup_engine, mock_pool):
         """Semantic dedup: 1 из 2 — score >= threshold → SKIP, другой — INSERT."""
-        dedup_engine.repository.find_by_content_hash = AsyncMock(return_value=None)
+        dedup_engine.repository.find_by_content_hashes = AsyncMock(return_value={})
         dedup_engine.embedding.embed_many = AsyncMock(
             return_value=[[0.1, 0.2], [0.3, 0.4]]
         )
-        # Первый вызов — match, второй — нет
+        # Первый кандидат — match, второй — нет (по вектору запроса)
         search_results = [
             [SearchResult(id="semantic-id", content="Similar", metadata={}, score=0.97)],
             [],
         ]
-        call_count = 0
+        vectors = [[0.1, 0.2], [0.3, 0.4]]
+
         async def mock_search(**kwargs):
-            nonlocal call_count
-            result = search_results[call_count]
-            call_count += 1
-            return result
+            return search_results[vectors.index(kwargs["query_embedding"])]
 
         dedup_engine.repository.search = AsyncMock(side_effect=mock_search)
 
@@ -481,7 +489,7 @@ class TestBatchDedup:
             embedding_client=MagicMock(),
             config=Settings(dedup_enabled=False),
         )
-        engine.repository.find_by_content_hash = AsyncMock()
+        engine.repository.find_by_content_hashes = AsyncMock()
         engine.embedding.embed_many = AsyncMock()
         engine.repository.search = AsyncMock()
 
@@ -492,7 +500,7 @@ class TestBatchDedup:
         decisions = await engine.check_batch(entries, "u1")
 
         assert all(d.action == DedupAction.INSERT for d in decisions)
-        engine.repository.find_by_content_hash.assert_not_called()
+        engine.repository.find_by_content_hashes.assert_not_called()
         engine.embedding.embed_many.assert_not_called()
         engine.repository.search.assert_not_called()
 
@@ -503,18 +511,49 @@ class TestBatchDedup:
         assert decisions == []
 
     @pytest.mark.asyncio
+    async def test_batch_semantic_failure_insert_fallback(self, dedup_engine, mock_pool):
+        """Отказ одного semantic-поиска не роняет батч: INSERT-fallback (Фаза 1.4)."""
+        dedup_engine.repository.find_by_content_hashes = AsyncMock(return_value={})
+        dedup_engine.embedding.embed_many = AsyncMock(
+            return_value=[[0.1, 0.2], [0.3, 0.4]]
+        )
+        vectors = [[0.1, 0.2], [0.3, 0.4]]
+
+        async def mock_search(**kwargs):
+            if kwargs["query_embedding"] == vectors[0]:
+                raise RuntimeError("qdrant circuit open")
+            return [SearchResult(id="ok-id", content="Y-like", metadata={}, score=0.97)]
+
+        dedup_engine.repository.search = AsyncMock(side_effect=mock_search)
+
+        entries = [
+            {"content": "X", "namespace": "default"},
+            {"content": "Y", "namespace": "default"},
+        ]
+        decisions = await dedup_engine.check_batch(entries, "u1")
+
+        # упавший поиск → INSERT (embedding сохранён для вставки)
+        assert decisions[0].action == DedupAction.INSERT
+        assert decisions[0].embedding == vectors[0]
+        # живой поиск → SKIP по semantic-матчу
+        assert decisions[1].action == DedupAction.SKIP
+        assert decisions[1].existing_id == "ok-id"
+
+    @pytest.mark.asyncio
     async def test_batch_user_facts_update(self, dedup_engine, mock_pool):
         """Exact match в user_facts → UPDATE (не SKIP)."""
         now = datetime.now(timezone.utc)
 
-        async def mock_find(ns, h):
-            if ns == "user_facts" and h == hashlib.sha256(b"A").hexdigest():
-                return MemoryRecord(id="id-a", user_id="u1", content="A",
-                                    namespace="user_facts", created_at=now,
-                                    updated_at=now, content_hash=h)
-            return None
+        def mock_find_hashes(ns_uids, hashes):
+            found = {}
+            for ns, h in zip(ns_uids, hashes):
+                if ns == "user_facts" and h == hashlib.sha256(b"A").hexdigest():
+                    found[(ns, h)] = MemoryRecord(id="id-a", user_id="u1", content="A",
+                                                  namespace="user_facts", created_at=now,
+                                                  updated_at=now, content_hash=h)
+            return found
 
-        dedup_engine.repository.find_by_content_hash = AsyncMock(side_effect=mock_find)
+        dedup_engine.repository.find_by_content_hashes = AsyncMock(side_effect=mock_find_hashes)
         dedup_engine.embedding.embed_many = AsyncMock(return_value=[[0.1]])
         dedup_engine.repository.search = AsyncMock(return_value=[])
 

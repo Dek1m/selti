@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import logging
 from dataclasses import dataclass
@@ -7,6 +8,7 @@ from memory_server.config import Settings
 from memory_server.embedding.provider import EmbeddingProvider
 from memory_server.memory.repository import MemoryRepository
 from memory_server.metrics import DEDUP_SKIPPED_TOTAL, DEDUP_INSERTED_TOTAL, DEDUP_RATIO
+from memory_server.models import SearchResult
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +57,25 @@ class DedupEngine:
         if total > 0:
             DEDUP_RATIO.labels(namespace=namespace).set(counts["skipped"] / total)
 
+    def _semantic_match(
+        self,
+        results: list[SearchResult],
+        threshold: float,
+        incoming_metadata: dict | None,
+    ) -> SearchResult | None:
+        """Топ-результат выше порога и entity_name не конфликтует → дубль.
+
+        Сравнение скоуплено namespace (search вызывается с namespace-фильтром);
+        пары сущностей cross-namespace — TODO Фазы 4 (D7/research).
+        """
+        if not results or results[0].score < threshold:
+            return None
+        incoming_entity = (incoming_metadata or {}).get("entity_name", "").strip().lower()
+        existing_entity = (results[0].metadata or {}).get("entity_name", "").strip().lower()
+        if incoming_entity and existing_entity and incoming_entity != existing_entity:
+            return None  # не дубль: entity_name разный, гранулы дополняют друг друга
+        return results[0]
+
     async def check(
         self,
         content: str,
@@ -97,29 +118,19 @@ class DedupEngine:
             limit=5,
         )
 
-        if results and results[0].score >= threshold:
-            # Проверка entity_name: если разный — не дубль
-            incoming_entity = (metadata or {}).get("entity_name", "").strip().lower()
-            existing_entity = (results[0].metadata or {}).get("entity_name", "").strip().lower()
-
-            if incoming_entity and existing_entity and incoming_entity != existing_entity:
-                logger.info("Semantic dedup skipped (different entity_name)", extra={
-                    "incoming": incoming_entity, "existing": existing_entity,
-                })
-                # Не дубль — entity_name разный, гранулы дополняют друг друга
-            else:
-                best = results[0]
-                logger.info("Semantic dedup match", extra={
-                    "namespace": namespace, "score": best.score, "id": best.id,
-                })
-                DEDUP_SKIPPED_TOTAL.labels(namespace=namespace, reason="semantic").inc()
-                self._update_ratio(namespace, DedupAction.SKIP)
-                return DedupDecision(
-                    action=DedupAction.SKIP,
-                    existing_id=best.id,
-                    existing_score=best.score,
-                    content_hash=content_hash,
-                )
+        best = self._semantic_match(results, threshold, metadata)
+        if best is not None:
+            logger.info("Semantic dedup match", extra={
+                "namespace": namespace, "score": best.score, "id": best.id,
+            })
+            DEDUP_SKIPPED_TOTAL.labels(namespace=namespace, reason="semantic").inc()
+            self._update_ratio(namespace, DedupAction.SKIP)
+            return DedupDecision(
+                action=DedupAction.SKIP,
+                existing_id=best.id,
+                existing_score=best.score,
+                content_hash=content_hash,
+            )
 
         DEDUP_INSERTED_TOTAL.labels(namespace=namespace).inc()
         self._update_ratio(namespace, DedupAction.INSERT)
@@ -135,9 +146,12 @@ class DedupEngine:
         entries: list[dict],
         user_id: str,
     ) -> list[DedupDecision]:
-        """Batch dedup: exact hash check для всех, затем batch embedding + semantic search.
+        """Batch dedup: batch exact lookup → batch embedding → параллельный semantic.
 
-        Оптимизация: вместо serial embed() × N делаем batch embed_many() один раз.
+        Оптимизации Фазы 1.4: exact-фаза — ОДИН запрос на весь батч
+        (пары (uid, hash) через unnest) вместо цикла; semantic-фаза —
+        asyncio.gather вместо serial (Qdrant-клиент за CircuitBreaker —
+        отказ одного поиска не роняет батч, INSERT-fallback).
         """
         if not self.config.dedup_enabled:
             return [
@@ -151,17 +165,25 @@ class DedupEngine:
         # Phase 1: content hashes для всех entries (CPU-only, мгновенно)
         hashes = [hashlib.sha256(e["content"].encode()).hexdigest() for e in entries]
 
-        # Phase 2: exact dedup — batch lookup по namespace + hash
-        # Группируем по namespace для эффективных запросов
+        # Phase 2: exact dedup — один batch-запрос пар (uid, hash)
         ns_groups: dict[str, list[tuple[int, str]]] = {}
         for i, (entry, h) in enumerate(zip(entries, hashes)):
             ns = entry.get("namespace", "default")
             ns_groups.setdefault(ns, []).append((i, h))
 
+        pairs = [(ns, h) for ns, items in ns_groups.items() for _, h in items]
+        found = (
+            await self.repository.find_by_content_hashes(
+                [ns for ns, _ in pairs], [h for _, h in pairs]
+            )
+            if pairs
+            else {}
+        )
+
         decisions: list[DedupDecision | None] = [None] * len(entries)
         for ns, items in ns_groups.items():
             for idx, h in items:
-                existing = await self.repository.find_by_content_hash(ns, h)
+                existing = found.get((ns, h))
                 if existing is not None:
                     action = DedupAction.UPDATE if ns == "user_facts" else DedupAction.SKIP
                     DEDUP_SKIPPED_TOTAL.labels(namespace=ns, reason="exact").inc()
@@ -182,13 +204,12 @@ class DedupEngine:
         # Batch embedding — один запрос вместо N
         embeddings = await self.embedding.embed_many(texts_to_embed)
 
-        # Phase 4: semantic dedup для каждого кандидата
-        for local_i, global_i in enumerate(to_embed_indices):
+        # Phase 4: semantic dedup — параллельные проверки (gather)
+        async def _semantic_one(local_i: int, global_i: int) -> DedupDecision:
             entry = entries[global_i]
             ns = entry.get("namespace", "default")
             h = hashes[global_i]
             vector = embeddings[local_i]
-
             threshold = self.config.dedup_thresholds.get(ns, self.config.dedup_threshold)
             results = await self.repository.search(
                 query_embedding=vector,
@@ -197,31 +218,44 @@ class DedupEngine:
                 threshold=threshold,
                 limit=5,
             )
-
-            if results and results[0].score >= threshold:
-                incoming_entity = (entry.get("metadata") or {}).get("entity_name", "").strip().lower()
-                existing_entity = (results[0].metadata or {}).get("entity_name", "").strip().lower()
-
-                if incoming_entity and existing_entity and incoming_entity != existing_entity:
-                    pass  # не дубль — entity_name разный
-                else:
-                    best = results[0]
-                    DEDUP_SKIPPED_TOTAL.labels(namespace=ns, reason="semantic").inc()
-                    self._update_ratio(ns, DedupAction.SKIP)
-                    decisions[global_i] = DedupDecision(
-                        action=DedupAction.SKIP,
-                        existing_id=best.id,
-                        existing_score=best.score,
-                        content_hash=h,
-                    )
-                    continue
-
+            best = self._semantic_match(results, threshold, entry.get("metadata"))
+            if best is not None:
+                DEDUP_SKIPPED_TOTAL.labels(namespace=ns, reason="semantic").inc()
+                self._update_ratio(ns, DedupAction.SKIP)
+                return DedupDecision(
+                    action=DedupAction.SKIP,
+                    existing_id=best.id,
+                    existing_score=best.score,
+                    content_hash=h,
+                )
             DEDUP_INSERTED_TOTAL.labels(namespace=ns).inc()
             self._update_ratio(ns, DedupAction.INSERT)
-            decisions[global_i] = DedupDecision(
+            return DedupDecision(
                 action=DedupAction.INSERT,
                 content_hash=h,
                 embedding=vector,
             )
+
+        gathered = await asyncio.gather(
+            *(_semantic_one(li, gi) for li, gi in enumerate(to_embed_indices)),
+            return_exceptions=True,
+        )
+        for li, gi in enumerate(to_embed_indices):
+            res = gathered[li]
+            if isinstance(res, BaseException):
+                # Потерять дубль безопаснее, чем данные: INSERT-fallback
+                logger.warning(
+                    "batch semantic dedup failed — INSERT fallback",
+                    extra={"error": str(res), "error_type": type(res).__name__},
+                )
+                ns = entries[gi].get("namespace", "default")
+                DEDUP_INSERTED_TOTAL.labels(namespace=ns).inc()
+                self._update_ratio(ns, DedupAction.INSERT)
+                res = DedupDecision(
+                    action=DedupAction.INSERT,
+                    content_hash=hashes[gi],
+                    embedding=embeddings[li],
+                )
+            decisions[gi] = res
 
         return decisions  # type: ignore[return-value]

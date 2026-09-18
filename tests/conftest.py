@@ -1,44 +1,16 @@
 """Shared test fixtures for selti.
 
-IMPORTANT: metrics.py has a bug — Counter() is called with multiprocess_mode
-which is only valid for Gauge. We mock prometheus_client before importing
-any memory_server modules to avoid the TypeError.
+Исторический костыль (mock prometheus_client, вычищающий multiprocess_mode
+из Counter/Histogram) удалён: metrics.py больше не передаёт этот параметр
+в Counter/Histogram (валиден только для Gauge). Регрессию застеняет
+test_metrics.py::test_module_imports_without_patches — прямой импорт
+в чистом subprocess, без какого-либо патчинга.
 
-Also: circuitbreaker 2.1.3 doesn't have half_open_max_calls param.
-We patch it too.
+circuitbreaker 2.1.3 doesn't have half_open_max_calls param.
+We patch it.
 """
 
-import sys
-from unittest.mock import AsyncMock, MagicMock, patch
-
-# ── Mock prometheus_client BEFORE any memory_server import ──
-if "prometheus_client" not in sys.modules:
-    _real_pc = __import__("prometheus_client")
-    _mock_pc = MagicMock(wraps=_real_pc)
-
-    _original_counter = _real_pc.Counter
-    _original_gauge = _real_pc.Gauge
-    _original_histogram = _real_pc.Histogram
-
-    class _PatchedCounter(_original_counter):
-        def __init__(self, *args, **kwargs):
-            kwargs.pop("multiprocess_mode", None)
-            super().__init__(*args, **kwargs)
-
-    class _PatchedGauge(_original_gauge):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-
-    class _PatchedHistogram(_original_histogram):
-        def __init__(self, *args, **kwargs):
-            kwargs.pop("multiprocess_mode", None)
-            super().__init__(*args, **kwargs)
-
-    _mock_pc.Counter = _PatchedCounter
-    _mock_pc.Gauge = _PatchedGauge
-    _mock_pc.Histogram = _PatchedHistogram
-
-    sys.modules["prometheus_client"] = _mock_pc
+from unittest.mock import AsyncMock, MagicMock
 
 # ── Patch CircuitBreaker to accept half_open_max_calls and add_state_change_listener ──
 import circuitbreaker as _cb_mod
@@ -98,6 +70,8 @@ def memory_row(**overrides) -> dict:
         "supersedes": None,
         "superseded_by": None,
         "frozen": False,
+        "last_accessed_at": None,
+        "access_count": 0,
     }
     row.update(overrides)
     return row
@@ -238,12 +212,16 @@ def mock_namespace_repository(mock_pool):
 
 @pytest.fixture
 def mock_service(mock_repository, mock_embedding_provider, mock_namespace_repository, mock_project_repository):
-    """Fixture that returns a MemoryService with mocked deps."""
+    """Fixture that returns a MemoryService with mocked deps.
+
+    hybrid off: базовые тесты проверяют плотный путь; гибридный флоу —
+    отдельные тесты с hybrid on (TestHybridSearch в test_service.py).
+    """
     service = MemoryService(
         repository=mock_repository,
         embedding_provider=mock_embedding_provider,
         namespace_repository=mock_namespace_repository,
-        config=Settings(dedup_enabled=False),
+        config=Settings(dedup_enabled=False, hybrid_search_enabled=False),
         project_repository=mock_project_repository,
     )
     return service

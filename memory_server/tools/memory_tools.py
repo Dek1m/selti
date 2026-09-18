@@ -117,15 +117,19 @@ async def memory_search(
     threshold: float = 0.7,
     namespace: str | None = None,
     project_id: str | None = None,
+    include_historical: bool = False,
     ctx: Context | None = None,
 ) -> list[dict[str, Any]]:
-    """Search memories by semantic similarity.
+    """Search memories by semantic similarity (hybrid: dense + full-text).
 
-    Returns memories matching the query, ordered by relevance score.
+    Returns memories matching the query, ordered by relevance score
+    (rrf × recency_decay × importance).
     Only currently asserted memories are returned (status='asserted').
 
     project_id: optional project slug or UUID to scope the search;
     omit to search everywhere (global layer included).
+    include_historical: set True for time-travel — superseded/retracted
+    versions are included (validity filter disabled).
     """
     results = await celery_call(
         TASK_SEARCH,
@@ -135,6 +139,7 @@ async def memory_search(
         threshold=threshold,
         namespace=namespace,
         project_id=project_id,
+        include_historical=include_historical,
     )
     SEARCH_RESULTS.labels(tool="memory_search").observe(len(results))
     return results
@@ -406,18 +411,25 @@ async def memory_traverse(
     start_id: str,
     depth: int = 3,
     link_types: list[str] | None = None,
+    limit: int | None = None,
+    offset: int = 0,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Обход графа от начальной гранулы (BFS).
 
     depth: максимальная глубина обхода (по умолчанию 3)
     link_types: фильтр по типам связей (по умолчанию все)
+    limit/offset: курсорная пагинация узлов (стабильный порядок —
+    сортировка по id; total_nodes в ответе — для навигации);
+    hard-cap узлов — 500 (конфиг traverse_max_nodes)
     """
     return await celery_call(
         TASK_TRAVERSE,
         start_id=start_id,
         depth=depth,
         link_types=link_types,
+        limit=limit,
+        offset=offset,
     )
 
 

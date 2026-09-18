@@ -130,9 +130,15 @@ class RelationListResult(BaseModel):
 
 
 class TraverseResult(BaseModel):
-    """Результат обхода графа."""
+    """Результат обхода графа.
+
+    total_nodes/truncated (Фаза 1.5): cap + пагинация в Python-слое —
+    total_nodes для навигации, truncated=True — выдача урезана cap'ом.
+    """
     nodes: list[dict]  # [{id, content, namespace, ...}]
     edges: list[Relation]
+    total_nodes: int = 0
+    truncated: bool = False
 
 
 class GraphStats(BaseModel):

@@ -17,6 +17,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol
 
+from memory_server.memory.search_fusion import HybridCandidate
 from memory_server.models import (
     GraphStats,
     MemoryListResult,
@@ -102,8 +103,23 @@ class MemoryRepositoryProtocol(Protocol):
         namespace: str | None = None,
         query_text: str | None = None,
         project_id: str | None = None,
+        include_historical: bool = False,
     ) -> list[SearchResult]:
         """Векторный поиск по embedding. Если Qdrant недоступен — SQL FTS fallback."""
+        ...
+
+    async def search_hybrid(
+        self,
+        query_embedding: list[float],
+        query_text: str,
+        user_id: str | None = None,
+        namespace: str | None = None,
+        project_id: str | None = None,
+        threshold: float = 0.7,
+        prefetch: int = 100,
+        include_historical: bool = False,
+    ) -> list[HybridCandidate]:
+        """Двухканальный сбор кандидатов (Qdrant dense + PG FTS, Фаза 1.1)."""
         ...
 
     # ── UPDATE ──
@@ -119,6 +135,7 @@ class MemoryRepositoryProtocol(Protocol):
         confidence: float | None = None,
         frozen: bool | None = None,
         supersedes: str | None = None,
+        content_hash: str | None = None,
     ) -> MemoryRecord | None:
         """Обновить гранулу (metadata merge-ится). supersedes — закрыть старую версию."""
         ...
@@ -151,6 +168,16 @@ class MemoryRepositoryProtocol(Protocol):
         self, namespace: str, content_hash: str
     ) -> MemoryRecord | None:
         """Найти актуальную запись по content_hash в namespace (exact-dedup)."""
+        ...
+
+    async def find_by_content_hashes(
+        self, ns_uids: list[str], content_hashes: list[str]
+    ) -> dict[tuple[str, str], MemoryRecord]:
+        """Batch exact-dedup: {(namespace, content_hash): record} одним запросом."""
+        ...
+
+    async def bump_access(self, memory_ids: list[str]) -> int:
+        """Инкремент access_count/last_accessed_at по выданным id (Фаза 1.2)."""
         ...
 
     async def list(
@@ -252,7 +279,12 @@ class MemoryRepositoryProtocol(Protocol):
     # ── GRAPH ──
 
     async def traverse(
-        self, start_id: str, depth: int = 3, link_types: list[str] | None = None
+        self,
+        start_id: str,
+        depth: int = 3,
+        link_types: list[str] | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> dict:
         """Обход графа. Возвращает {nodes: JSONB, edges: JSONB}."""
         ...

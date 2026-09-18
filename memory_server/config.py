@@ -25,6 +25,35 @@ class Settings(BaseSettings):
     search_default_limit: int = 10
     search_default_threshold: float = 0.7
 
+    # ── Фаза 1: hybrid search + ранжирование (D4/D5) ──
+    # Фича-флаг отката (не legacy): False = плотный Qdrant-путь Фазы 0.
+    hybrid_search_enabled: bool = True
+    hybrid_prefetch: int = 100   # кандидатов на канал до RRF-fusion
+    rrf_k: int = 60              # RRF: score = Σ 1/(k + rank)
+    mmr_lambda: float = 0.7      # MMR: баланс relevance/diversity
+
+    # Ранжирование D4: score = rrf × recency_decay × importance_weight.
+    # decay = rate^(дней с COALESCE(last_accessed_at, created_at)); frozen → 1.0.
+    recency_decay_rate: float = 0.995  # затухание в день (неймспейс без override)
+    recency_decay_rates: dict[str, float] = {
+        "default": 0.995,
+        "user_facts": 0.999,        # факты о пользователе долговечны
+        "project_meta": 0.998,      # архитектурные решения живут долго
+        "code_knowledge": 0.995,
+        "dialogue_insights": 0.99,  # инсайты разговоров устаревают быстрее
+        "infrastructure": 0.993,    # инфра-топология меняется заметно
+    }
+    importance_multipliers: dict[str, float] = {
+        "default": 1.0,
+        "user_facts": 1.2,          # факты о пользователе — приоритет
+        "project_meta": 1.1,
+        "code_knowledge": 1.0,
+        "dialogue_insights": 0.8,   # разговорный контент мягже кода
+        "infrastructure": 1.0,
+    }
+
+    traverse_max_nodes: int = 500  # cap узлов обхода графа (Фаза 1.5)
+
     dedup_enabled: bool = True
     dedup_threshold: float = 0.95
     dedup_thresholds: dict[str, float] = {

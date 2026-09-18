@@ -78,8 +78,14 @@ class QdrantStore:
         limit: int = 10,
         score_threshold: float | None = None,
         query_filter: Optional[qm.Filter] = None,
+        with_vectors: bool = False,
     ) -> list[dict]:
-        """Vector search. Возвращает [{id, score, payload}]."""
+        """Vector search. Возвращает [{id, score, payload, vector}].
+
+        with_vectors=True — вектора кандидатов для MMR-реранкера (Фаза 1.1);
+        payload-диета (D6) на вектора не распространяется, но без нужды
+        (обычный поиск) их не запрашиваем.
+        """
         qstart = time.monotonic()
         result = self.client.query_points(
             collection_name=self.collection,
@@ -87,13 +93,14 @@ class QdrantStore:
             query_filter=query_filter,
             limit=limit,
             score_threshold=score_threshold,
+            with_vectors=with_vectors,
         )
         QDRANT_OPS_TOTAL.labels(operation="search").inc()
         QDRANT_OPS_DURATION_SECONDS.labels(operation="search").observe(time.monotonic() - qstart)
         QDRANT_SEARCH_RESULTS.observe(len(result.points))
 
         return [
-            {"id": r.id, "score": r.score, "payload": r.payload}
+            {"id": r.id, "score": r.score, "payload": r.payload, "vector": r.vector}
             for r in result.points
         ]
 

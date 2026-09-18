@@ -10,11 +10,12 @@
 """
 
 # Каноническая проекция memories: всё, что нужно MemoryRecord.
+# last_accessed_at/access_count — для ранжирования D4 (Фаза 1.2).
 _MEMORY_COLUMNS = """
     m.id, m.user_id, m.content, m.metadata, n.uid AS namespace, m.importance,
     m.created_at, m.updated_at, m.content_hash,
     m.project_id, m.status, m.confidence, m.valid_from, m.valid_to, m.ingested_at,
-    m.supersedes, m.superseded_by, m.frozen
+    m.supersedes, m.superseded_by, m.frozen, m.last_accessed_at, m.access_count
 """
 
 INSERT_MEMORY = """
@@ -59,6 +60,17 @@ SELECT_MEMORY_BY_CONTENT_HASH = f"""
       AND m.status = 'asserted' AND m.valid_to IS NULL
 """
 
+# Batch exact-dedup (Фаза 1.4): ОДИН запрос на весь батч пар (uid, hash)
+# вместо цикла find_by_content_hash. unnest параллельными массивами —
+# точное совпадение пары, не декартово произведение.
+SELECT_MEMORY_BY_CONTENT_HASHES = f"""
+    SELECT {_MEMORY_COLUMNS}, k.ns_uid, k.matched_hash
+    FROM unnest($1::text[], $2::text[]) AS k(ns_uid, matched_hash)
+    JOIN namespaces n ON n.uid = k.ns_uid
+    JOIN memories m ON m.namespace_id = n.id AND m.content_hash = k.matched_hash
+    WHERE m.status = 'asserted' AND m.valid_to IS NULL
+"""
+
 SELECT_MEMORY_BY_ENTITY_NAME = f"""
     SELECT {_MEMORY_COLUMNS}
     FROM memories m
@@ -67,19 +79,21 @@ SELECT_MEMORY_BY_ENTITY_NAME = f"""
     LIMIT 1
 """
 
-# FTS fallback — используется когда Qdrant недоступен.
-# Основной путь: Qdrant vector search (repository.py → qdrant_store.py).
+# FTS: канал B гибридного поиска (Фаза 1.1) и fallback при недоступном Qdrant.
+# Конфиг 'russian' — стемминг для основного корпуса памяти (кириллица);
+# TODO(migration 021): GIN-индекс to_tsvector('russian', content) — сейчас
+# выражение вычисляется на лету; заготовка migrations/021_phase1_search_fixes.sql.
 SEARCH_MEMORIES = f"""
     SELECT
         {_MEMORY_COLUMNS},
-        ts_rank(to_tsvector('simple', m.content), plainto_tsquery('simple', $1)) AS score
+        ts_rank(to_tsvector('russian', m.content), plainto_tsquery('russian', $1)) AS score
     FROM memories m
     JOIN namespaces n ON n.id = m.namespace_id
     WHERE ($2::text IS NULL OR m.user_id = $2)
       AND ($3::uuid IS NULL OR m.namespace_id = $3)
       AND ($4::uuid IS NULL OR m.project_id = $4)
-      AND m.status = 'asserted' AND m.valid_to IS NULL
-      AND to_tsvector('simple', m.content) @@ plainto_tsquery('simple', $1)
+      AND ($6::bool OR (m.status = 'asserted' AND m.valid_to IS NULL))
+      AND to_tsvector('russian', m.content) @@ plainto_tsquery('russian', $1)
     ORDER BY score DESC
     LIMIT $5
 """
@@ -87,16 +101,20 @@ SEARCH_MEMORIES = f"""
 # metadata — dict-merge (|| — shallow merge, новые ключи затирают старые),
 # а не COALESCE-затирание всего JSONB. version инкрементит триггер
 # trg_memories_version_bump (миграция 018) при изменении content.
+# $9 content_hash: при обновлении content вызывающий слой ОБЯЗАН передать
+# свежий sha256 — иначе рассинхрон поймает unique-индекс
+# idx_memories_content_hash_active (020) на следующем UPDATE.
 UPDATE_MEMORY = f"""
     UPDATE memories m
-    SET content    = COALESCE($2, content),
-        metadata   = CASE WHEN $3::jsonb IS NULL THEN metadata ELSE metadata || $3::jsonb END,
-        importance = COALESCE($4, importance),
-        project_id = COALESCE($5::uuid, project_id),
-        confidence = COALESCE($6, confidence),
-        frozen     = COALESCE($7, frozen),
-        supersedes = COALESCE($8::uuid, supersedes),
-        updated_at = now()
+    SET content      = COALESCE($2, content),
+        metadata     = CASE WHEN $3::jsonb IS NULL THEN metadata ELSE metadata || $3::jsonb END,
+        importance   = COALESCE($4, importance),
+        project_id   = COALESCE($5::uuid, project_id),
+        confidence   = COALESCE($6, confidence),
+        frozen       = COALESCE($7, frozen),
+        supersedes   = COALESCE($8::uuid, supersedes),
+        content_hash = COALESCE($9, content_hash),
+        updated_at   = now()
     FROM namespaces n
     WHERE m.id = $1 AND n.id = m.namespace_id
     RETURNING {_MEMORY_COLUMNS}
@@ -172,12 +190,27 @@ MEMORY_STATS = """
 
 # Батч-fetch метаданных по IDs для Qdrant-выдачи: фильтр актуальности
 # на уровне SQL, чтобы archived не съедали лимит выдачи.
+# $2 = include_historical (time-travel, Фаза 1.3): True отключает фильтр
+# актуальности — видны superseded/retracted версии. Семантика зеркалит
+# $6 в SEARCH_MEMORIES; pg_repository.fetch_by_ids передаёт параметр
+# напрямую, БЕЗ инверсии (regression: tests/test_repository.py,
+# TestFetchByIdsSemantics).
 FETCH_MEMORIES_BY_IDS = f"""
     SELECT {_MEMORY_COLUMNS}
     FROM memories m
     JOIN namespaces n ON n.id = m.namespace_id
     WHERE m.id = ANY($1::uuid[])
-      AND m.status = 'asserted' AND m.valid_to IS NULL
+      AND ($2::bool OR (m.status = 'asserted' AND m.valid_to IS NULL))
+"""
+
+# Инкремент access-полей при выдаче (Фаза 1.2, D4): батч-UPDATE,
+# вызывается ПОСЛЕ формирования выдачи вне транзакции чтения —
+# только по фактически выданным id.
+BUMP_ACCESS_MEMORIES = """
+    UPDATE memories
+    SET access_count = access_count + 1,
+        last_accessed_at = now()
+    WHERE id = ANY($1::uuid[])
 """
 
 # Отзыв гранулы (бывший ARCHIVE_MEMORY → is_archived).

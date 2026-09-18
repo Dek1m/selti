@@ -55,6 +55,9 @@ class PostgreSQLRepository:
             supersedes=row["supersedes"],
             superseded_by=row["superseded_by"],
             frozen=row["frozen"],
+            # Guard вместо row[...]: старые моки/проекции без access-полей
+            last_accessed_at=row["last_accessed_at"] if "last_accessed_at" in row else None,
+            access_count=row["access_count"] if "access_count" in row else 0,
         )
 
     # ════════════════════════════════════════════════════════════
@@ -124,8 +127,13 @@ class PostgreSQLRepository:
         namespace_id: str | None = None,
         project_id: str | None = None,
         limit: int = 10,
+        include_historical: bool = False,
     ) -> list[dict]:
-        """Full-text search fallback — когда Qdrant недоступен."""
+        """Full-text search (russian): канал B гибрида + fallback без Qdrant.
+
+        Возвращает полные строки проекции + score — гибридной сборке нужны
+        ранжирующие поля (created_at/last_accessed_at/frozen/importance).
+        """
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 q.SEARCH_MEMORIES,
@@ -134,20 +142,9 @@ class PostgreSQLRepository:
                 namespace_id,
                 project_id,
                 limit,
+                include_historical,
             )
-            return [
-                {
-                    "id": str(row["id"]),
-                    "content": row["content"],
-                    "metadata": row["metadata"] or {},
-                    "namespace": row["namespace"],
-                    "importance": row["importance"],
-                    "project_id": row["project_id"],
-                    "status": row["status"],
-                    "score": float(row["score"]),
-                }
-                for row in rows
-            ]
+            return [{**dict(row), "score": float(row["score"])} for row in rows]
 
     # ════════════════════════════════════════════════════════════
     # READ
@@ -174,14 +171,50 @@ class PostgreSQLRepository:
             )
             return self._to_record(row) if row is not None else None
 
-    async def fetch_by_ids(self, ids: list[str]) -> list[dict]:
+    async def find_by_content_hashes(
+        self, ns_uids: list[str], content_hashes: list[str]
+    ) -> dict[tuple[str, str], MemoryRecord]:
+        """Batch exact-dedup (Фаза 1.4): один запрос на все пары (uid, hash).
+
+        Возвращает {(namespace, content_hash): record} — совпадения только
+        актуальных гранул (status/valid_to фильтр в SQL).
+        """
+        if not ns_uids:
+            return {}
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                q.SELECT_MEMORY_BY_CONTENT_HASHES, ns_uids, content_hashes
+            )
+            return {
+                (row["ns_uid"], row["matched_hash"]): self._to_record(row)
+                for row in rows
+            }
+
+    async def bump_access(self, memory_ids: list[str]) -> int:
+        """Инкремент access_count/last_accessed_at по выданным id (Фаза 1.2).
+
+        Отдельное соединение из пула — вне транзакции чтения поиска.
+        """
+        if not memory_ids:
+            return 0
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(q.BUMP_ACCESS_MEMORIES, memory_ids)
+            return int(result.split()[-1])
+
+    async def fetch_by_ids(
+        self, ids: list[str], include_historical: bool = False
+    ) -> list[dict]:
         """Batch fetch метаданных по IDs (для Qdrant-выдачи).
 
-        Фильтр актуальности (status/valid_to) применён в SQL — ретрактнутые
-        гранулы не съедают лимит выдачи.
+        Фильтр актуальности (status/valid_to) применён в SQL ДО обрезки
+        limit — ретрактнутые гранулы не съедают лимит выдачи (Фаза 1.3);
+        include_historical=True — time-travel, фильтр отключается.
+        Семантика $2 зеркалит SEARCH_MEMORIES.$6: True → без фильтра.
         """
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch(q.FETCH_MEMORIES_BY_IDS, ids)
+            rows = await conn.fetch(
+                q.FETCH_MEMORIES_BY_IDS, ids, include_historical
+            )
             return [dict(row) for row in rows]
 
     async def list(
@@ -239,10 +272,13 @@ class PostgreSQLRepository:
         confidence: float | None = None,
         frozen: bool | None = None,
         supersedes: str | None = None,
+        content_hash: str | None = None,
     ) -> MemoryRecord | None:
         """Обновление гранулы: metadata merge-ится (dict-merge), version бампит триггер БД.
 
-        При передаче supersedes закрывает старую гранулу атомарно (одна транзакция):
+        При передаче content вызывающий слой обязан передать content_hash
+        свежего контента — иначе unique-индекс дедупа словит рассинхрон.
+        При supersedes закрывает старую гранулу атомарно (одна транзакция):
         status='superseded', valid_to=valid_from новой, superseded_by=memory_id.
         """
         async with self.pool.acquire() as conn:
@@ -257,6 +293,7 @@ class PostgreSQLRepository:
                     confidence,
                     frozen,
                     supersedes,
+                    content_hash,
                 )
                 if row is None:
                     return None

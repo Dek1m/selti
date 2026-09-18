@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
+import hashlib
+from datetime import datetime, timezone
 
 from memory_server.config import Settings
 from memory_server.embedding.provider import EmbeddingProvider
@@ -10,6 +11,13 @@ from memory_server.memory.dedup import DedupAction, DedupEngine
 from memory_server.memory.namespace_repository import NamespaceRepository
 from memory_server.memory.project_repository import ProjectRepository
 from memory_server.memory.repository import MemoryRepository
+from memory_server.memory.search_fusion import (
+    final_score,
+    importance_weight,
+    mmr_rerank,
+    recency_decay,
+    rrf_fuse,
+)
 from memory_server.models import (
     GraphStats,
     MemoryListResult,
@@ -30,6 +38,13 @@ _CONTEXT_SECTION_ORDER = (
     "dialogue_insights",
     "infrastructure",
 )
+
+
+def _days_since(moment: datetime | None, now: datetime) -> float:
+    """Полных дней с момента (для recency decay); отсутствие момента → 0."""
+    if moment is None:
+        return 0.0
+    return max((now - moment).total_seconds() / 86400.0, 0.0)
 
 
 class MemoryService:
@@ -94,8 +109,14 @@ class MemoryService:
                     record = await self.repository.get_by_id(decision.existing_id)
                     if record is None:
                         raise RuntimeError(f"Failed to retrieve memory for update: {decision.existing_id}")
+                    # Обновляем и content, и пересчитанный content_hash (Фаза 1.4):
+                    # иначе unique-индекс (namespace_id, content_hash) поймает
+                    # рассинхрон при изменившемся контенте.
                     updated = await self.repository.update(
                         memory_id=decision.existing_id,
+                        content=content,
+                        content_hash=content_hash,
+                        embedding=embedding,
                         metadata={**record.metadata, **(metadata or {})},
                     )
                     if updated is None:
@@ -135,20 +156,111 @@ class MemoryService:
         threshold: float = 0.7,
         namespace: str | None = None,
         project_id: str | None = None,
+        include_historical: bool = False,
     ) -> list[SearchResult]:
         async with async_measure_duration(logger, "search", namespace=namespace, user_id=user_id):
             resolved_project = await self.resolve_project(project_id)
             query_embedding = await self.embedding.embed(query)
-            results = await self.repository.search(
+            if not self.config.hybrid_search_enabled:
+                # Фича-флаг отката (не legacy): выключенный hybrid = плотный
+                # Qdrant-путь Фазы 0, документирован в конфиге.
+                return await self.repository.search(
+                    query_embedding=query_embedding,
+                    user_id=user_id,
+                    limit=limit,
+                    threshold=threshold,
+                    namespace=namespace,
+                    query_text=query,
+                    project_id=resolved_project,
+                    include_historical=include_historical,
+                )
+            return await self._search_hybrid(
+                query=query,
                 query_embedding=query_embedding,
                 user_id=user_id,
                 limit=limit,
                 threshold=threshold,
                 namespace=namespace,
-                query_text=query,
                 project_id=resolved_project,
+                include_historical=include_historical,
             )
-            return results
+
+    async def _search_hybrid(
+        self,
+        query: str,
+        query_embedding: list[float],
+        user_id: str | None,
+        limit: int,
+        threshold: float,
+        namespace: str | None,
+        project_id: str | None,
+        include_historical: bool,
+    ) -> list[SearchResult]:
+        """Hybrid search (Фаза 1.1/1.2): RRF-fusion → MMR → D4-ранжирование."""
+        candidates = await self.repository.search_hybrid(
+            query_embedding=query_embedding,
+            query_text=query,
+            user_id=user_id,
+            namespace=namespace,
+            project_id=project_id,
+            threshold=threshold,
+            prefetch=self.config.hybrid_prefetch,
+            include_historical=include_historical,
+        )
+        if not candidates:
+            return []
+
+        rankings = [
+            [c.id for c in candidates if c.rank_dense is not None],
+            [c.id for c in candidates if c.rank_fts is not None],
+        ]
+        rrf_scores = rrf_fuse(rankings, k=self.config.rrf_k)
+        vectors = {c.id: c.vector for c in candidates if c.vector}
+        ordered = mmr_rerank(
+            rrf_scores, vectors, top_k=limit, lambda_=self.config.mmr_lambda
+        )
+
+        now = datetime.now(timezone.utc)
+        by_id = {c.id: c for c in candidates}
+        results: list[SearchResult] = []
+        for cand_id in ordered:
+            cand = by_id[cand_id]
+            # frozen — вечный факт: не затухает (D4)
+            decay = (
+                1.0
+                if cand.frozen
+                else recency_decay(
+                    _days_since(cand.last_accessed_at or cand.created_at, now),
+                    self.config.recency_decay_rates.get(
+                        cand.namespace, self.config.recency_decay_rate
+                    ),
+                )
+            )
+            weight = importance_weight(
+                cand.importance,
+                self.config.importance_multipliers.get(cand.namespace, 1.0),
+            )
+            results.append(
+                SearchResult(
+                    id=cand_id,
+                    content=cand.content,
+                    metadata=cand.metadata,
+                    importance=cand.importance,
+                    score=round(final_score(rrf_scores[cand_id], decay, weight), 6),
+                    project_id=cand.project_id,
+                    status=cand.status,
+                )
+            )
+        results.sort(key=lambda r: r.score, reverse=True)
+
+        # Инкремент access-полей (Фаза 1.2): батч-UPDATE вне транзакции
+        # чтения, только по фактически выданным id; сбой не роняет выдачу.
+        try:
+            await self.repository.bump_access([r.id for r in results])
+        except Exception:
+            logger.exception("search: bump_access FAILED (non-fatal)")
+
+        return results
 
     async def get(self, memory_id: str) -> MemoryRecord:
         async with async_measure_duration(logger, "get"):
@@ -168,14 +280,18 @@ class MemoryService:
     ) -> MemoryRecord:
         """Обновить гранулу: metadata merge-ится, version бампит триггер БД.
 
+        При content пересчитывается content_hash (sha256) — иначе unique-индекс
+        дедупа словит рассинхрон на следующем UPDATE (Фаза 1.4).
         supersedes — ID замещаемой версии: старая закрывается атомарно
         (status='superseded', valid_to=valid_from этой, superseded_by=id этой).
         """
         async with async_measure_duration(logger, "update"):
             resolved_project = await self.resolve_project(project_id)
             embedding = None
+            content_hash = None
             if content is not None:
                 embedding = await self.embedding.embed(content)
+                content_hash = hashlib.sha256(content.encode()).hexdigest()
             record = await self.repository.update(
                 memory_id=memory_id,
                 content=content,
@@ -184,6 +300,7 @@ class MemoryService:
                 importance=importance,
                 project_id=resolved_project,
                 supersedes=supersedes,
+                content_hash=content_hash,
             )
             if record is None:
                 raise NotFoundError(memory_id)
@@ -427,19 +544,36 @@ class MemoryService:
         return result
 
     async def traverse(
-        self, start_id: str, depth: int = 3, link_types: list[str] | None = None
+        self,
+        start_id: str,
+        depth: int = 3,
+        link_types: list[str] | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> TraverseResult:
-        """Обход графа от начальной ноды. Один round-trip вместо 2N+2."""
+        """Обход графа от начальной ноды. Один round-trip вместо 2N+2.
+
+        Cap traverse_max_nodes + курсорная пагинация — Python-слой поверх
+        хранимки graph_traverse_full (Фаза 1.5, миграций нет): стабильный
+        порядок сортировкой id, срез [offset : offset+limit], рёбра —
+        только между выданными узлами. total_nodes/truncated — навигация.
+        """
         logger.info("traverse", extra={
             "start_id": start_id, "depth": depth, "link_types": link_types,
+            "limit": limit, "offset": offset,
         })
         # Валидация: start_id должен существовать
         start = await self.repository.get_by_id(start_id)
         if start is None:
             raise NotFoundError(f"Start granule: {start_id}")
         raw = await self.repository.traverse(start_id, depth, link_types)
-        # Парсим результат хранимки
-        nodes = raw["nodes"]  # [{id, content, namespace, importance, depth}]
+
+        all_nodes = sorted(raw["nodes"], key=lambda n: str(n["id"]))
+        total = len(all_nodes)
+        capped = all_nodes[: self.config.traverse_max_nodes]
+        page = capped[offset : offset + limit] if limit is not None else capped[offset:]
+        visible_ids = {str(n["id"]) for n in page}
+
         edges = [
             Relation(
                 id=str(e["id"]),
@@ -451,9 +585,20 @@ class MemoryService:
                 metadata=e.get("metadata", {}),
             )
             for e in raw["edges"]
+            # Подграф из выданных узлов: soft-resolve связи (target_name-only)
+            # сохраняем — они привязаны к видимому источнику
+            if str(e["source_id"]) in visible_ids
+            and (e.get("target_id") is None or str(e["target_id"]) in visible_ids)
         ]
-        logger.info("traverse: done", extra={"nodes": len(nodes), "edges": len(edges)})
-        return TraverseResult(nodes=nodes, edges=edges)
+        logger.info("traverse: done", extra={
+            "nodes": len(page), "edges": len(edges), "total_nodes": total,
+        })
+        return TraverseResult(
+            nodes=page,
+            edges=edges,
+            total_nodes=total,
+            truncated=len(page) < total,
+        )
 
     async def get_graph_stats(self) -> GraphStats:
         """Статистика графа знаний."""

@@ -21,6 +21,7 @@ from memory_server.logger import get_logger
 from memory_server.memory.namespace_repository import NamespaceRepository
 from memory_server.memory.pg_repository import PostgreSQLRepository
 from memory_server.memory.qdrant_store import QdrantStore
+from memory_server.memory.search_fusion import HybridCandidate
 from memory_server.models import (
     GraphStats,
     MemoryListResult,
@@ -213,14 +214,19 @@ class MemoryRepository:
         namespace: str | None = None,
         query_text: str | None = None,
         project_id: str | None = None,
+        include_historical: bool = False,
     ) -> list[SearchResult]:
+        """Плотный Qdrant-путь (Фаза 0). Гибридный — search_hybrid (Фаза 1.1)."""
         namespace_id = await self._ns_id(namespace)
         if isinstance(namespace_id, _UnknownNamespace):
             return []
 
         if self._has_qdrant():
             search_filter = QdrantStore.build_filter(
-                user_id=user_id, namespace_id=namespace_id, project_id=project_id
+                user_id=user_id,
+                namespace_id=namespace_id,
+                project_id=project_id,
+                active_only=not include_historical,
             )
             qdrant_results = self.qdrant.search(
                 query_vector=query_embedding,
@@ -235,7 +241,8 @@ class MemoryRepository:
             ids = [r["id"] for r in qdrant_results]
             scores = {r["id"]: r["score"] for r in qdrant_results}
 
-            rows = await self.pg.fetch_by_ids(ids)
+            # Фильтр актуальности в SQL ДО обрезки limit (Фаза 1.3)
+            rows = await self.pg.fetch_by_ids(ids, include_historical=include_historical)
             rows_by_id = {str(row["id"]): row for row in rows}
 
             results = []
@@ -263,6 +270,7 @@ class MemoryRepository:
                 namespace_id=namespace_id,
                 project_id=project_id,
                 limit=limit,
+                include_historical=include_historical,
             )
             return [
                 SearchResult(
@@ -276,6 +284,100 @@ class MemoryRepository:
                 )
                 for r in rows
             ]
+
+    async def search_hybrid(
+        self,
+        query_embedding: list[float],
+        query_text: str,
+        user_id: str | None = None,
+        namespace: str | None = None,
+        project_id: str | None = None,
+        threshold: float = 0.7,
+        prefetch: int = 100,
+        include_historical: bool = False,
+    ) -> list[HybridCandidate]:
+        """Двухканальный сбор кандидатов гибридного поиска (Фаза 1.1).
+
+        Канал A — Qdrant dense (с векторами для MMR), канал B — PG FTS
+        'russian'. Отказ канала не роняет поиск: RRF честно работает и по
+        одному ранжированию. Fusion/ранжирование делает MemoryService.
+        """
+        namespace_id = await self._ns_id(namespace)
+        if isinstance(namespace_id, _UnknownNamespace):
+            return []
+
+        dense_ranks: dict[str, int] = {}
+        vectors: dict[str, list[float]] = {}
+
+        if self._has_qdrant():
+            try:
+                dense = self.qdrant.search(
+                    query_vector=query_embedding,
+                    limit=prefetch,
+                    score_threshold=threshold,
+                    query_filter=QdrantStore.build_filter(
+                        user_id=user_id,
+                        namespace_id=namespace_id,
+                        project_id=project_id,
+                        active_only=not include_historical,
+                    ),
+                    with_vectors=True,
+                )
+                for rank, r in enumerate(dense):
+                    doc_id = str(r["id"])
+                    dense_ranks[doc_id] = rank
+                    if r.get("vector") is not None:
+                        vectors[doc_id] = r["vector"]
+            except Exception as exc:
+                logger.warning(
+                    "hybrid: dense channel failed, FTS-only",
+                    extra={"error": str(exc), "error_type": type(exc).__name__},
+                )
+
+        fts_ranks: dict[str, int] = {}
+        try:
+            fts_rows = await self.pg.search_fts(
+                query_text=query_text,
+                user_id=user_id,
+                namespace_id=namespace_id,
+                project_id=project_id,
+                limit=prefetch,
+                include_historical=include_historical,
+            )
+            for rank, row in enumerate(fts_rows):
+                fts_ranks[str(row["id"])] = rank
+        except Exception as exc:
+            logger.warning(
+                "hybrid: FTS channel failed, dense-only",
+                extra={"error": str(exc), "error_type": type(exc).__name__},
+            )
+
+        all_ids = list(dense_ranks.keys() | fts_ranks.keys())
+        if not all_ids:
+            return []
+
+        # Догрузка канонических полей одним батчем; фильтр актуальности в SQL
+        # ДО fusion — prefetch с запасом гарантирует, что отсеянные
+        # ретрактнутые не съедают лимит выдачи (Фаза 1.3).
+        rows = await self.pg.fetch_by_ids(all_ids, include_historical=include_historical)
+        return [
+            HybridCandidate(
+                id=str(row["id"]),
+                content=row["content"],
+                metadata=row["metadata"] or {},
+                namespace=row["namespace"],
+                importance=row["importance"],
+                project_id=row["project_id"],
+                status=row["status"],
+                created_at=row["created_at"],
+                last_accessed_at=row["last_accessed_at"],
+                frozen=row["frozen"],
+                rank_dense=dense_ranks.get(str(row["id"])),
+                rank_fts=fts_ranks.get(str(row["id"])),
+                vector=vectors.get(str(row["id"])),
+            )
+            for row in rows
+        ]
 
     # ════════════════════════════════════════════════════════════
     # UPDATE / SUPERSESSION
@@ -292,6 +394,7 @@ class MemoryRepository:
         confidence: float | None = None,
         frozen: bool | None = None,
         supersedes: str | None = None,
+        content_hash: str | None = None,
     ) -> MemoryRecord | None:
         record = await self.pg.update(
             memory_id=memory_id,
@@ -302,6 +405,7 @@ class MemoryRepository:
             confidence=confidence,
             frozen=frozen,
             supersedes=supersedes,
+            content_hash=content_hash,
         )
         if record is None:
             return None
@@ -309,12 +413,14 @@ class MemoryRepository:
         if self._has_qdrant():
             if embedding is not None:
                 self.qdrant.update_vector(point_id=memory_id, vector=embedding)
-            # content в payload больше нет (D6) — синхронизируем только фильтры
+            # content в payload нет (D6) — синхронизируем фильтруемые поля
             payload: dict = {}
             if importance is not None:
                 payload["importance"] = importance
             if project_id is not None:
                 payload["project_id"] = str(project_id)
+            if content_hash is not None:
+                payload["content_hash"] = content_hash
             if payload:
                 self.qdrant.set_payload(point_id=memory_id, payload=payload)
             if supersedes is not None:
@@ -379,6 +485,16 @@ class MemoryRepository:
         if isinstance(namespace_id, _UnknownNamespace):
             return None
         return await self.pg.find_by_content_hash(namespace, content_hash)
+
+    async def find_by_content_hashes(
+        self, ns_uids: list[str], content_hashes: list[str]
+    ) -> dict[tuple[str, str], MemoryRecord]:
+        """Batch exact-dedup: uid-резолв делает SQL JOIN, без Python round-trip."""
+        return await self.pg.find_by_content_hashes(ns_uids, content_hashes)
+
+    async def bump_access(self, memory_ids: list[str]) -> int:
+        """Инкремент access-полей выдачи (Фаза 1.2) — батч, вне транзакции чтения."""
+        return await self.pg.bump_access(memory_ids)
 
     async def list(
         self,

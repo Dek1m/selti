@@ -6,6 +6,10 @@
 - Можно инкрементить / обновлять без ошибок
 """
 
+import os
+import subprocess
+import sys
+
 from prometheus_client import Counter, Gauge, Histogram
 
 from memory_server.metrics import (
@@ -147,3 +151,23 @@ class TestMetricsOperations:
     def test_embedding_cache_hit_ratio_gauge_set(self):
         EMBEDDING_CACHE_HIT_RATIO.set(0.85)
         assert EMBEDDING_CACHE_HIT_RATIO._value.get() == 0.85
+
+
+class TestNoPatchImport:
+    """Регрессия (приёмка Фазы 1): metrics.py падал TypeError при прямом
+    импорте — multiprocess_mode передавался в Counter (валиден только для
+    Gauge). Костыль-мок из conftest удалён, честность проверяем импортом
+    в чистом subprocess: никаких патчей prometheus_client.
+    """
+
+    def test_module_imports_without_patches(self):
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        result = subprocess.run(
+            [sys.executable, "-c", "import memory_server.metrics"],
+            capture_output=True,
+            text=True,
+            cwd=project_root,
+        )
+        assert result.returncode == 0, (
+            f"прямой импорт memory_server.metrics упал:\n{result.stderr}"
+        )
