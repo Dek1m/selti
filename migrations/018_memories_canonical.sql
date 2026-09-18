@@ -14,9 +14,11 @@
 --      valid_to (open), composite (project_id, status)
 --   4) Триггер инкремента version при изменении content
 --   5) relations: расширение CHECK link_type (+ supersedes, supports,
---      member_of, part_of, describes_cluster) + unique (target_name, link_type)
+--      member_of, part_of, describes_cluster)
 --   6) БАТЧЕВЫЙ backfill (батчи по 500): slug → project_id, temporal-поля,
 --      отчёт о непривязанных slug'ах в _migrate_report
+--   7) Дедуп soft-resolve (source_id, target_name, link_type) + unique-индекс
+--      тройки (fan-in сохранён). Дедуп — ПЕРЕД индексом.
 --
 -- ВАЖНО (transitive-период для кода):
 --   * is_archived ЗДЕСЬ НЕ ДРОПАЕМ — коду нужен рабочий период.
@@ -196,10 +198,9 @@ ALTER TABLE relations ADD CONSTRAINT chk_link_type CHECK (link_type IN (
 
 COMMENT ON CONSTRAINT chk_link_type ON relations IS 'Допустимые типы связей (005 + supersedes/supports/member_of/part_of/describes_cluster).';
 
--- Уникальность soft-resolve связи: (target_name, link_type) для ненайдённых целей
-CREATE UNIQUE INDEX IF NOT EXISTS idx_relations_target_name_type
-    ON relations (target_name, link_type)
-    WHERE target_id IS NULL;
+-- Уникальность soft-resolve связи создаётся в §6.4 (после дедупа): индекс на
+-- тройку (source_id, target_name, link_type), а НЕ пару (target_name, link_type) —
+-- пара схлопнула бы легитимный fan-in (множество source на один target_name).
 
 -- ════════════════════════════════════════════════════════════
 -- 6. БАТЧЕВЫЙ backfill (батчи по 500, один DO-блок = одна транзакция)
@@ -275,9 +276,47 @@ GROUP BY m.metadata->>'project_id'
 ON CONFLICT (slug) DO UPDATE SET granule_count = EXCLUDED.granule_count;
 
 -- ════════════════════════════════════════════════════════════
+-- 6.4 Дедуп soft-resolve связей + уникальность тройки
+-- ════════════════════════════════════════════════════════════
+-- Soft-resolve (target_id IS NULL): target не найден, связь висит на
+-- target_name (entity_name) для будущего резолва. Точный дубль =
+-- (source_id, target_name, link_type) — та же гранула-источник ведёт на ту же
+-- цель тем же типом. Это НЕ fan-in: fan-in — РАЗНЫЕ source_id на один
+-- target_name (пример: related_to 'cpp-docs-downloaded' от 1518 гранул).
+--
+-- Дедуп идёт ПЕРЕД уникальным индексом (иначе индекс упадёт на дублях).
+-- Оставляем min(id) в каждой группе; row_number() поверх PARTITION BY.
+-- Идемпотентно: после первого прогона дублей нет, повторный = 0 строк.
+
+WITH dups AS (
+    SELECT id,
+           row_number() OVER (
+               PARTITION BY source_id, target_name, link_type
+               ORDER BY id
+           ) AS rn
+    FROM relations
+    WHERE target_id IS NULL
+)
+DELETE FROM relations
+WHERE id IN (SELECT id FROM dups WHERE rn > 1);
+
+-- Уникальность soft-resolve связи: тройка (source_id, target_name, link_type)
+-- для ненайденных целей. Пара (target_name, link_type) НЕ подходит — схлопнула
+-- бы fan-in. Пересоздание (DROP + CREATE) покрывает случай, когда в схеме
+-- остался индекс со старой парой.
+DROP INDEX IF EXISTS idx_relations_target_name_type;
+
+CREATE UNIQUE INDEX idx_relations_target_name_type
+    ON relations (source_id, target_name, link_type)
+    WHERE target_id IS NULL;
+
+-- ════════════════════════════════════════════════════════════
 -- DOWN: откат миграции
 -- ════════════════════════════════════════════════════════════
 -- Backfill — additive, откат не требуется (данные уйдут вместе с колонками).
+-- Дедуп soft-resolve (§6.4) — НЕ откатывается: удалённые строки — точные
+--     дубли (мусор от задвоения сида), восстановление не имеет ценности и
+--     противоречит уникальному индексу. Удалённые дубли НЕ восстанавливаем.
 -- DROP TABLE IF EXISTS _migrate_report;
 --
 -- DROP INDEX IF EXISTS idx_relations_target_name_type;
