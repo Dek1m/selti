@@ -30,3 +30,4 @@ htmlcov/
 
 # Docker
 .docker/
+.acc_tmp/
