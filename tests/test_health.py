@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
@@ -15,10 +16,11 @@ test_app = FastAPI()
 
 @test_app.get("/health")
 async def health():
+    from memory_server.__main__ import _server_version
     return {
         "status": "ok",
         "server": settings.mcp_server_name,
-        "version": "0.1.0",
+        "version": _server_version(),
         "checks": {
             "config": {
                 "dedup_enabled": settings.dedup_enabled,
@@ -27,6 +29,28 @@ async def health():
             }
         },
     }
+
+
+class TestServerVersion:
+    def test_server_version_reads_version_file(self):
+        """_server_version — единственный источник правды: VERSION-файл корня репо."""
+        from memory_server.__main__ import _server_version
+
+        root_version = (Path(__file__).resolve().parent.parent / "VERSION").read_text().strip()
+        assert root_version, "VERSION-файл пуст"
+        assert _server_version() == root_version
+
+    def test_server_version_is_semver(self):
+        """Версия из VERSION-файла — semver-строка (не legacy-константа 0.1.0)."""
+        from memory_server.__main__ import _server_version
+
+        version = _server_version()
+        assert version != "0.1.0"
+        assert version != "unknown"
+        parts = version.split(".")
+        assert len(parts) == 3 and all(p.isdigit() for p in parts), (
+            f"ожидался semver вида X.Y.Z, получен {version!r}"
+        )
 
 
 class TestHealth:
@@ -39,7 +63,7 @@ class TestHealth:
         assert response.json()["status"] == "ok"
 
     def test_health_contains_server_and_version(self):
-        """GET /health → содержит server и version."""
+        """GET /health → содержит server и version (из VERSION-файла)."""
         with TestClient(test_app) as client:
             response = client.get("/health")
 
@@ -47,7 +71,8 @@ class TestHealth:
         assert "server" in data
         assert data["server"] == os.getenv("SERVICE_NAME", "selti")
         assert "version" in data
-        assert data["version"] == "0.1.0"
+        root_version = (Path(__file__).resolve().parent.parent / "VERSION").read_text().strip()
+        assert data["version"] == root_version
 
     def test_health_contains_checks_config(self):
         """GET /health → содержит checks.config."""

@@ -419,6 +419,46 @@ class TestIngestBatch:
         with pytest.raises(ValidationError, match="user_id cannot be empty"):
             ingest_batch(entries=[{"content": "x"}], user_id="")
 
+    def test_intra_batch_duplicates_link_to_first_insert(self, mock_memory_service):
+        """Кейс Рэя: 2 внутрибатчевых дубля + 3 обычных → 5 решений, 4 insert + 1 skip,
+        skip-результат ссылается на id первой вставленной записи того же хеша
+        (раньше обе копии шли в INSERT → UniqueViolation → откат всего батча).
+        """
+        import hashlib
+        from memory_server.memory.dedup import DedupAction, DedupDecision
+        from memory_server.tasks.memory_tasks import ingest_batch
+
+        dup_hash = hashlib.sha256(b"dup").hexdigest()
+        decisions = [
+            DedupDecision(action=DedupAction.INSERT, content_hash=dup_hash, embedding=[0.1]),
+            DedupDecision(action=DedupAction.SKIP, existing_id=None, content_hash=dup_hash),
+            DedupDecision(action=DedupAction.INSERT, content_hash=hashlib.sha256(b"A").hexdigest(), embedding=[0.2]),
+            DedupDecision(action=DedupAction.INSERT, content_hash=hashlib.sha256(b"B").hexdigest(), embedding=[0.3]),
+            DedupDecision(action=DedupAction.INSERT, content_hash=hashlib.sha256(b"C").hexdigest(), embedding=[0.4]),
+        ]
+        mock_memory_service.config.dedup_enabled = True
+        mock_memory_service.dedup.check_batch = AsyncMock(return_value=decisions)
+        mock_memory_service.repository.insert_batch = AsyncMock(
+            return_value=["id-dup", "id-a", "id-b", "id-c"]
+        )
+
+        result = ingest_batch(
+            entries=[
+                {"content": "dup", "namespace": "default"},
+                {"content": "dup", "namespace": "default"},
+                {"content": "A", "namespace": "default"},
+                {"content": "B", "namespace": "default"},
+                {"content": "C", "namespace": "default"},
+            ],
+            user_id="u1",
+        )
+
+        assert result["summary"] == {"insert": 4, "skip": 1, "update": 0, "invalid": 0}
+        assert len(result["results"]) == 5
+        skip_results = [r for r in result["results"] if r["action"] == "skip"]
+        assert len(skip_results) == 1
+        assert skip_results[0]["id"] == "id-dup"
+
 
 class TestForgetMemories:
     def test_happy_path(self):

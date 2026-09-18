@@ -146,7 +146,7 @@ class DedupEngine:
         entries: list[dict],
         user_id: str,
     ) -> list[DedupDecision]:
-        """Batch dedup: batch exact lookup → batch embedding → параллельный semantic.
+        """Batch dedup: batch exact lookup → intra-batch dedup → batch embedding → параллельный semantic.
 
         Оптимизации Фазы 1.4: exact-фаза — ОДИН запрос на весь батч
         (пары (uid, hash) через unnest) вместо цикла; semantic-фаза —
@@ -193,6 +193,25 @@ class DedupEngine:
                         existing_id=existing.id,
                         content_hash=h,
                     )
+
+        # Phase 2.5: intra-batch exact dedup. Повторный (namespace, hash) внутри
+        # одного батча не виден exact-фазе выше (той нужны строки В БД) — без
+        # этой проверки обе записи получают INSERT и падают на
+        # idx_memories_content_hash_active целиком откатывая батч (прод-инцидент).
+        # existing_id=None: id первого вхождения ещё не существует — consumer
+        # проставит его после вставки (ingest_batch).
+        seen_in_batch: dict[tuple[str, str], int] = {}
+        for i, (entry, h) in enumerate(zip(entries, hashes)):
+            if decisions[i] is not None:
+                continue
+            ns = entry.get("namespace", "default")
+            first_idx = seen_in_batch.setdefault((ns, h), i)
+            if first_idx == i:
+                continue
+            action = DedupAction.UPDATE if ns == "user_facts" else DedupAction.SKIP
+            DEDUP_SKIPPED_TOTAL.labels(namespace=ns, reason="exact").inc()
+            self._update_ratio(ns, action)
+            decisions[i] = DedupDecision(action=action, content_hash=h)
 
         # Phase 3: соберём тексты для semantic dedup (только те, что не exact-match)
         to_embed_indices = [i for i, d in enumerate(decisions) if d is None]

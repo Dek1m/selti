@@ -606,6 +606,9 @@ def ingest_batch(
         })
 
     to_insert: list[dict] = []
+    # (index в results, content_hash): intra-batch дубли — existing_id появится
+    # только после INSERT первого вхождения, проставляем пост-фактум
+    pending_dup_links: list[tuple[int, str]] = []
 
     if service.config.dedup_enabled:
         decisions = run_async(service.dedup.check_batch, valid_entries, user_id)
@@ -619,6 +622,10 @@ def ingest_batch(
                     "action": decision.action.value,
                     "namespace": ns,
                 })
+                if decision.existing_id is None:
+                    pending_dup_links.append(
+                        (len(results) - 1, decision.content_hash)
+                    )
                 continue
             to_insert.append({
                 "content": entry["content"],
@@ -684,6 +691,14 @@ def ingest_batch(
                 "action": "insert",
                 "namespace": item["namespace"],
             })
+
+        # Intra-batch дубли: ссылка на первую вставленную запись того же хеша
+        if pending_dup_links:
+            inserted_by_hash = {
+                item["content_hash"]: rid for rid, item in zip(ids, to_insert)
+            }
+            for result_idx, dup_hash in pending_dup_links:
+                results[result_idx]["id"] = inserted_by_hash.get(dup_hash)
 
     # Sync links
     all_ids = [r["id"] for r in results if r["id"]]

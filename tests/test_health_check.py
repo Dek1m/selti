@@ -26,10 +26,11 @@ test_app = FastAPI()
 @test_app.get("/health")
 async def health():
     from memory_server.config import settings
+    from memory_server.__main__ import _server_version
     return {
         "status": "ok",
         "server": settings.mcp_server_name,
-        "version": "0.1.0",
+        "version": _server_version(),
         "checks": {
             "config": {
                 "dedup_enabled": settings.dedup_enabled,

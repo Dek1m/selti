@@ -566,3 +566,79 @@ class TestBatchDedup:
         assert decisions[0].action == DedupAction.UPDATE
         assert decisions[0].existing_id == "id-a"
         assert decisions[1].action == DedupAction.INSERT
+
+
+# ---------------------------------------------------------------------------
+# Intra-batch dedup (3 tests) — прод-инцидент UniqueViolation (Рэй)
+# ---------------------------------------------------------------------------
+
+class TestIntraBatchDedup:
+    @pytest.mark.asyncio
+    async def test_batch_intra_duplicate_skips_second(self, dedup_engine, mock_pool):
+        """Кейс Рэя: 2 одинаковых content в одном батче + 3 уникальных.
+
+        Без intra-batch дедупа обе копии получают INSERT и роняют весь батч
+        на idx_memories_content_hash_active (exact-фаза ищет только в БД).
+        Ожидание: 5 решений, дубль → SKIP со ссылкой на первое вхождение
+        (existing_id=None — id появится после INSERT, проставляет ingest_batch).
+        """
+        dedup_engine.repository.find_by_content_hashes = AsyncMock(return_value={})
+        dedup_engine.embedding.embed_many = AsyncMock(
+            return_value=[[0.1], [0.2], [0.3], [0.4]]
+        )
+        dedup_engine.repository.search = AsyncMock(return_value=[])
+
+        dup_hash = hashlib.sha256(b"dup").hexdigest()
+        entries = [
+            {"content": "dup", "namespace": "default"},
+            {"content": "dup", "namespace": "default"},
+            {"content": "A", "namespace": "default"},
+            {"content": "B", "namespace": "default"},
+            {"content": "C", "namespace": "default"},
+        ]
+        decisions = await dedup_engine.check_batch(entries, "u1")
+
+        assert len(decisions) == 5
+        assert decisions[0].action == DedupAction.INSERT
+        assert decisions[1].action == DedupAction.SKIP
+        assert decisions[1].existing_id is None
+        assert decisions[1].content_hash == dup_hash
+        assert all(d.action == DedupAction.INSERT for d in decisions[2:])
+        # дубль не эмбеддится и не уходит в semantic-поиск — только 4 текста
+        call_args = dedup_engine.embedding.embed_many.call_args[0][0]
+        assert call_args == ["dup", "A", "B", "C"]
+        assert dedup_engine.repository.search.await_count == 4
+
+    @pytest.mark.asyncio
+    async def test_batch_intra_duplicate_user_facts_update(self, dedup_engine, mock_pool):
+        """Intra-batch дубль в user_facts → UPDATE (та же семантика, что exact в БД)."""
+        dedup_engine.repository.find_by_content_hashes = AsyncMock(return_value={})
+        dedup_engine.embedding.embed_many = AsyncMock(return_value=[[0.1]])
+        dedup_engine.repository.search = AsyncMock(return_value=[])
+
+        entries = [
+            {"content": "fact", "namespace": "user_facts"},
+            {"content": "fact", "namespace": "user_facts"},
+        ]
+        decisions = await dedup_engine.check_batch(entries, "u1")
+
+        assert decisions[0].action == DedupAction.INSERT
+        assert decisions[1].action == DedupAction.UPDATE
+        assert decisions[1].existing_id is None
+
+    @pytest.mark.asyncio
+    async def test_batch_intra_duplicate_scoped_by_namespace(self, dedup_engine, mock_pool):
+        """Одинаковый content в разных namespace — НЕ дубль: уникален (namespace, hash)."""
+        dedup_engine.repository.find_by_content_hashes = AsyncMock(return_value={})
+        dedup_engine.embedding.embed_many = AsyncMock(
+            return_value=[[0.1], [0.2]]
+        )
+        dedup_engine.repository.search = AsyncMock(return_value=[])
+
+        entries = [
+            {"content": "same", "namespace": "default"},
+            {"content": "same", "namespace": "code_knowledge"},
+        ]
+        decisions = await dedup_engine.check_batch(entries, "u1")
+
+        assert all(d.action == DedupAction.INSERT for d in decisions)

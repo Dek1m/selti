@@ -3,6 +3,8 @@ import os
 import time
 import uuid
 from contextlib import asynccontextmanager
+from functools import lru_cache
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, Request, Response
@@ -18,6 +20,26 @@ from memory_server.metrics import (
 )
 from memory_server.server import mcp, request_id_var
 from memory_server.state import get_state
+
+
+@lru_cache(maxsize=1)
+def _server_version() -> str:
+    """Версия сервера — единственный источник правды: VERSION-файл.
+
+    Ищем в корне проекта/образа (memory_server/../VERSION — Docker COPY VERSION ./VERSION,
+    WORKDIR /app) и рядом с пакетом. lru_cache: файл читается один раз за процесс.
+    """
+    for candidate in (
+        Path(__file__).resolve().parent.parent / "VERSION",
+        Path(__file__).resolve().parent / "VERSION",
+    ):
+        try:
+            version = candidate.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if version:
+            return version
+    return "unknown"
 
 # Lazy import Celery app — может быть не установлен при первом запуске
 _celery_app = None
@@ -200,7 +222,7 @@ async def health():
     return {
         "status": overall_status,
         "server": settings.mcp_server_name,
-        "version": "0.1.0",
+        "version": _server_version(),
         "checks": {
             "config": {
                 "dedup_enabled": settings.dedup_enabled,
