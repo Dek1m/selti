@@ -119,6 +119,12 @@ app.conf.beat_schedule = {
         "task": "business_metrics.update",
         "schedule": 3600.0,  # раз в час
     },
+    # Облачко знаний (Фаза 6.1): пересборка грязных снапшотов. Период = TTL
+    # кеша ctx:{slug} (context_cache_ttl) — флаг живёт не дольше пересборки.
+    "rebuild-contexts": {
+        "task": "memory_server.tasks.lifecycle_tasks.rebuild_contexts",
+        "schedule": 3600.0,  # раз в час
+    },
     "refresh-clusters": {
         "task": "memory_server.tasks.lifecycle_tasks.refresh_clusters",
         "schedule": crontab(hour=2, minute=0),  # ежедневно 02:00 UTC

@@ -112,11 +112,21 @@ app = FastAPI(lifespan=lifespan, title=settings.mcp_server_name)
 from memory_server.api.tasks import router as tasks_router
 app.include_router(tasks_router)
 
+# ---- REST API: context cloud для ZCode-хука (Фаза 6.3) ----
+from memory_server.api.context import router as context_router
+app.include_router(context_router)
+
 
 # ---- Middleware: аутентификация ----
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    if request.url.path in ("/health", "/live", "/metrics"):
+    # Публичные пути: health/live/metrics + context-облачко для ZCode-хука
+    # (localhost-сервис как /live; хук не умеет Bearer-токены)
+    path = request.url.path
+    if (
+        path in ("/health", "/live", "/metrics", "/projects")
+        or path.startswith("/context/")
+    ):
         return await call_next(request)
 
     if not settings.api_key:

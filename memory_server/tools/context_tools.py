@@ -1,9 +1,11 @@
 """MCP tools для «облачка знаний» (D9).
 
-memory_context(project, refresh) — снапшот контекста проекта из таблицы
-project_contexts (миграция 019): секции по namespace, собранные из топ-гранул
-проекта хранимкой project_context_snapshot. Всё через Celery (принцип 3);
-Redis-кеш ctx:{slug} и SessionStart-хук ZCode — Фаза 6.
+memory_context(project, refresh) — снапшот контекста проекта: Redis-кеш
+ctx:{slug} (TTL = периоду beat) → таблица project_contexts (миграция 019).
+refresh=true — немедленный пересчёт из топ-гранул (хранимка 020) + стек
+(project_technologies/project_links, 017). Путь записи ставит dirty-флаг
+ctx:{slug}:dirty — такой снапшот отдаётся с полем stale=true, beat
+rebuild_contexts пересобирает грязные почасово (Фаза 6.1).
 """
 
 from typing import Any
@@ -28,10 +30,12 @@ async def memory_context(
 
     project: slug (например 'selti') или UUID проекта.
     refresh: true — немедленный пересчёт из топ-гранул (по умолчанию отдаётся
-    материализованный снапшот).
+    материализованный снапшот из кеша/таблицы).
 
-    Возвращает {project_id, content, sections, granule_count, computed_at}:
-    sections — топ-гранулы по namespace (решения, код, инсайты, инфраструктура).
+    Возвращает {project_id, content, sections, granule_count, computed_at, stale}:
+    sections — {stack, decisions, code, insights, infra} (стек из
+    project_technologies, топ-гранулы по namespace); stale=true — после
+    снапшота были записи в проект (ждёт пересборки beat'ом).
     """
     return await celery_call(
         TASK_GET_CONTEXT,

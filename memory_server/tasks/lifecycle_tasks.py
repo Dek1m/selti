@@ -1,9 +1,10 @@
-"""Lifecycle tasks for Celery beat — жизнь памяти (Фаза 2.2/2.3 плана).
+"""Lifecycle tasks for Celery beat — жизнь памяти (Фазы 2.2/2.3/6.1 плана).
 
-Ежедневно: refresh_clusters (02:00) → confidence_decay (03:00) →
-mark_stale (04:00). Еженедельно (воскресенье): gc_superseded (05:00) →
-orphans_cleanup (05:30). Расписание — celery_app.beat_schedule; очередь —
-существующая memory (lifetime-операции не конкурентят read-path'у тулов).
+Ежечасно: rebuild_contexts (грязные снапшоты облачка). Ежедневно:
+refresh_clusters (02:00) → confidence_decay (03:00) → mark_stale (04:00).
+Еженедельно (воскресенье): gc_superseded (05:00) → orphans_cleanup (05:30).
+Расписание — celery_app.beat_schedule; очередь — существующая memory
+(lifetime-операции не конкурентят read-path'у тулов).
 
 Все задачи идемпотентны: повтор по уже обработанному состоянию — no-op.
 """
@@ -141,6 +142,35 @@ def orphans_cleanup(self) -> dict[str, Any]:
     service = _get_service()
     removed = run_async(service.orphans_cleanup)
     return {"orphan_relations_removed": removed}
+
+
+# ── Rebuild contexts (ежечасно; Фаза 6.1 — «облачко знаний») ─────
+
+
+@shared_task(
+    bind=True,
+    base=SeltiTask,
+    name="memory_server.tasks.lifecycle_tasks.rebuild_contexts",
+    max_retries=5,
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+    default_retry_delay=30,
+    soft_time_limit=240,
+    time_limit=300,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    queue="memory",
+    routing_key="memory",
+)
+def rebuild_contexts(self) -> dict[str, Any]:
+    """Пересборка снапшотов проектов с dirty-флагом ctx:{slug}:dirty.
+
+    dirty ставят store/update/create_version/retract с project_id;
+    beat снимает их почасовым пересчётом (только грязные, не весь реестр).
+    """
+    service = _get_service()
+    return run_async(service.rebuild_dirty_contexts)
 
 
 # ── Refresh clusters (ежедневно, 02:00 UTC; Фаза 2.3) ───────────

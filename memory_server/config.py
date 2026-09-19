@@ -85,6 +85,11 @@ class Settings(BaseSettings):
         "infrastructure": 0.95,
     }
 
+    # ── Фаза 6: «облачко знаний» (D9) ──
+    # TTL Redis-кеша ctx:{slug} и dirty-флага (синхронизирован с периодом
+    # beat rebuild_contexts: флаг живёт не дольше периода пересборки).
+    context_cache_ttl: int = 3600
+
     api_key: str = ""
 
     redis_url: str = "redis://:@redis:6379/0"

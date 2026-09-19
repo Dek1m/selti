@@ -231,6 +231,7 @@ class SeltiState:
                 namespace_repository=self._namespace_repository,
                 config=settings,
                 project_repository=self._project_repository,
+                redis_provider=self.get_redis,
             )
         return self._memory_service
 

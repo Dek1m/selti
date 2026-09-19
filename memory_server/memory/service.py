@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
+from uuid import UUID
 
 from memory_server.config import Settings
 from memory_server.embedding.provider import EmbeddingProvider
@@ -14,7 +18,7 @@ from memory_server.exceptions import (
 from memory_server.logger import async_measure_duration, get_logger
 from memory_server.memory.dedup import DedupAction, DedupEngine
 from memory_server.memory.namespace_repository import NamespaceRepository
-from memory_server.memory.project_repository import ProjectRepository
+from memory_server.memory.project_repository import ProjectRecord, ProjectRepository
 from memory_server.memory.repository import MemoryRepository
 from memory_server.memory.search_fusion import (
     final_score,
@@ -37,15 +41,36 @@ from memory_server.models import (
     TraverseResult,
 )
 
+if TYPE_CHECKING:
+    from redis.asyncio import Redis
+
 logger = get_logger(__name__)
 
-# Порядок секций механической сборки снапшота (D9); прочие ns — по алфавиту
-_CONTEXT_SECTION_ORDER = (
-    "project_meta",
-    "code_knowledge",
-    "dialogue_insights",
-    "infrastructure",
-)
+# Redis-ключи облачка (Фаза 6.1): ctx:{slug} — кеш снапшота,
+# ctx:{slug}:dirty — флаг «после снапшота были записи в проект».
+_CTX_KEY_PREFIX = "ctx:"
+_CTX_DIRTY_SUFFIX = ":dirty"
+
+# namespace → секция снапшота; прочие ns — под своим uid (по алфавиту)
+_CONTEXT_SECTION_MAP = {
+    "project_meta": "decisions",
+    "code_knowledge": "code",
+    "dialogue_insights": "insights",
+    "infrastructure": "infra",
+}
+_CONTEXT_SECTION_ORDER = ("stack", "decisions", "code", "insights", "infra")
+_SECTION_TITLES = {
+    "stack": "Стек",
+    "decisions": "Решения",
+    "code": "Код",
+    "insights": "Инсайты",
+    "infra": "Инфраструктура",
+}
+
+# content-снапшот — маркдаун-список: гранула = однострочный тезис,
+# весь текст ≤100 строк (бюджет additionalContext хука ZCode)
+_CONTENT_MAX_LINES = 100
+_CONTENT_LINE_MAX_CHARS = 280
 
 
 def _days_since(moment: datetime | None, now: datetime) -> float:
@@ -53,6 +78,18 @@ def _days_since(moment: datetime | None, now: datetime) -> float:
     if moment is None:
         return 0.0
     return max((now - moment).total_seconds() / 86400.0, 0.0)
+
+
+def _one_line(text: str, max_chars: int = _CONTENT_LINE_MAX_CHARS) -> str:
+    """Гранула → однострочный тезис: переносы схлопываются, хвост обрезается.
+
+    Гарантия «≤100 строк» на content-снапшот: сколько бы ни было абзацев
+    в исходной грануле, в списке она занимает одну строку.
+    """
+    flattened = " ".join(text.split())
+    if len(flattened) > max_chars:
+        return flattened[: max_chars - 1] + "…"
+    return flattened
 
 
 class MemoryService:
@@ -65,6 +102,7 @@ class MemoryService:
         namespace_repository: NamespaceRepository,
         config: Settings | None = None,
         project_repository: ProjectRepository | None = None,
+        redis_provider: Callable[[], Awaitable["Redis"]] | None = None,
     ):
         self.repository = repository
         self.embedding = embedding_provider
@@ -72,6 +110,9 @@ class MemoryService:
         self.project_repo = project_repository
         self.config = config or Settings()
         self.dedup = DedupEngine(repository, embedding_provider, self.config)
+        # Ленивая фабрика Redis-клиента (SeltiState.get_redis): кеш облачка
+        # не обязателен для корректности — None = деградация в таблицу
+        self.redis_provider = redis_provider
 
     async def resolve_project(self, project_id: str | None) -> str | None:
         """Ключ тула (slug | UUID | None) → project_id UUID. Неизвестный slug → NotFoundError."""
@@ -129,6 +170,7 @@ class MemoryService:
                     )
                     if updated is None:
                         raise RuntimeError(f"Failed to update memory: {decision.existing_id}")
+                    await self._mark_context_dirty(updated.project_id)
                     return updated, DedupAction.UPDATE
 
             if embedding is None:
@@ -146,6 +188,7 @@ class MemoryService:
             record = await self.repository.get_by_id(memory_id)
             if record is None:
                 raise RuntimeError(f"Failed to retrieve memory after insert: {memory_id}")
+            await self._mark_context_dirty(record.project_id)
 
             if metadata and "links" in metadata:
                 try:
@@ -317,6 +360,7 @@ class MemoryService:
             )
             if record is None:
                 raise NotFoundError(memory_id)
+            await self._mark_context_dirty(record.project_id)
 
             if metadata is not None and "links" in metadata:
                 try:
@@ -387,6 +431,8 @@ class MemoryService:
             )
             if record is None:
                 raise NotFoundError(granule_id)
+            # Версия наследует project старой гранулы — снапшот устарел
+            await self._mark_context_dirty(old.project_id)
             logger.debug("create_version: done", extra={
                 "old_id": granule_id, "new_id": record.id,
                 "confidence": confidence,
@@ -419,6 +465,7 @@ class MemoryService:
         if record is None:
             logger.debug("retract: not found", extra={"id": memory_id})
             raise NotFoundError(memory_id)
+        await self._mark_context_dirty(record.project_id)
         result = await self.repository.archive(memory_id, reason=reason)
         logger.debug("retract: done", extra={"id": memory_id, "success": result})
         return result
@@ -650,59 +697,218 @@ class MemoryService:
         record = await self.ns_repo.get_by_uid(namespace)
         return record.id if record else None
 
-    # ── Project context («облачко знаний», D9) ──
+    # ── Project context («облачко знаний», D9; Фаза 6: кеш + dirty) ──
 
-    async def get_project_context(self, project: str, refresh: bool = False) -> ProjectContext:
-        """Снапшот контекста проекта. refresh=True — немедленный пересчёт.
+    async def _get_redis(self) -> "Redis | None":
+        """Redis-клиент процесса или None (кеш облачка опционален)."""
+        if self.redis_provider is None:
+            return None
+        try:
+            return await self.redis_provider()
+        except Exception:
+            logger.warning("context: redis unavailable, degrading to table-only")
+            return None
 
-        Fast-path без пересчёта; Redis-кеш ctx:{slug} и Celery-обвязка — Фаза 6.
+    async def _mark_context_dirty(self, project_id: str | UUID | None) -> None:
+        """Флаг «снапшот проекта устарел» после записи/правки гранулы.
+
+        Best-effort: сбой Redis/реестра не роняет основную операцию —
+        пересборка по beat всё равно догонит по TTL.
         """
-        project_id = await self.resolve_project(project)
         if project_id is None:
-            raise NotFoundError(project, message="project is required for context")
-        if not refresh:
-            existing = await self.repository.get_project_context(project_id)
-            if existing is not None:
-                return ProjectContext.model_validate(existing)
-        return await self._rebuild_context(project_id)
+            return
+        try:
+            redis = await self._get_redis()
+            if redis is None:
+                return
+            record = await self.project_repo.get_by_id(str(project_id))
+            if record is None:
+                return
+            await redis.set(
+                f"{_CTX_KEY_PREFIX}{record.slug}{_CTX_DIRTY_SUFFIX}",
+                "1",
+                ex=self.config.context_cache_ttl,
+            )
+            logger.debug("context: dirty", extra={"slug": record.slug})
+        except Exception:
+            logger.warning(
+                "context: mark dirty FAILED (non-fatal)",
+                extra={"project_id": str(project_id)},
+            )
+
+    async def _is_dirty(self, redis: "Redis", slug: str) -> bool:
+        try:
+            return bool(
+                await redis.exists(f"{_CTX_KEY_PREFIX}{slug}{_CTX_DIRTY_SUFFIX}")
+            )
+        except Exception:
+            return False
+
+    async def _require_project_record(self, project: str) -> ProjectRecord:
+        """slug | UUID → карточка проекта (для кеша нужен slug, не только id)."""
+        if self.project_repo is None:
+            raise RuntimeError("project_repository is not configured")
+        record = await self.project_repo.get_by_slug(project)
+        if record is not None:
+            return record
+        # Не slug реестра: единственная допустимая альтернатива — готовый UUID
+        try:
+            UUID(project)
+        except ValueError:
+            raise NotFoundError(
+                project,
+                message=f"Project not found: '{project}' (neither slug in registry nor UUID)",
+            ) from None
+        record = await self.project_repo.get_by_id(project)
+        if record is not None:
+            return record
+        raise NotFoundError(project, message=f"Project not found: '{project}'")
+
+    async def get_project_context(
+        self, project: str, refresh: bool = False
+    ) -> ProjectContext:
+        """Снапшот контекста проекта: Redis ctx:{slug} → таблица → пересчёт.
+
+        Fast-path без Celery-задач пересборки. dirty-флаг не блокирует
+        выдачу — снапшот отдаётся как есть с полем stale=True (честность
+        без штрафа на чтение); refresh=True пересчитывает немедленно.
+        """
+        record = await self._require_project_record(project)
+        if refresh:
+            return await self._rebuild_context(record)
+
+        redis = await self._get_redis()
+        if redis is not None:
+            try:
+                raw = await redis.get(f"{_CTX_KEY_PREFIX}{record.slug}")
+            except Exception:
+                raw = None
+                logger.warning(
+                    "context: cache read failed, treating as miss",
+                    extra={"slug": record.slug},
+                )
+            if raw is not None:
+                try:
+                    context = ProjectContext.model_validate(json.loads(raw))
+                except Exception:
+                    # Битый кеш = промах: таблица/пересчёт исправят
+                    context = None
+                if context is not None:
+                    context.stale = await self._is_dirty(redis, record.slug)
+                    return context
+
+        row = await self.repository.get_project_context(record.id)
+        if row is None:
+            return await self._rebuild_context(record)
+        context = ProjectContext.model_validate(row)
+        if redis is not None:
+            context.stale = await self._is_dirty(redis, record.slug)
+            await self._cache_context(record.slug, context)
+        return context
 
     async def rebuild_project_context(self, project: str) -> ProjectContext:
-        """Пересчитать снапшот из топ-гранул проекта (хранимка 019)."""
-        project_id = await self.resolve_project(project)
-        if project_id is None:
-            raise NotFoundError(project, message="project is required for context")
-        return await self._rebuild_context(project_id)
+        """Пересчитать снапшот из топ-гранул проекта (хранимка 020 + стек 017)."""
+        record = await self._require_project_record(project)
+        return await self._rebuild_context(record)
 
-    async def _rebuild_context(self, project_id: str) -> ProjectContext:
-        """Механическая сборка снапшота: секции по namespace, без прозы.
+    async def rebuild_dirty_contexts(self) -> dict:
+        """Beat-пересборка (почасово): проекты с dirty-флагом → rebuild.
 
-        Проза Тиши (sections.prose) — Фаза 6; этот формат — её fallback.
+        Кандидаты — реестр (проектов единицы) с точечным GET флага:
+        без KEYS/SCAN по чужому ключевому пространству Redis.
         """
-        rows = await self.repository.fetch_project_context(project_id)
-        sections: dict[str, list[str]] = {}
-        for row in rows:
-            sections.setdefault(row["namespace"], []).append(row["content"])
-
-        ordered = [ns for ns in _CONTEXT_SECTION_ORDER if ns in sections]
-        ordered += sorted(ns for ns in sections if ns not in _CONTEXT_SECTION_ORDER)
-        content = "\n\n".join(
-            f"## {ns}\n" + "\n".join(f"- {item}" for item in sections[ns])
-            for ns in ordered
+        redis = await self._get_redis()
+        projects = await self.project_repo.list_all()
+        rebuilt: list[str] = []
+        for record in projects:
+            if redis is not None and await self._is_dirty(redis, record.slug):
+                await self._rebuild_context(record)
+                rebuilt.append(record.slug)
+        logger.info(
+            "rebuild_dirty_contexts: done",
+            extra={"scanned": len(projects), "rebuilt": len(rebuilt)},
         )
+        return {"scanned": len(projects), "rebuilt": rebuilt}
 
+    async def _cache_context(self, slug: str, context: ProjectContext) -> None:
+        """Снапшот в Redis + снять dirty. Best-effort — сбой не роняет путь."""
+        redis = await self._get_redis()
+        if redis is None:
+            return
+        try:
+            await redis.set(
+                f"{_CTX_KEY_PREFIX}{slug}",
+                context.model_dump_json(),
+                ex=self.config.context_cache_ttl,
+            )
+            await redis.delete(f"{_CTX_KEY_PREFIX}{slug}{_CTX_DIRTY_SUFFIX}")
+        except Exception:
+            logger.warning(
+                "context: cache write failed (non-fatal)", extra={"slug": slug}
+            )
+
+    async def _rebuild_context(self, record: ProjectRecord) -> ProjectContext:
+        """Механическая сборка снапшота (fallback прозы Тиши, план 6.2).
+
+        Секции: стек из project_technologies/project_links (017) + топ-гранулы
+        по namespace (хранимка project_context_snapshot, квоты 10/15/5/5).
+        content — маркдаун-список ≤100 строк: гранула → однострочный тезис.
+        """
+        rows = await self.repository.fetch_project_context(record.id)
+        sections: dict[str, list[str]] = {}
+        stack_lines = self._stack_lines(await self.project_repo.fetch_stack(record.id))
+        if stack_lines:
+            sections["stack"] = stack_lines
+        for row in rows:
+            section = _CONTEXT_SECTION_MAP.get(row["namespace"], row["namespace"])
+            sections.setdefault(section, []).append(row["content"])
+
+        content = self._render_content(record, sections)
         saved = await self.repository.upsert_project_context(
-            project_id,
+            record.id,
             content=content,
             sections=sections,
             granule_count=len(rows),
         )
-        return ProjectContext(
-            project_id=project_id,
+        context = ProjectContext(
+            project_id=record.id,
             content=content,
             sections=sections,
             granule_count=len(rows),
             computed_at=saved.get("computed_at"),
         )
+        await self._cache_context(record.slug, context)
+        return context
+
+    @staticmethod
+    def _stack_lines(stack: dict) -> list[str]:
+        """Стек проекта → строки секции: «PostgreSQL 16 — основная БД»,
+        «repo: https://… — заголовок»."""
+        lines: list[str] = []
+        for tech in stack.get("technologies", []):
+            entry = tech["name"] + (f" {tech['version']}" if tech.get("version") else "")
+            if tech.get("purpose"):
+                entry += f" — {tech['purpose']}"
+            lines.append(entry)
+        for link in stack.get("links", []):
+            title = f" — {link['title']}" if link.get("title") else ""
+            lines.append(f"{link['link_type']}: {link['url']}{title}")
+        return lines
+
+    @staticmethod
+    def _render_content(record: ProjectRecord, sections: dict) -> str:
+        """Секции → читаемый маркдаун: канонический порядок, cap 100 строк."""
+        ordered = [s for s in _CONTEXT_SECTION_ORDER if s in sections]
+        ordered += sorted(s for s in sections if s not in _CONTEXT_SECTION_ORDER)
+        parts: list[str] = [f"# {record.name} — облачко знаний"]
+        for section in ordered:
+            parts.append(f"## {_SECTION_TITLES.get(section, section)}")
+            parts.extend(f"- {_one_line(item)}" for item in sections[section])
+        if len(parts) <= _CONTENT_MAX_LINES:
+            return "\n".join(parts)
+        trimmed = parts[:_CONTENT_MAX_LINES]
+        trimmed[-1] = "… (обрезано по лимиту 100 строк)"
+        return "\n".join(trimmed)
 
     # ── Relations ──
 

@@ -178,11 +178,16 @@ class GraphStats(BaseModel):
 class ProjectContext(BaseModel):
     """Снапшот контекста проекта (миграция 019).
 
-    sections: {namespace: [content, ...]}; проза от Тиши (sections.prose)
-    появится в Фазе 6 — механическая сборка остаётся fallback'ом.
+    sections: {stack, decisions, code, insights, infra, <прочие ns>} —
+    стек из project_technologies/project_links + топ-гранулы по namespace
+    (хранимка project_context_snapshot); проза Тиши (sections.prose) —
+    поверх механической сборки (Фаза 6.2).
+    stale: true — после снапшота были записи в проект (dirty-флаг),
+    показываем как есть, но честно помечаем (Фаза 6.1).
     """
     project_id: str
     content: str | None = None
     sections: dict = Field(default_factory=dict)
     granule_count: int = 0
     computed_at: datetime | None = None
+    stale: bool = False
