@@ -5,12 +5,14 @@ ZCode-плагин selti-sync шлёт slug+local_path+repo_url на SessionStar
 вся логика матчинга — на сервере (плагин stateless, решает ничего).
 Защита записи — заголовок X-SELTI-KEY (env SELTI_API_KEY; пустой →
 эндпоинт открыт, совместимость). CRUD для людей — Фаза 3/5; здесь
-только машинный канал. repo_url записываем в единой нормализованной
-форме (без .git и trailing slash) — сравнение всегда честное.
+только машинный канал. repo_url записываем в канонической https-форме
+(ssh/scp/git-варианты схлопываются, без .git и trailing slash) —
+сравнение всегда честное.
 """
 
 from __future__ import annotations
 
+import re
 import secrets
 from typing import Literal
 
@@ -51,14 +53,37 @@ class ProjectRegisterRequest(BaseModel):
     repo_url: str | None = None
 
 
-def normalize_repo_url(url: str | None) -> str | None:
-    """Единая форма repo_url для сравнения и записи: без .git и trailing slash.
+# scp-like ssh-форма: [user@]host:path (порта в scp-форме не бывает)
+_SCP_LIKE = re.compile(r"^([\w.\-]+@)?([\w.\-]+):(/?[\w.\-~/]+)$")
+# ssh://git@host:port/path и git://git@host/path → хост для https-формы
+_SSH_URL = re.compile(r"^(?:ssh|git)://(?:[^@/]+@)?([^/:]+)(?::\d+)?/")
 
-    Пустая строка трактуется как NULL — «свободен для привязки» (ADR, NULL-семантика).
+
+def normalize_repo_url(url: str | None) -> str | None:
+    """Каноническая форма repo_url: https://host/path.
+
+    Схлопываем ssh-варианты того же репозитория в https (реальный публичный
+    путь проекта, ADR-018): git@github.com:Dek1m/selti.git,
+    ssh://git@github.com:22/Dek1m/selti.git, git://github.com/... →
+    https://github.com/Dek1m/selti. Иначе сравнение пары slug+repo_url
+    считало бы один репозиторий двумя разными и ловило бы ложные 409.
+    https не трогаем (включая нестандартный порт). Пустая строка трактуется
+    как NULL — «свободен для привязки» (ADR, NULL-семантика).
     """
     if url is None:
         return None
-    trimmed = url.strip().rstrip("/")
+    trimmed = url.strip()
+    if not trimmed:
+        return None
+    scp = _SCP_LIKE.match(trimmed)
+    # одиночная буква до двоеточия — это диск Windows (E:/...), не хост
+    if scp and "://" not in trimmed and len(scp.group(2)) > 1:
+        trimmed = f"https://{scp.group(2).lower()}/{scp.group(3).lstrip('/')}"
+    else:
+        trimmed = _SSH_URL.sub(lambda m: f"https://{m.group(1).lower()}/", trimmed)
+    trimmed = trimmed.rstrip("/")
+    # хост URL регистронезависим — приводим к нижнему; путь не трогаем
+    trimmed = re.sub(r"^(https?://)([^/]+)", lambda m: m.group(1) + m.group(2).lower(), trimmed)
     if trimmed.endswith(".git"):
         trimmed = trimmed[: -len(".git")]
     return trimmed or None

@@ -76,7 +76,23 @@ class TestNormalizeRepoUrl:
 
     def test_clean_url_untouched(self):
         assert normalize_repo_url(ALBEDO_REPO) == ALBEDO_REPO
-        assert normalize_repo_url("git@github.com:Dek1m/selti.git") == "git@github.com:Dek1m/selti"
+
+    def test_scp_like_ssh_canonicalized_to_https(self):
+        assert normalize_repo_url("git@github.com:Dek1m/selti.git") == "https://github.com/Dek1m/selti"
+        assert normalize_repo_url("git@github.com:Dek1m/selti") == "https://github.com/Dek1m/selti"
+        assert normalize_repo_url("git@github.com:/Dek1m/selti.git") == "https://github.com/Dek1m/selti"
+
+    def test_ssh_url_canonicalized_to_https(self):
+        assert normalize_repo_url("ssh://git@github.com/Dek1m/selti.git") == "https://github.com/Dek1m/selti"
+        assert normalize_repo_url("ssh://git@github.com:22/Dek1m/selti.git") == "https://github.com/Dek1m/selti"
+        assert normalize_repo_url("git://github.com/Dek1m/selti.git") == "https://github.com/Dek1m/selti"
+
+    def test_https_host_lowercased_path_kept(self):
+        assert normalize_repo_url("git@GitHub.com:Dek1m/Repo.git") == "https://github.com/Dek1m/Repo"
+        assert normalize_repo_url("https://GitHub.com/Dek1m/Repo.git") == "https://github.com/Dek1m/Repo"
+
+    def test_windows_drive_path_is_not_a_host(self):
+        assert normalize_repo_url("E:/Projects/Python/selti") == "E:/Projects/Python/selti"
 
     def test_empty_or_none_is_free_for_binding(self):
         """NULL-семантика ADR: пустая строка = свободен для привязки, как NULL."""
