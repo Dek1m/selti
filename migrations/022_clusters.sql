@@ -14,6 +14,10 @@
 --        assign_clusters(UUID, REAL), granule_trigrams, trigram_similarity —
 --        файл дропает сам (DROP IF EXISTS, блок 0). Таблица clusters
 --        сохраняется (IF NOT EXISTS): структура не менялась.
+--   ⚡ горячий фикс 19.09 (на проде упал min(uuid) — агрегата нет в PG):
+--        если v2 уже применена — достаточно выполнить из этого файла ТОЛЬКО
+--        CREATE OR REPLACE FUNCTION assign_clusters_from_pairs (§3):
+--        полное переприменение НЕ нужно, таблицы/индексы/триггеры не менялись.
 --
 -- ИСТОРИЯ v1 → v2 (прод-факты 2026-09-18, Рэй):
 --   v1 считала близость в SQL: словесные 3-граммы + prefix-фильтр
@@ -264,7 +268,14 @@ BEGIN
 
     LOOP
         WITH candidates AS (
-            SELECT e.dst AS node_id, min(g.group_key) AS new_label
+            -- ⚠ агрегата min(UUID) в PostgreSQL НЕТ (инцидент 19.09:
+            -- UndefinedFunctionError на проде). Каст в text: каноничная
+            -- lowercase-hex форма UUID лексикографически эквивалентна
+            -- побайтовому uuid-порядку, значит min(text)::uuid даёт ровно
+            -- тот же минимальный UUID компоненты — детерминизм min-label
+            -- сохраняется; сравнение c.new_label < t.group_key ниже —
+            -- нативное uuid, консистентно с текстовым порядком.
+            SELECT e.dst AS node_id, min(g.group_key::text)::UUID AS new_label
             FROM _cluster_edges e
             JOIN _cluster_groups g ON g.member_id = e.src
             GROUP BY e.dst
