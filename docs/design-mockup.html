@@ -1,0 +1,1026 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>selti — глубина памяти · дизайн-мокап</title>
+<!--
+  Selti Web UI design mockup — "Deep Lumen" concept.
+  Single self-contained file: inline CSS, Google Fonts CDN.
+  Screens shown: Search (results state) + open granule panel + Graph preview.
+  Open at >= 1280px viewport width.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  /* ============ Design tokens (see WEB_UI_DESIGN.md §2) ============ */
+  :root {
+    --sl-bg-abyss:  #060A12;
+    --sl-bg-deep:   #0A101B;
+    --sl-bg-shell:  #0E1524;
+    --sl-bg-raised: #141D30;
+    --sl-bg-inset:  #080D16;
+
+    --sl-border:        #1B2540;
+    --sl-border-strong: #273354;
+
+    --sl-text:   #E8EEF7;
+    --sl-text-2: #9DACC6;
+    --sl-text-3: #63728F;
+
+    --sl-accent:     #5FE8C8;
+    --sl-accent-dim: rgba(95, 232, 200, 0.14);
+    --sl-accent-glow: 0 0 24px rgba(95, 232, 200, 0.20);
+
+    --sl-danger:  #FF7A8A;
+    --sl-warn:    #FFC15E;
+
+    /* Namespace spectrum */
+    --sl-ns-user-facts:        #FF8E7A;
+    --sl-ns-project-meta:      #A78BFF;
+    --sl-ns-code-knowledge:    #4DC9FF;
+    --sl-ns-dialogue-insights: #86E3A0;
+    --sl-ns-infrastructure:    #FFC15E;
+    --sl-ns-default:           #8A97AC;
+
+    --sl-font-display: "Sora", system-ui, sans-serif;
+    --sl-font-body:    "Inter", system-ui, sans-serif;
+    --sl-font-mono:    "JetBrains Mono", monospace;
+
+    --sl-s-2: 8px;  --sl-s-3: 12px; --sl-s-4: 16px;
+    --sl-s-5: 24px; --sl-s-6: 32px; --sl-s-7: 48px;
+
+    --sl-r-md: 10px; --sl-r-lg: 16px; --sl-r-xl: 24px; --sl-r-full: 999px;
+
+    --sl-shadow-2: 0 8px 32px rgba(2, 6, 14, 0.60);
+    --sl-shadow-3: 0 16px 64px rgba(2, 6, 14, 0.70);
+
+    --sl-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html { scrollbar-color: #273354 var(--sl-bg-abyss); }
+
+  body {
+    background:
+      /* Attention beam behind hero */
+      radial-gradient(900px 420px at 50% -80px, rgba(95, 232, 200, 0.07), transparent 70%),
+      /* Dormant memory layers */
+      radial-gradient(1100px 700px at 8% 110%, rgba(167, 139, 255, 0.05), transparent 60%),
+      radial-gradient(1000px 640px at 96% 40%, rgba(77, 201, 255, 0.04), transparent 60%),
+      var(--sl-bg-abyss);
+    color: var(--sl-text);
+    font: 400 15px/1.6 var(--sl-font-body);
+    min-width: 1280px;
+  }
+
+  ::selection { background: rgba(95, 232, 200, 0.25); }
+
+  button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; }
+
+  :focus-visible {
+    outline: 2px solid var(--sl-accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  .mono { font-family: var(--sl-font-mono); }
+
+  /* ============ Topbar ============ */
+  .topbar {
+    position: sticky; top: 0; z-index: 50;
+    display: flex; align-items: center; gap: var(--sl-s-6);
+    height: 56px; padding: 0 var(--sl-s-6);
+    background: rgba(6, 10, 18, 0.82);
+    backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--sl-border);
+  }
+
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand-name {
+    font: 600 18px/1 var(--sl-font-display);
+    letter-spacing: 0.01em;
+  }
+  .brand-name b { color: var(--sl-accent); font-weight: 700; }
+
+  .nav { display: flex; gap: 4px; margin-left: var(--sl-s-4); }
+  .nav a {
+    position: relative;
+    padding: 8px 14px; border-radius: var(--sl-r-md);
+    color: var(--sl-text-2); text-decoration: none;
+    font-size: 14px; font-weight: 500;
+    transition: color 150ms var(--sl-ease), background 150ms var(--sl-ease);
+  }
+  .nav a:hover { color: var(--sl-text); background: var(--sl-bg-raised); }
+  .nav a.active { color: var(--sl-text); }
+  .nav a.active::after {
+    content: ""; position: absolute; left: 14px; right: 14px; bottom: -9px;
+    height: 2px; border-radius: 2px;
+    background: var(--sl-accent);
+    box-shadow: var(--sl-accent-glow);
+  }
+
+  .health {
+    margin-left: auto;
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 14px; border-radius: var(--sl-r-full);
+    border: 1px solid var(--sl-border);
+    background: var(--sl-bg-shell);
+    font-size: 12.5px; color: var(--sl-text-2);
+  }
+  .health .num { color: var(--sl-text); font-weight: 500; }
+  .pulse-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--sl-accent);
+    box-shadow: 0 0 10px rgba(95, 232, 200, 0.8);
+    animation: breathe 3s var(--sl-ease) infinite;
+  }
+  @keyframes breathe { 50% { opacity: 0.45; } }
+
+  /* ============ Hero search ============ */
+  .stage { max-width: 1440px; margin: 0 auto; padding: 0 var(--sl-s-6); }
+
+  .hero { padding: 28px 0 var(--sl-s-5); }
+  .searchbox {
+    display: flex; align-items: center; gap: var(--sl-s-3);
+    max-width: 760px; margin: 0 auto;
+    padding: 0 20px; height: 60px;
+    background: var(--sl-bg-raised);
+    border: 1px solid var(--sl-border-strong);
+    border-radius: var(--sl-r-xl);
+    box-shadow: var(--sl-shadow-2), var(--sl-accent-glow);
+    transition: border-color 250ms var(--sl-ease);
+  }
+  .searchbox:focus-within { border-color: var(--sl-accent); }
+  .searchbox .icon { color: var(--sl-accent); display: flex; }
+  .searchbox input {
+    flex: 1; background: none; border: none; outline: none;
+    color: var(--sl-text);
+    font: 500 19px/1 var(--sl-font-display);
+    caret-color: var(--sl-accent);
+  }
+  .searchbox input::placeholder { color: var(--sl-text-3); font-weight: 400; }
+  kbd {
+    font: 500 11px/1 var(--sl-font-mono);
+    color: var(--sl-text-3);
+    padding: 5px 8px; border-radius: 6px;
+    border: 1px solid var(--sl-border-strong);
+    background: var(--sl-bg-inset);
+  }
+
+  /* ============ Filter chips ============ */
+  .filters {
+    display: flex; align-items: center; justify-content: center;
+    flex-wrap: wrap; gap: 8px;
+    max-width: 1100px; margin: var(--sl-s-4) auto 0;
+  }
+  .chip {
+    display: inline-flex; align-items: center; gap: 7px;
+    height: 34px; padding: 0 14px;
+    border-radius: var(--sl-r-full);
+    border: 1px solid var(--sl-border);
+    background: var(--sl-bg-shell);
+    color: var(--sl-text-2); font-size: 13px; font-weight: 500;
+    transition: all 150ms var(--sl-ease);
+  }
+  .chip:hover { border-color: var(--sl-border-strong); color: var(--sl-text); }
+  .chip .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .chip .count { font-family: var(--sl-font-mono); font-size: 11px; color: var(--sl-text-3); }
+  .chip[aria-pressed="true"] {
+    color: var(--sl-text);
+    border-color: var(--sl-border-strong);
+    background: var(--sl-bg-raised);
+  }
+  .chip .x { color: var(--sl-text-3); font-size: 12px; margin-left: 2px; }
+
+  .chip.ns-user-facts[aria-pressed="true"]        { box-shadow: inset 0 0 0 1px rgba(255,142,122,.4),  0 0 16px rgba(255,142,122,.10); }
+  .chip.ns-project-meta[aria-pressed="true"]      { box-shadow: inset 0 0 0 1px rgba(167,139,255,.45), 0 0 16px rgba(167,139,255,.10); }
+  .chip.ns-code-knowledge[aria-pressed="true"]    { box-shadow: inset 0 0 0 1px rgba(77,201,255,.4),   0 0 16px rgba(77,201,255,.10); }
+  .chip.ns-dialogue-insights[aria-pressed="true"] { box-shadow: inset 0 0 0 1px rgba(134,227,160,.4),  0 0 16px rgba(134,227,160,.10); }
+  .chip.ns-infrastructure[aria-pressed="true"]    { box-shadow: inset 0 0 0 1px rgba(255,193,94,.4),   0 0 16px rgba(255,193,94,.10); }
+  .chip.accent[aria-pressed="true"]               { box-shadow: inset 0 0 0 1px rgba(95,232,200,.45),  0 0 16px rgba(95,232,200,.10); }
+
+  .seg {
+    display: inline-flex; height: 34px;
+    border-radius: var(--sl-r-full);
+    border: 1px solid var(--sl-border);
+    background: var(--sl-bg-shell); overflow: hidden;
+  }
+  .seg button {
+    padding: 0 14px; font-size: 13px; color: var(--sl-text-3);
+    transition: all 150ms var(--sl-ease);
+  }
+  .seg button:hover { color: var(--sl-text-2); }
+  .seg button[aria-pressed="true"] {
+    background: var(--sl-bg-raised); color: var(--sl-text);
+  }
+
+  .filters .sep { width: 1px; height: 20px; background: var(--sl-border-strong); margin: 0 6px; }
+
+  /* ============ Results layout ============ */
+  .layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 460px;
+    gap: var(--sl-s-5);
+    align-items: start;
+    padding-bottom: var(--sl-s-7);
+  }
+
+  .results-head {
+    display: flex; align-items: baseline; gap: var(--sl-s-3);
+    padding: var(--sl-s-2) 2px var(--sl-s-4);
+    color: var(--sl-text-3); font-size: 13px;
+  }
+  .results-head b { color: var(--sl-text-2); font-weight: 600; }
+  .results-head .formula {
+    margin-left: auto; font-family: var(--sl-font-mono); font-size: 11px;
+    color: var(--sl-text-3);
+  }
+  .results-head .formula i { color: var(--sl-text-2); font-style: normal; }
+
+  /* --- Result card --- */
+  .result {
+    position: relative;
+    display: flex; gap: var(--sl-s-4);
+    padding: 18px 20px 18px 22px;
+    margin-bottom: var(--sl-s-3);
+    background: var(--sl-bg-shell);
+    border: 1px solid var(--sl-border);
+    border-radius: var(--sl-r-md);
+    cursor: pointer;
+    transition: background 150ms var(--sl-ease), border-color 150ms var(--sl-ease), transform 150ms var(--sl-ease);
+  }
+  .result:hover { background: var(--sl-bg-raised); border-color: var(--sl-border-strong); transform: translateY(-1px); }
+  .result.active {
+    background: var(--sl-bg-raised);
+    border-color: var(--sl-border-strong);
+    box-shadow: var(--sl-shadow-2);
+  }
+
+  .spine {
+    position: absolute; left: 0; top: 14px; bottom: 14px;
+    width: 3px; border-radius: 3px;
+    transition: width 150ms var(--sl-ease);
+  }
+  .result:hover .spine, .result.active .spine { width: 5px; }
+
+  .result-body { flex: 1; min-width: 0; }
+  .result h3 {
+    font: 600 16px/1.45 var(--sl-font-body);
+    margin-bottom: 5px;
+  }
+  .result .excerpt {
+    color: var(--sl-text-2); font-size: 13.5px; line-height: 1.55;
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .result mark {
+    background: var(--sl-accent-dim); color: inherit;
+    border-radius: 3px; padding: 0 2px;
+  }
+  .result-meta {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px;
+    margin-top: 12px;
+    font-size: 12px; color: var(--sl-text-3);
+  }
+  .ns-tag { display: inline-flex; align-items: center; gap: 6px; color: var(--sl-text-2); }
+  .ns-tag .dot { width: 7px; height: 7px; border-radius: 50%; }
+  .result-meta .id { font-family: var(--sl-font-mono); font-size: 11px; }
+
+  .badge {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 9px; border-radius: var(--sl-r-full);
+    font-size: 11px; font-weight: 500;
+    border: 1px solid var(--sl-border-strong);
+    color: var(--sl-text-2); background: var(--sl-bg-inset);
+  }
+  .badge.asserted { color: var(--sl-accent); border-color: rgba(95,232,200,.35); }
+  .badge.frozen   { color: #7DD3FC; border-color: rgba(125,211,252,.35); }
+  .badge.superseded { color: var(--sl-text-3); border-style: dashed; }
+
+  /* --- Score gauge (signature component) --- */
+  .score {
+    flex-shrink: 0; width: 128px;
+    display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
+    padding-top: 2px;
+  }
+  .score .val {
+    font: 500 22px/1 var(--sl-font-mono);
+    color: var(--sl-accent);
+    text-shadow: 0 0 18px rgba(95, 232, 200, 0.45);
+  }
+  .score .bar {
+    display: flex; gap: 2px; width: 104px; height: 4px;
+  }
+  .score .bar i { flex: 1; border-radius: 2px; display: block; }
+  .score .bar .f-rrf  { background: var(--sl-accent); }
+  .score .bar .f-dec  { background: var(--sl-ns-code-knowledge); }
+  .score .bar .f-imp  { background: var(--sl-ns-project-meta); }
+  .score .lbl {
+    font-family: var(--sl-font-mono); font-size: 10px; color: var(--sl-text-3);
+    letter-spacing: 0.02em;
+  }
+
+  /* ============ Granule panel (open card) ============ */
+  .panel {
+    position: sticky; top: 76px;
+    background: var(--sl-bg-shell);
+    border: 1px solid var(--sl-border-strong);
+    border-radius: var(--sl-r-lg);
+    box-shadow: var(--sl-shadow-3);
+    max-height: calc(100vh - 96px);
+    display: flex; flex-direction: column;
+  }
+  .panel-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--sl-border);
+  }
+  .panel-head .id {
+    font-family: var(--sl-font-mono); font-size: 11px; color: var(--sl-text-3);
+  }
+  .panel-head .close {
+    margin-left: auto; width: 30px; height: 30px;
+    display: grid; place-items: center;
+    border-radius: 8px; color: var(--sl-text-3);
+    transition: all 150ms var(--sl-ease);
+  }
+  .panel-head .close:hover { background: var(--sl-bg-raised); color: var(--sl-text); }
+
+  .panel-body { overflow-y: auto; padding: 20px; scrollbar-width: thin; }
+
+  .section-label {
+    display: flex; align-items: center; gap: 8px;
+    font: 600 11px/1 var(--sl-font-display);
+    letter-spacing: 0.09em; text-transform: uppercase;
+    color: var(--sl-text-3);
+    margin: 0 0 10px;
+  }
+  .section-label::after { content: ""; flex: 1; height: 1px; background: var(--sl-border); }
+  .panel .section + .section { margin-top: 22px; }
+
+  .panel .content {
+    font-size: 14px; line-height: 1.65; color: var(--sl-text);
+    white-space: pre-line;
+  }
+
+  .panel .score-detail {
+    display: flex; align-items: center; gap: 14px;
+    padding: 12px 14px;
+    background: var(--sl-bg-inset);
+    border: 1px solid var(--sl-border);
+    border-radius: var(--sl-r-md);
+  }
+  .panel .score-detail .val {
+    font: 500 26px/1 var(--sl-font-mono);
+    color: var(--sl-accent);
+    text-shadow: 0 0 18px rgba(95, 232, 200, 0.45);
+  }
+  .factor-list { flex: 1; display: grid; gap: 4px; }
+  .factor { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+  .factor .name { width: 84px; font-family: var(--sl-font-mono); color: var(--sl-text-2); }
+  .factor .track { flex: 1; height: 3px; border-radius: 2px; background: var(--sl-border); overflow: hidden; }
+  .factor .track i { display: block; height: 100%; border-radius: 2px; }
+  .factor .v { font-family: var(--sl-font-mono); color: var(--sl-text-3); }
+
+  .meta-table {
+    width: 100%; border-collapse: collapse;
+    background: var(--sl-bg-inset);
+    border: 1px solid var(--sl-border);
+    border-radius: var(--sl-r-md); overflow: hidden;
+    font-size: 12.5px;
+  }
+  .meta-table td {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--sl-border);
+    vertical-align: top;
+  }
+  .meta-table tr:last-child td { border-bottom: none; }
+  .meta-table td:first-child { color: var(--sl-text-3); width: 128px; }
+  .meta-table td:last-child { font-family: var(--sl-font-mono); font-size: 12px; color: var(--sl-text-2); }
+  .meta-table .dots { letter-spacing: 3px; color: var(--sl-accent); }
+
+  /* --- Lineage chain --- */
+  .lineage { display: flex; align-items: center; gap: 0; padding: 4px 2px; }
+  .lin-node {
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+    width: 86px; flex-shrink: 0;
+  }
+  .lin-node .circle {
+    width: 30px; height: 30px; border-radius: 50%;
+    display: grid; place-items: center;
+    font: 500 11px var(--sl-font-mono);
+    border: 1.5px solid var(--sl-border-strong);
+    background: var(--sl-bg-inset); color: var(--sl-text-3);
+    cursor: pointer; transition: all 150ms var(--sl-ease);
+  }
+  .lin-node .circle:hover { border-color: var(--sl-text-3); }
+  .lin-node.current .circle {
+    border-color: var(--sl-accent); color: var(--sl-accent);
+    background: var(--sl-accent-dim);
+    box-shadow: var(--sl-accent-glow);
+  }
+  .lin-node .cap { font-size: 10px; color: var(--sl-text-3); text-align: center; line-height: 1.3; }
+  .lin-node.current .cap { color: var(--sl-text-2); }
+
+  .lin-link { flex: 1; position: relative; height: 2px; margin: 0 2px 22px; background: var(--sl-border-strong); }
+  .lin-link::after {
+    content: ""; position: absolute; right: -1px; top: 50%;
+    width: 8px; height: 8px;
+    border-top: 2px solid var(--sl-border-strong);
+    border-right: 2px solid var(--sl-border-strong);
+    transform: translateY(-50%) rotate(45deg) translate(-1px, 1px);
+  }
+
+  /* --- Relations (synapse lists) --- */
+  .rel-group + .rel-group { margin-top: 14px; }
+  .rel-title {
+    font-size: 11.5px; color: var(--sl-text-3);
+    display: flex; align-items: center; gap: 7px; margin-bottom: 8px;
+  }
+  .rel-title .arr { color: var(--sl-accent); }
+  .rel {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 10px; border-radius: 8px;
+    font-size: 13px; cursor: pointer;
+    transition: background 150ms var(--sl-ease);
+  }
+  .rel:hover { background: var(--sl-bg-raised); }
+  .rel .link-type {
+    flex-shrink: 0; width: 118px;
+    font-family: var(--sl-font-mono); font-size: 10.5px;
+  }
+  .rel .target { flex: 1; color: var(--sl-text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rel .target:hover { color: var(--sl-text); }
+  .lt-references   { color: var(--sl-ns-default); }
+  .lt-follows      { color: var(--sl-ns-code-knowledge); }
+  .lt-contains     { color: var(--sl-ns-dialogue-insights); }
+  .lt-precedes     { color: var(--sl-ns-infrastructure); }
+  .lt-informs      { color: var(--sl-ns-user-facts); }
+
+  .panel-actions {
+    display: flex; gap: 10px; padding: 14px 20px;
+    border-top: 1px solid var(--sl-border);
+  }
+  .btn {
+    flex: 1; height: 38px;
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    border-radius: var(--sl-r-md);
+    font-size: 13px; font-weight: 500;
+    border: 1px solid var(--sl-border-strong);
+    background: var(--sl-bg-raised); color: var(--sl-text-2);
+    transition: all 150ms var(--sl-ease);
+  }
+  .btn:hover { color: var(--sl-text); border-color: var(--sl-text-3); }
+  .btn.primary {
+    background: var(--sl-accent-dim); border-color: rgba(95,232,200,.4);
+    color: var(--sl-accent);
+  }
+  .btn.primary:hover { box-shadow: var(--sl-accent-glow); }
+
+  /* ============ Graph preview ============ */
+  .graph-section { padding-bottom: var(--sl-s-7); }
+  .graph-head {
+    display: flex; align-items: baseline; gap: var(--sl-s-3);
+    margin-bottom: var(--sl-s-4);
+  }
+  .graph-head h2 { font: 600 20px/1.3 var(--sl-font-display); }
+  .graph-head .hint { color: var(--sl-text-3); font-size: 13px; }
+  .graph-head .open-link {
+    margin-left: auto; color: var(--sl-accent); font-size: 13px;
+    text-decoration: none; display: inline-flex; align-items: center; gap: 6px;
+  }
+  .graph-head .open-link:hover { text-shadow: 0 0 14px rgba(95,232,200,.6); }
+
+  .graph-canvas {
+    position: relative;
+    height: 420px;
+    background:
+      radial-gradient(700px 300px at 50% 45%, rgba(95, 232, 200, 0.045), transparent 70%),
+      var(--sl-bg-deep);
+    border: 1px solid var(--sl-border);
+    border-radius: var(--sl-r-lg);
+    overflow: hidden;
+  }
+  .graph-canvas svg { width: 100%; height: 100%; display: block; }
+
+  .g-label {
+    fill: var(--sl-text-3);
+    font: 11px var(--sl-font-mono);
+  }
+  .g-label.center { fill: var(--sl-text); font: 600 12px var(--sl-font-body); }
+
+  /* Graph floating filter panel */
+  .g-float {
+    position: absolute; top: 16px; left: 16px; width: 224px;
+    background: rgba(14, 21, 36, 0.92);
+    border: 1px solid var(--sl-border-strong);
+    border-radius: var(--sl-r-md);
+    backdrop-filter: blur(10px);
+    box-shadow: var(--sl-shadow-2);
+    padding: 14px;
+  }
+  .g-float h4 {
+    font: 600 11px/1 var(--sl-font-display);
+    text-transform: uppercase; letter-spacing: 0.09em;
+    color: var(--sl-text-3); margin-bottom: 12px;
+  }
+  .g-layer {
+    display: flex; align-items: center; gap: 8px;
+    padding: 5px 0; font-size: 12.5px; color: var(--sl-text-2);
+    cursor: pointer; user-select: none;
+  }
+  .g-layer .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .g-layer .cnt { margin-left: auto; font-family: var(--sl-font-mono); font-size: 10.5px; color: var(--sl-text-3); }
+  .g-layer input { accent-color: var(--sl-accent); }
+  .g-range { margin-top: 12px; }
+  .g-range label { font-size: 11px; color: var(--sl-text-3); display: flex; justify-content: space-between; }
+  .g-range input[type="range"] { width: 100%; accent-color: var(--sl-accent); margin-top: 6px; }
+  .g-count {
+    margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--sl-border);
+    font-family: var(--sl-font-mono); font-size: 11px; color: var(--sl-text-3);
+  }
+  .g-count b { color: var(--sl-text-2); font-weight: 500; }
+
+  /* Node peek card */
+  .g-peek {
+    position: absolute; right: 16px; bottom: 16px; width: 300px;
+    background: rgba(14, 21, 36, 0.94);
+    border: 1px solid var(--sl-border-strong);
+    border-radius: var(--sl-r-md);
+    backdrop-filter: blur(10px);
+    box-shadow: var(--sl-shadow-2);
+    padding: 14px 16px;
+  }
+  .g-peek .ns-tag { font-size: 11.5px; }
+  .g-peek h5 { font: 600 13.5px/1.4 var(--sl-font-body); margin: 6px 0; }
+  .g-peek p { font-size: 12px; color: var(--sl-text-2); line-height: 1.5;
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .g-peek .row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+  .g-peek .open {
+    margin-left: auto; color: var(--sl-accent); font-size: 12px; font-weight: 500;
+    display: inline-flex; align-items: center; gap: 5px;
+  }
+
+  /* Legend */
+  .g-legend {
+    position: absolute; left: 16px; bottom: 16px;
+    display: flex; gap: 14px; align-items: center;
+    padding: 8px 14px;
+    background: rgba(8, 13, 22, 0.85);
+    border: 1px solid var(--sl-border);
+    border-radius: var(--sl-r-full);
+    font-size: 11px; color: var(--sl-text-3);
+    backdrop-filter: blur(8px);
+  }
+  .g-legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .g-legend .dot { width: 7px; height: 7px; border-radius: 50%; }
+
+  /* ============ Footer ============ */
+  .foot {
+    border-top: 1px solid var(--sl-border);
+    padding: 20px var(--sl-s-6);
+    display: flex; gap: var(--sl-s-4); align-items: center;
+    color: var(--sl-text-3); font-size: 12px;
+  }
+  .foot .sep { flex: 1; }
+  .foot .k { font-family: var(--sl-font-mono); }
+  .foot kbd { margin-left: 4px; }
+
+  /* ============ Motion care ============ */
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ============ Topbar ============ -->
+<header class="topbar">
+  <div class="brand">
+    <!-- Logo: three linked grains -->
+    <svg width="26" height="26" viewBox="0 0 26 26" fill="none" aria-hidden="true">
+      <path d="M8 17 L13 8 L18 15 M8 17 L18 15" stroke="#5FE8C8" stroke-width="1.4" opacity="0.7"/>
+      <circle cx="8"  cy="17" r="3.4" fill="#A78BFF"/>
+      <circle cx="13" cy="8"  r="4"   fill="#5FE8C8"/>
+      <circle cx="18" cy="15" r="3"   fill="#4DC9FF"/>
+    </svg>
+    <span class="brand-name">se<b>lti</b></span>
+  </div>
+
+  <nav class="nav" aria-label="Основная навигация">
+    <a href="#" class="active" aria-current="page">Поиск</a>
+    <a href="#graph">Граф</a>
+    <a href="#">Проекты</a>
+    <a href="#">Статистика</a>
+  </nav>
+
+  <div class="health" role="status" aria-label="Состояние сервера">
+    <span class="pulse-dot" aria-hidden="true"></span>
+    <span><span class="num">14 588</span> гранул</span>
+    <span aria-hidden="true">·</span>
+    <span>PG active</span>
+    <span aria-hidden="true">·</span>
+    <span class="mono" style="font-size:11px">v0.18</span>
+  </div>
+</header>
+
+<main class="stage">
+
+  <!-- ============ Hero search ============ -->
+  <section class="hero" aria-label="Поиск по памяти">
+    <div class="searchbox">
+      <span class="icon">
+        <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+          <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001q.044.06.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1 1 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0"/>
+        </svg>
+      </span>
+      <input type="search" value="деплой фазы 2" aria-label="Поисковый запрос" spellcheck="false">
+      <kbd>/</kbd>
+    </div>
+
+    <!-- Filter chips -->
+    <div class="filters" role="group" aria-label="Фильтры выдачи">
+      <button class="chip ns-user-facts" aria-pressed="false">
+        <span class="dot" style="background: var(--sl-ns-user-facts)"></span>
+        user_facts <span class="count">2 104</span>
+      </button>
+      <button class="chip ns-project-meta" aria-pressed="true">
+        <span class="dot" style="background: var(--sl-ns-project-meta)"></span>
+        project_meta <span class="count">1 876</span>
+      </button>
+      <button class="chip ns-code-knowledge" aria-pressed="false">
+        <span class="dot" style="background: var(--sl-ns-code-knowledge)"></span>
+        code_knowledge <span class="count">6 412</span>
+      </button>
+      <button class="chip ns-dialogue-insights" aria-pressed="false">
+        <span class="dot" style="background: var(--sl-ns-dialogue-insights)"></span>
+        dialogue_insights <span class="count">2 530</span>
+      </button>
+      <button class="chip ns-infrastructure" aria-pressed="false">
+        <span class="dot" style="background: var(--sl-ns-infrastructure)"></span>
+        infrastructure <span class="count">1 049</span>
+      </button>
+
+      <span class="sep" aria-hidden="true"></span>
+
+      <button class="chip" aria-pressed="true">
+        проект: selti <span class="x">✕</span>
+      </button>
+
+      <span class="sep" aria-hidden="true"></span>
+
+      <div class="seg" role="group" aria-label="Период">
+        <button aria-pressed="false">24ч</button>
+        <button aria-pressed="true">7д</button>
+        <button aria-pressed="false">30д</button>
+        <button aria-pressed="false">всё</button>
+      </div>
+
+      <span class="sep" aria-hidden="true"></span>
+
+      <button class="chip accent" aria-pressed="true">
+        <span class="dot" style="background: var(--sl-accent)"></span>
+        asserted
+      </button>
+      <button class="chip" aria-pressed="false">
+        <span class="dot" style="background: #7DD3FC"></span>
+        frozen
+      </button>
+    </div>
+  </section>
+
+  <!-- ============ Results + granule panel ============ -->
+  <section class="layout" aria-label="Результаты поиска">
+
+    <div>
+      <div class="results-head">
+        <span>Найдено <b>128</b> гранул · <b>0.24 с</b></span>
+        <span class="formula">score = <i>rrf</i> × <i>decay</i> × <i>importance</i></span>
+      </div>
+
+      <!-- Result 1 (active, panel shows its details) -->
+      <article class="result active" tabindex="0">
+        <span class="spine" style="background: var(--sl-ns-project-meta)"></span>
+        <div class="result-body">
+          <h3>Фаза 2 «Жизненный цикл гранул»: принята и пушнута (HEAD c867d43)</h3>
+          <p class="excerpt">…Приёмка Катерины: 2 итерации, финал 553 passed, acc_scenarios 48/48, вердикт «принимать». Состав фазы: <mark>Supersession</mark> <mark>API</mark>, тулы memory_supersede / get_history / freeze, Celery beat (очередь memory), миграция 022 Норы (clusters + assign_clusters)…</p>
+          <div class="result-meta">
+            <span class="ns-tag"><span class="dot" style="background: var(--sl-ns-project-meta)"></span>project_meta</span>
+            <span>selti</span>
+            <span>12 ч назад</span>
+            <span class="id">03641cd3</span>
+            <span class="badge asserted">asserted</span>
+            <span class="badge">v3</span>
+          </div>
+        </div>
+        <div class="score" role="img" aria-label="Релевантность 0.87: rrf 0.94, decay 0.98, importance 0.95" title="rrf 0.94 · decay 0.98 · importance 0.95">
+          <span class="val">0.87</span>
+          <span class="bar"><i class="f-rrf" style="opacity:.94"></i><i class="f-dec" style="opacity:.98"></i><i class="f-imp" style="opacity:.95"></i></span>
+          <span class="lbl">rrf·decay·imp</span>
+        </div>
+      </article>
+
+      <!-- Result 2 -->
+      <article class="result" tabindex="0">
+        <span class="spine" style="background: var(--sl-ns-infrastructure)"></span>
+        <div class="result-body">
+          <h3>Рекомендация: сеть app-net, БД memory, пользователь selti</h3>
+          <p class="excerpt">…сеть app-net — общая для selti + gera + будущих сервисов; пароль сгенерировать новый (16+ символов). Миграция: ALTER DATABASE RENAME + CREATE USER + <mark>pg_dump</mark> как fallback…</p>
+          <div class="result-meta">
+            <span class="ns-tag"><span class="dot" style="background: var(--sl-ns-infrastructure)"></span>infrastructure</span>
+            <span>akame</span>
+            <span>3 дн назад</span>
+            <span class="id">0089cada</span>
+            <span class="badge asserted">asserted</span>
+            <span class="badge">v2</span>
+          </div>
+        </div>
+        <div class="score" role="img" aria-label="Релевантность 0.74" title="rrf 0.88 · decay 0.91 · importance 0.93">
+          <span class="val">0.74</span>
+          <span class="bar"><i class="f-rrf" style="opacity:.88"></i><i class="f-dec" style="opacity:.91"></i><i class="f-imp" style="opacity:.93"></i></span>
+          <span class="lbl">rrf·decay·imp</span>
+        </div>
+      </article>
+
+      <!-- Result 3 -->
+      <article class="result" tabindex="0">
+        <span class="spine" style="background: var(--sl-ns-project-meta)"></span>
+        <div class="result-body">
+          <h3>Деплой Фазы 0 selti на прод завершён (18.09, HEAD c899050)</h3>
+          <p class="excerpt">…все smoke-тесты зелёные. Состояние прода: reconciliation PG active 14 588 = Qdrant 14 588, namespaces 13, /health ok, метрики 270 строк. Снапшоты на сервере до 2026-09-21…</p>
+          <div class="result-meta">
+            <span class="ns-tag"><span class="dot" style="background: var(--sl-ns-project-meta)"></span>project_meta</span>
+            <span>selti</span>
+            <span>1 дн назад</span>
+            <span class="id">06924872</span>
+            <span class="badge asserted">asserted</span>
+          </div>
+        </div>
+        <div class="score" role="img" aria-label="Релевантность 0.71" title="rrf 0.86 · decay 0.93 · importance 0.95">
+          <span class="val">0.71</span>
+          <span class="bar"><i class="f-rrf" style="opacity:.86"></i><i class="f-dec" style="opacity:.93"></i><i class="f-imp" style="opacity:.95"></i></span>
+          <span class="lbl">rrf·decay·imp</span>
+        </div>
+      </article>
+
+      <!-- Result 4 -->
+      <article class="result" tabindex="0">
+        <span class="spine" style="background: var(--sl-ns-code-knowledge)"></span>
+        <div class="result-body">
+          <h3>Паттерны замены типов связей в графе знаний</h3>
+          <p class="excerpt">…cross-project links (akame ↔ selti, gera ↔ selti) остаются «references» — автосвязчик создал их по ключевым словам; ADR → код почти всегда <mark>implements_adr</mark>; ADR → risk = solves…</p>
+          <div class="result-meta">
+            <span class="ns-tag"><span class="dot" style="background: var(--sl-ns-code-knowledge)"></span>code_knowledge</span>
+            <span>selti</span>
+            <span>6 дн назад</span>
+            <span class="id">0c5c4c0a</span>
+            <span class="badge superseded">superseded</span>
+            <span class="badge">v2</span>
+          </div>
+        </div>
+        <div class="score" role="img" aria-label="Релевантность 0.62" title="rrf 0.81 · decay 0.88 · importance 0.93">
+          <span class="val">0.62</span>
+          <span class="bar"><i class="f-rrf" style="opacity:.81"></i><i class="f-dec" style="opacity:.88"></i><i class="f-imp" style="opacity:.93"></i></span>
+          <span class="lbl">rrf·decay·imp</span>
+        </div>
+      </article>
+    </div>
+
+    <!-- ============ Open granule panel ============ -->
+    <aside class="panel" role="complementary" aria-label="Карточка гранулы">
+      <div class="panel-head">
+        <span class="ns-tag" style="font-size:13px">
+          <span class="dot" style="width:8px;height:8px;border-radius:50%;background:var(--sl-ns-project-meta)"></span>
+          project_meta
+        </span>
+        <span class="badge asserted">asserted</span>
+        <span class="badge">v3</span>
+        <span class="id">03641cd3-f599-41d9-9841-bd09442e3b90</span>
+        <button class="close" aria-label="Закрыть карточку">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708"/></svg>
+        </button>
+      </div>
+
+      <div class="panel-body">
+        <div class="section">
+          <div class="section-label">Содержание</div>
+          <p class="content">Фаза 2 «Жизненный цикл гранул» редизайна selti РАЗРАБОТАНА, ПРИНЯТА Катериной (после 2 фиксов), ЗАПУШЕНА (HEAD c867d43), деплой Рэем ЗАПУЩЕН (2026-09-18).
+
+Состав фазы: Supersession API (create_version / get_history / retract / freeze), тулы memory_supersede / memory_get_history / memory_freeze / memory_stale_list, Celery beat (очередь memory), миграция 022 Норы (clusters + assign_clusters).
+
+Прод-контроль: время assign_clusters на живом корпусе; beat-записи в логах воркера; gc_dry_run переключить на боевой режим через месяц.</p>
+        </div>
+
+        <div class="section">
+          <div class="section-label">Релевантность</div>
+          <div class="score-detail">
+            <span class="val">0.87</span>
+            <div class="factor-list">
+              <div class="factor"><span class="name">rrf</span><span class="track"><i style="width:94%;background:var(--sl-accent)"></i></span><span class="v">0.94</span></div>
+              <div class="factor"><span class="name">decay</span><span class="track"><i style="width:98%;background:var(--sl-ns-code-knowledge)"></i></span><span class="v">0.98</span></div>
+              <div class="factor"><span class="name">importance</span><span class="track"><i style="width:95%;background:var(--sl-ns-project-meta)"></i></span><span class="v">0.95</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-label">Метаданные</div>
+          <table class="meta-table">
+            <tr><td>importance</td><td><span class="dots" aria-label="5 из 5">●●●●●</span> <span style="color:var(--sl-text-3)">5/5</span></td></tr>
+            <tr><td>project</td><td>selti</td></tr>
+            <tr><td>entity_type</td><td>status</td></tr>
+            <tr><td>participants</td><td>Катерина · Рэй · Сона · Афина</td></tr>
+            <tr><td>создана</td><td>2026-09-18 21:40</td></tr>
+            <tr><td>обновлена</td><td>2026-09-19 09:12</td></tr>
+            <tr><td>confidence</td><td>0.97</td></tr>
+          </table>
+        </div>
+
+        <div class="section">
+          <div class="section-label">История версий · 3</div>
+          <div class="lineage" role="list" aria-label="Цепочка версий">
+            <div class="lin-node" role="listitem">
+              <button class="circle" title="v1 · superseded">v1</button>
+              <span class="cap">черновик статуса</span>
+            </div>
+            <span class="lin-link" aria-label="v1 supersedes → v2"></span>
+            <div class="lin-node" role="listitem">
+              <button class="circle" title="v2 · superseded">v2</button>
+              <span class="cap">добавлена приёмка</span>
+            </div>
+            <span class="lin-link" aria-label="v2 supersedes → v3"></span>
+            <div class="lin-node current" role="listitem">
+              <button class="circle" title="v3 · asserted (текущая)">v3</button>
+              <span class="cap">деплой запущен</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-label">Связи</div>
+
+          <div class="rel-group">
+            <div class="rel-title"><span class="arr">→</span> исходящие · 4</div>
+            <div class="rel"><span class="link-type lt-follows">follows</span><span class="target">Фаза 1 «Поиск и дедуп» завершена (HEAD 5d6de51)</span></div>
+            <div class="rel"><span class="link-type lt-contains">contains</span><span class="target">Supersession API: детали реализации</span></div>
+            <div class="rel"><span class="link-type lt-contains">contains</span><span class="target">Beat-расписание и миграция 022 — детали</span></div>
+            <div class="rel"><span class="link-type lt-references">references</span><span class="target">PLAN_MEMORY_REDESIGN.md — план редизайна selti</span></div>
+          </div>
+
+          <div class="rel-group">
+            <div class="rel-title"><span class="arr">←</span> входящие · 3</div>
+            <div class="rel"><span class="link-type lt-precedes">precedes</span><span class="target">Фаза 3 «REST-мост» начата после Фазы 2</span></div>
+            <div class="rel"><span class="link-type lt-informs">informs</span><span class="target">Решение: gc_dry_run → боевой режим в октябре</span></div>
+            <div class="rel"><span class="link-type lt-references">references</span><span class="target">Отчёт приёмки Катерины: 553 passed, 48/48</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel-actions">
+        <button class="btn primary">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1 7.5A1.5 1.5 0 0 1 2.5 6h1.386c.618 0 .99.367 1.282.645.29.278.54.588 1.066.588h5.532c.526 0 .775-.31 1.066-.588.291-.278.664-.645 1.282-.645H16v6.5a1.5 1.5 0 0 1-1.5 1.5h-12A1.5 1.5 0 0 1 1 14z"/><path d="M4.5 1A1.5 1.5 0 0 0 3 2.5V5h1V2.5a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 .5.5V5h1V2.5A1.5 1.5 0 0 0 11.5 1z"/></svg>
+          Открыть в графе
+        </button>
+        <button class="btn">Копировать JSON</button>
+        <button class="btn">Похожие</button>
+      </div>
+    </aside>
+  </section>
+
+  <!-- ============ Graph screen preview ============ -->
+  <section class="graph-section" id="graph" aria-label="Превью экрана Граф">
+    <div class="graph-head">
+      <h2>Граф знаний</h2>
+      <span class="hint">узлы — гранулы · цвет — слой памяти · размер — importance · рёбра — relations</span>
+      <a class="open-link" href="#">Открыть полноэкранно
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8.636 3.5a.5.5 0 0 0-.5-.5H1.5A1.5 1.5 0 0 0 0 4.5v10A1.5 1.5 0 0 0 1.5 16h10a1.5 1.5 0 0 0 1.5-1.5V7.864a.5.5 0 0 0-1 0V14.5a.5.5 0 0 1-.5.5h-10a.5.5 0 0 1-.5-.5v-10a.5.5 0 0 1 .5-.5h6.636a.5.5 0 0 0 .5-.5"/><path d="M16 .5a.5.5 0 0 0-.5-.5h-5a.5.5 0 0 0 0 1h3.793L6.146 9.146a.5.5 0 1 0 .708.708L15 1.707V5.5a.5.5 0 0 0 1 0z"/></svg>
+      </a>
+    </div>
+
+    <div class="graph-canvas">
+      <svg viewBox="0 0 1200 420" role="img" aria-label="Визуальный граф знаний selti. Полная версия доступна на экране Граф.">
+        <defs>
+          <!-- Soft bioluminescent glow for nodes -->
+          <filter id="glow" x="-120%" y="-120%" width="340%" height="340%">
+            <feGaussianBlur stdDeviation="6" result="b"/>
+            <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
+          <filter id="glow-strong" x="-160%" y="-160%" width="420%" height="420%">
+            <feGaussianBlur stdDeviation="10" result="b"/>
+            <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
+        </defs>
+
+        <!-- Synapse edges (curved) -->
+        <g fill="none" stroke="#273354" stroke-width="1.2">
+          <path d="M600 210 Q 500 140 430 130"/>
+          <path d="M600 210 Q 700 150 762 128"/>
+          <path d="M600 210 Q 750 230 884 222"/>
+          <path d="M600 210 Q 440 260 306 262"/>
+          <path d="M600 210 Q 560 300 522 316"/>
+          <path d="M600 210 Q 660 290 722 296"/>
+          <path d="M430 130 Q 320 110 204 148"/>
+          <path d="M430 130 Q 270 210 142 274"/>
+          <path d="M762 128 Q 880 70 984 76"/>
+          <path d="M762 128 Q 720 70 684 78"/>
+          <path d="M884 222 Q 970 250 1052 276"/>
+          <path d="M306 262 Q 330 300 364 336"/>
+          <path d="M522 316 Q 440 340 370 340"/>
+          <path d="M722 296 Q 900 300 1046 280"/>
+          <path d="M884 222 Q 950 150 988 136"/>
+          <path d="M430 130 Q 460 190 594 206"/>
+        </g>
+        <!-- Highlighted edge: selected granule -> infrastructure fact -->
+        <path d="M600 210 Q 750 230 884 222" fill="none" stroke="#5FE8C8" stroke-width="2" opacity="0.85"/>
+
+        <!-- Peripheral nodes -->
+        <g filter="url(#glow)">
+          <circle cx="430" cy="130" r="8"   fill="#4DC9FF"/>
+          <circle cx="762" cy="128" r="9"   fill="#FF8E7A"/>
+          <circle cx="306" cy="262" r="7"   fill="#86E3A0"/>
+          <circle cx="522" cy="316" r="8"   fill="#FFC15E"/>
+          <circle cx="722" cy="296" r="6"   fill="#8A97AC"/>
+          <circle cx="204" cy="148" r="6"   fill="#A78BFF"/>
+          <circle cx="142" cy="274" r="5"   fill="#4DC9FF"/>
+          <circle cx="984" cy="76"  r="5"   fill="#FF8E7A"/>
+          <circle cx="684" cy="78"  r="5"   fill="#86E3A0"/>
+          <circle cx="1052" cy="276" r="7"  fill="#86E3A0"/>
+          <circle cx="364" cy="336" r="5"   fill="#8A97AC"/>
+          <circle cx="370" cy="340" r="4"   fill="#8A97AC"/>
+          <circle cx="988" cy="136" r="6"   fill="#4DC9FF"/>
+        </g>
+
+        <!-- Hovered node: infrastructure fact (amber, ringed) -->
+        <g filter="url(#glow)">
+          <circle cx="884" cy="222" r="13" fill="none" stroke="#FFC15E" stroke-width="1" opacity="0.4"/>
+          <circle cx="884" cy="222" r="8"  fill="#FFC15E"/>
+        </g>
+
+        <!-- Central node: the plan granule (violet, strongest) -->
+        <g filter="url(#glow-strong)">
+          <circle cx="600" cy="210" r="16" fill="none" stroke="#A78BFF" stroke-width="1" opacity="0.35"/>
+          <circle cx="600" cy="210" r="13" fill="#A78BFF"/>
+        </g>
+
+        <!-- Node labels (sparse: only notable ones) -->
+        <text class="g-label center" x="600" y="248" text-anchor="middle">план редизайна selti</text>
+        <text class="g-label" x="884" y="196" text-anchor="middle">ai.atom.ui · prod</text>
+        <text class="g-label" x="762" y="106" text-anchor="middle">серёжа · предпочтения</text>
+        <text class="g-label" x="430" y="108" text-anchor="middle">celery_call мост</text>
+        <text class="g-label" x="522" y="340" text-anchor="middle">app-net · БД memory</text>
+        <text class="g-label" x="306" y="240" text-anchor="middle">инсайт: верификация</text>
+      </svg>
+
+      <!-- Floating filter panel (screen §6.2) -->
+      <div class="g-float">
+        <h4>Слои памяти</h4>
+        <label class="g-layer"><input type="checkbox" checked><span class="dot" style="background:var(--sl-ns-user-facts)"></span>user_facts<span class="cnt">2 104</span></label>
+        <label class="g-layer"><input type="checkbox" checked><span class="dot" style="background:var(--sl-ns-project-meta)"></span>project_meta<span class="cnt">1 876</span></label>
+        <label class="g-layer"><input type="checkbox" checked><span class="dot" style="background:var(--sl-ns-code-knowledge)"></span>code_knowledge<span class="cnt">6 412</span></label>
+        <label class="g-layer"><input type="checkbox" checked><span class="dot" style="background:var(--sl-ns-dialogue-insights)"></span>dialogue_insights<span class="cnt">2 530</span></label>
+        <label class="g-layer"><input type="checkbox" checked><span class="dot" style="background:var(--sl-ns-infrastructure)"></span>infrastructure<span class="cnt">1 049</span></label>
+        <div class="g-range">
+          <label for="imp-range">мин. importance <span class="mono">≥ 2</span></label>
+          <input id="imp-range" type="range" min="0" max="5" value="2">
+        </div>
+        <div class="g-count">видно <b>2 481</b> / 14 588 узлов</div>
+      </div>
+
+      <!-- Legend -->
+      <div class="g-legend">
+        <span><span class="dot" style="background:var(--sl-ns-user-facts)"></span>user_facts</span>
+        <span><span class="dot" style="background:var(--sl-ns-project-meta)"></span>project_meta</span>
+        <span><span class="dot" style="background:var(--sl-ns-code-knowledge)"></span>code_knowledge</span>
+        <span><span class="dot" style="background:var(--sl-ns-dialogue-insights)"></span>dialogue_insights</span>
+        <span><span class="dot" style="background:var(--sl-ns-infrastructure)"></span>infrastructure</span>
+      </div>
+
+      <!-- Node peek card (compact granule card on node click) -->
+      <div class="g-peek">
+        <span class="ns-tag"><span class="dot" style="background:var(--sl-ns-infrastructure)"></span>infrastructure · akame</span>
+        <h5>ai.atom.ui: рекомендация по инфраструктуре</h5>
+        <p>Сеть app-net — общая для selti + gera + будущих сервисов; БД memory без конфликтов; пользователь PostgreSQL selti вместо athena. Миграция через ALTER DATABASE RENAME…</p>
+        <div class="row">
+          <span class="badge asserted">asserted</span>
+          <span class="mono" style="font-size:11px;color:var(--sl-text-3)">imp 4/5</span>
+          <a class="open" href="#">Открыть полностью →</a>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  <span>selti — человеческий интерфейс к базе знаний</span>
+  <span class="sep"></span>
+  <span class="k">навигация:</span>
+  <kbd>/</kbd><span>поиск</span>
+  <kbd>↑↓</kbd><span>результаты</span>
+  <kbd>Esc</kbd><span>закрыть карточку</span>
+</footer>
+
+</body>
+</html>

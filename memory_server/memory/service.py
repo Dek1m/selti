@@ -217,6 +217,9 @@ class MemoryService:
         namespace: str | None = None,
         project_id: str | None = None,
         include_historical: bool = False,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+        status: str | None = None,
     ) -> list[SearchResult]:
         async with async_measure_duration(logger, "search", namespace=namespace, user_id=user_id):
             resolved_project = await self.resolve_project(project_id)
@@ -233,6 +236,9 @@ class MemoryService:
                     query_text=query,
                     project_id=resolved_project,
                     include_historical=include_historical,
+                    created_after=created_after,
+                    created_before=created_before,
+                    status=status,
                 )
             else:
                 results = await self._search_hybrid(
@@ -244,6 +250,9 @@ class MemoryService:
                     namespace=namespace,
                     project_id=resolved_project,
                     include_historical=include_historical,
+                    created_after=created_after,
+                    created_before=created_before,
+                    status=status,
                 )
             if not results:
                 # Качество поиска (Фаза 3.3): пустая выдача — сигнал для дашборда
@@ -260,6 +269,9 @@ class MemoryService:
         namespace: str | None,
         project_id: str | None,
         include_historical: bool,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+        status: str | None = None,
     ) -> list[SearchResult]:
         """Hybrid search (Фаза 1.1/1.2): RRF-fusion → MMR → D4-ранжирование."""
         candidates = await self.repository.search_hybrid(
@@ -271,6 +283,9 @@ class MemoryService:
             threshold=threshold,
             prefetch=self.config.hybrid_prefetch,
             include_historical=include_historical,
+            created_after=created_after,
+            created_before=created_before,
+            status=status,
         )
         if not candidates:
             return []
@@ -314,6 +329,13 @@ class MemoryService:
                     score=round(final_score(rrf_scores[cand_id], decay, weight), 6),
                     project_id=cand.project_id,
                     status=cand.status,
+                    namespace=cand.namespace,
+                    created_at=cand.created_at,
+                    last_accessed_at=cand.last_accessed_at,
+                    frozen=cand.frozen,
+                    score_rrf=round(rrf_scores[cand_id], 6),
+                    score_decay=round(decay, 6),
+                    score_importance=round(weight, 6),
                 )
             )
         results.sort(key=lambda r: r.score, reverse=True)

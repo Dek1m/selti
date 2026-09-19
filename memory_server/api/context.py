@@ -32,8 +32,13 @@ def _digest(text: str) -> str:
 
 
 @router.get("/context/{slug}")
+@router.get("/api/contexts/{slug}")
 async def get_context(slug: str, refresh: bool = False) -> JSONResponse:
-    """Снапшот контекста проекта (Redis → таблица; refresh=1 — пересчёт)."""
+    """Снапшот контекста проекта (Redis → таблица; refresh=1 — пересчёт).
+
+    /api/contexts/{slug} — алиас для веб-морды (Фаза 5.1, конвенция /api/*);
+    /context/{slug} — внешний контракт ZCode-хука, не переименовывается.
+    """
     service = await get_state().get_memory_service()
     try:
         context = await service.get_project_context(slug, refresh=refresh)

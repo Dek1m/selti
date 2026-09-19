@@ -223,8 +223,15 @@ def search_memories(
     namespace: str | None = None,
     project_id: str | None = None,
     include_historical: bool = False,
+    created_after: str | None = None,
+    created_before: str | None = None,
+    status: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Search memories (hybrid: dense + FTS, Фаза 1.1)."""
+    """Search memories (hybrid: dense + FTS, Фаза 1.1).
+
+    created_after/created_before — ISO-строки (Celery JSON не несёт
+    datetime), парсятся здесь; REST-фильтры /api/search (Фаза 5.1).
+    """
     if not query or not query.strip():
         raise ValidationError("query cannot be empty")
 
@@ -238,6 +245,9 @@ def search_memories(
         namespace=namespace,
         project_id=project_id,
         include_historical=include_historical,
+        created_after=datetime.fromisoformat(created_after) if created_after else None,
+        created_before=datetime.fromisoformat(created_before) if created_before else None,
+        status=status,
     )
     return [r.model_dump(mode="json") for r in results]
 

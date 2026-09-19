@@ -71,6 +71,16 @@ class SearchResult(BaseModel):
     # ── Расширение Фазы 0: контекст гранулы в выдаче (наполняется волной 2) ──
     project_id: UUID | None = None
     status: MemoryStatus = "asserted"
+    # ── Фаза 5.1: карточка выдачи UI (WEB_UI_DESIGN §4.3). Разложение
+    # score = rrf × decay × importance_weight; None — компонент не
+    # определён (плотный Qdrant-путь без fusion не имеет rrf-разложения) ──
+    namespace: str | None = None
+    created_at: datetime | None = None
+    last_accessed_at: datetime | None = None
+    frozen: bool = False
+    score_rrf: float | None = None
+    score_decay: float | None = None
+    score_importance: float | None = None
 
 
 class MemoryListResult(BaseModel):

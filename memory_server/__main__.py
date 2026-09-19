@@ -8,6 +8,7 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import generate_latest, REGISTRY, multiprocess, CollectorRegistry
 from starlette.types import ASGIApp, Scope, Receive, Send
 
@@ -120,6 +121,10 @@ app.include_router(context_router)
 from memory_server.api.projects import router as projects_router
 app.include_router(projects_router)
 
+# ---- REST API: веб-морда (Фаза 5.1) — все операции через celery_call-мост ----
+from memory_server.api.web import is_api_authorized, router as web_router
+app.include_router(web_router)
+
 
 # ---- Middleware: аутентификация ----
 @app.middleware("http")
@@ -133,6 +138,15 @@ async def auth_middleware(request: Request, call_next):
         or path.startswith("/context/")
     ):
         return await call_next(request)
+
+    if path.startswith("/api/"):
+        if is_api_authorized(
+            request.client.host if request.client else None,
+            request.headers.get("Authorization", ""),
+            settings.api_key,
+        ):
+            return await call_next(request)
+        return Response(status_code=403, content="Forbidden")
 
     if not settings.api_key:
         return await call_next(request)
@@ -167,6 +181,19 @@ async def metrics_middleware(request: Request, call_next):
 
     response.headers["X-Correlation-ID"] = request_id
     return response
+
+
+# ---- CORS под фронт-порт (Фаза 5.2) ----
+# add_middleware добавляет наружу существующей цепочки: preflight OPTIONS
+# отвечает CORS до auth-middleware (preflight не несёт Authorization)
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+)
 
 
 # ---- Liveness: процесс жив, без проверок зависимостей ----

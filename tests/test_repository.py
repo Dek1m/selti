@@ -143,6 +143,7 @@ class TestSearch:
             None,
             10,
             False,  # include_historical
+            None, None, None,  # REST-фильтры 5.1: created_after/before, status
         )
 
     @pytest.mark.asyncio
@@ -166,6 +167,7 @@ class TestSearch:
             None,
             5,
             False,  # include_historical
+            None, None, None,  # REST-фильтры 5.1: created_after/before, status
         )
 
     @pytest.mark.asyncio
@@ -427,7 +429,7 @@ class TestSearchHybrid:
         assert build_kwargs["query_filter"] == QdrantStore.build_filter(active_only=False)
         # канал B: SEARCH_MEMORIES с include_historical=True
         fts_call = hybrid_conn.fetch.await_args_list[0]
-        assert fts_call.args == (q.SEARCH_MEMORIES, "x", None, None, None, 100, True)
+        assert fts_call.args == (q.SEARCH_MEMORIES, "x", None, None, None, 100, True, None, None, None)
         # догрузка: FETCH_MEMORIES_BY_IDS с include_historical=True
         # (args = (SQL, ids, include_historical)) — без инверсии
         fetch_call = hybrid_conn.fetch.await_args_list[1]
@@ -501,7 +503,10 @@ class TestFetchByIdsSemantics:
 
         await repo.pg.fetch_by_ids(["mem-1"], include_historical=True)
 
-        conn.fetch.assert_awaited_once_with(q.FETCH_MEMORIES_BY_IDS, ["mem-1"], True)
+        # 5.1: +created_after/created_before/status (NULL = фильтр выключен)
+        conn.fetch.assert_awaited_once_with(
+            q.FETCH_MEMORIES_BY_IDS, ["mem-1"], True, None, None, None
+        )
 
     @pytest.mark.asyncio
     async def test_default_passes_false_active_only(self, repo, conn):
@@ -510,7 +515,9 @@ class TestFetchByIdsSemantics:
 
         await repo.pg.fetch_by_ids(["mem-1"])
 
-        conn.fetch.assert_awaited_once_with(q.FETCH_MEMORIES_BY_IDS, ["mem-1"], False)
+        conn.fetch.assert_awaited_once_with(
+            q.FETCH_MEMORIES_BY_IDS, ["mem-1"], False, None, None, None
+        )
 
     @pytest.mark.asyncio
     async def test_dense_search_passes_include_historical_verbatim(
@@ -567,8 +574,12 @@ class TestFetchByIdsSemantics:
                 """
             )
             try:
-                active = await conn.fetch(q.FETCH_MEMORIES_BY_IDS, [probe_id], False)
-                historical = await conn.fetch(q.FETCH_MEMORIES_BY_IDS, [probe_id], True)
+                active = await conn.fetch(
+                    q.FETCH_MEMORIES_BY_IDS, [probe_id], False, None, None, None
+                )
+                historical = await conn.fetch(
+                    q.FETCH_MEMORIES_BY_IDS, [probe_id], True, None, None, None
+                )
                 assert active == [], (
                     "include_historical=False должен фильтровать retracted"
                 )

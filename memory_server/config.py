@@ -95,6 +95,10 @@ class Settings(BaseSettings):
 
     api_key: str = ""
 
+    # ── Фаза 5: веб-морда ──
+    # CORS под фронт-порт (Vite default 5173); переопределяется env-JSON
+    cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
     # ── Регистрация проектов (ADR-018) ──
     # Непустой → POST /projects/register требует заголовок X-SELTI-KEY;
     # пустой → эндпоинт открыт (совместимость с существующими клиентами).

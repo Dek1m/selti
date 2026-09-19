@@ -249,18 +249,31 @@ class MemoryRepository:
         query_text: str | None = None,
         project_id: str | None = None,
         include_historical: bool = False,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+        status: str | None = None,
     ) -> list[SearchResult]:
-        """Плотный Qdrant-путь (Фаза 0). Гибридный — search_hybrid (Фаза 1.1)."""
+        """Плотный Qdrant-путь (Фаза 0). Гибридный — search_hybrid (Фаза 1.1).
+
+        created_after/created_before/status — REST-фильтры /api/search (5.1);
+        фильтруются в SQL (fetch_by_ids) после выборки векторного канала,
+        поэтому при плотном фильтре выдача может быть меньше limit.
+        """
         namespace_id = await self._ns_id(namespace)
         if isinstance(namespace_id, _UnknownNamespace):
             return []
+
+        # Qdrant-канал не знает точный статус (payload содержит только
+        # asserted/not): non-asserted статус требует снять фильтр актуальности
+        # и доверить отбор SQL-фильтру $5
+        historical = include_historical or (status is not None and status != "asserted")
 
         if self._has_qdrant():
             search_filter = QdrantStore.build_filter(
                 user_id=user_id,
                 namespace_id=namespace_id,
                 project_id=project_id,
-                active_only=not include_historical,
+                active_only=not historical,
             )
             qdrant_results = self.qdrant.search(
                 query_vector=query_embedding,
@@ -276,7 +289,13 @@ class MemoryRepository:
             scores = {r["id"]: r["score"] for r in qdrant_results}
 
             # Фильтр актуальности в SQL ДО обрезки limit (Фаза 1.3)
-            rows = await self.pg.fetch_by_ids(ids, include_historical=include_historical)
+            rows = await self.pg.fetch_by_ids(
+                ids,
+                include_historical=historical,
+                created_after=created_after,
+                created_before=created_before,
+                status=status,
+            )
             rows_by_id = {str(row["id"]): row for row in rows}
 
             results = []
@@ -292,6 +311,10 @@ class MemoryRepository:
                             score=scores[qid],
                             project_id=row["project_id"],
                             status=row["status"],
+                            namespace=row["namespace"],
+                            created_at=row["created_at"],
+                            last_accessed_at=row["last_accessed_at"],
+                            frozen=row["frozen"],
                         )
                     )
             return results
@@ -304,7 +327,10 @@ class MemoryRepository:
                 namespace_id=namespace_id,
                 project_id=project_id,
                 limit=limit,
-                include_historical=include_historical,
+                include_historical=historical,
+                created_after=created_after,
+                created_before=created_before,
+                status=status,
             )
             return [
                 SearchResult(
@@ -315,6 +341,10 @@ class MemoryRepository:
                     score=r["score"],
                     project_id=r.get("project_id"),
                     status=r.get("status", "asserted"),
+                    namespace=r.get("namespace"),
+                    created_at=r.get("created_at"),
+                    last_accessed_at=r.get("last_accessed_at"),
+                    frozen=r.get("frozen", False),
                 )
                 for r in rows
             ]
@@ -329,16 +359,24 @@ class MemoryRepository:
         threshold: float = 0.7,
         prefetch: int = 100,
         include_historical: bool = False,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+        status: str | None = None,
     ) -> list[HybridCandidate]:
         """Двухканальный сбор кандидатов гибридного поиска (Фаза 1.1).
 
         Канал A — Qdrant dense (с векторами для MMR), канал B — PG FTS
         'russian'. Отказ канала не роняет поиск: RRF честно работает и по
         одному ранжированию. Fusion/ранжирование делает MemoryService.
+        created_after/created_before/status — REST-фильтры /api/search (5.1).
         """
         namespace_id = await self._ns_id(namespace)
         if isinstance(namespace_id, _UnknownNamespace):
             return []
+
+        # Qdrant-канал не знает точный статус: non-asserted статус снимает
+        # фильтр актуальности канала, отбор доверен SQL-фильтру $5
+        historical = include_historical or (status is not None and status != "asserted")
 
         dense_ranks: dict[str, int] = {}
         vectors: dict[str, list[float]] = {}
@@ -353,7 +391,7 @@ class MemoryRepository:
                         user_id=user_id,
                         namespace_id=namespace_id,
                         project_id=project_id,
-                        active_only=not include_historical,
+                        active_only=not historical,
                     ),
                     with_vectors=True,
                 )
@@ -376,7 +414,10 @@ class MemoryRepository:
                 namespace_id=namespace_id,
                 project_id=project_id,
                 limit=prefetch,
-                include_historical=include_historical,
+                include_historical=historical,
+                created_after=created_after,
+                created_before=created_before,
+                status=status,
             )
             for rank, row in enumerate(fts_rows):
                 fts_ranks[str(row["id"])] = rank
@@ -393,7 +434,13 @@ class MemoryRepository:
         # Догрузка канонических полей одним батчем; фильтр актуальности в SQL
         # ДО fusion — prefetch с запасом гарантирует, что отсеянные
         # ретрактнутые не съедают лимит выдачи (Фаза 1.3).
-        rows = await self.pg.fetch_by_ids(all_ids, include_historical=include_historical)
+        rows = await self.pg.fetch_by_ids(
+            all_ids,
+            include_historical=historical,
+            created_after=created_after,
+            created_before=created_before,
+            status=status,
+        )
         return [
             HybridCandidate(
                 id=str(row["id"]),

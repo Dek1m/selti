@@ -130,11 +130,15 @@ class PostgreSQLRepository:
         project_id: str | None = None,
         limit: int = 10,
         include_historical: bool = False,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+        status: str | None = None,
     ) -> list[dict]:
         """Full-text search (russian): канал B гибрида + fallback без Qdrant.
 
         Возвращает полные строки проекции + score — гибридной сборке нужны
         ранжирующие поля (created_at/last_accessed_at/frozen/importance).
+        created_after/created_before/status — REST-фильтры /api/search (5.1).
         """
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
@@ -145,6 +149,9 @@ class PostgreSQLRepository:
                 project_id,
                 limit,
                 include_historical,
+                created_after,
+                created_before,
+                status,
             )
             return [{**dict(row), "score": float(row["score"])} for row in rows]
 
@@ -204,7 +211,12 @@ class PostgreSQLRepository:
             return int(result.split()[-1])
 
     async def fetch_by_ids(
-        self, ids: list[str], include_historical: bool = False
+        self,
+        ids: list[str],
+        include_historical: bool = False,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+        status: str | None = None,
     ) -> list[dict]:
         """Batch fetch метаданных по IDs (для Qdrant-выдачи).
 
@@ -212,10 +224,17 @@ class PostgreSQLRepository:
         limit — ретрактнутые гранулы не съедают лимит выдачи (Фаза 1.3);
         include_historical=True — time-travel, фильтр отключается.
         Семантика $2 зеркалит SEARCH_MEMORIES.$6: True → без фильтра.
+        created_after/created_before/status — REST-фильтры /api/search (5.1),
+        применяются к кандидатам до RRF-fusion.
         """
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
-                q.FETCH_MEMORIES_BY_IDS, ids, include_historical
+                q.FETCH_MEMORIES_BY_IDS,
+                ids,
+                include_historical,
+                created_after,
+                created_before,
+                status,
             )
             return [dict(row) for row in rows]
 

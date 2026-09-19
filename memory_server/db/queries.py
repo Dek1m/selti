@@ -94,6 +94,9 @@ SEARCH_MEMORIES = f"""
       AND ($4::uuid IS NULL OR m.project_id = $4)
       AND ($6::bool OR (m.status = 'asserted' AND m.valid_to IS NULL))
       AND to_tsvector('russian', m.content) @@ plainto_tsquery('russian', $1)
+      AND ($7::timestamptz IS NULL OR m.created_at >= $7::timestamptz)
+      AND ($8::timestamptz IS NULL OR m.created_at <= $8::timestamptz)
+      AND ($9::text IS NULL OR m.status = $9::text)
     ORDER BY score DESC
     LIMIT $5
 """
@@ -257,12 +260,18 @@ MEMORY_STATS = """
 # $6 в SEARCH_MEMORIES; pg_repository.fetch_by_ids передаёт параметр
 # напрямую, БЕЗ инверсии (regression: tests/test_repository.py,
 # TestFetchByIdsSemantics).
+# $3/$4/$5 = REST-фильтры /api/search (Фаза 5.1): created_at window и
+# точный статус, применяются к кандидатам ДО RRF-fusion. NULL = выключен;
+# explicit casts обязательны — PG не выводит тип NULL-параметра.
 FETCH_MEMORIES_BY_IDS = f"""
     SELECT {_MEMORY_COLUMNS}
     FROM memories m
     JOIN namespaces n ON n.id = m.namespace_id
     WHERE m.id = ANY($1::uuid[])
       AND ($2::bool OR (m.status = 'asserted' AND m.valid_to IS NULL))
+      AND ($3::timestamptz IS NULL OR m.created_at >= $3::timestamptz)
+      AND ($4::timestamptz IS NULL OR m.created_at <= $4::timestamptz)
+      AND ($5::text IS NULL OR m.status = $5::text)
 """
 
 # Инкремент access-полей при выдаче (Фаза 1.2, D4): батч-UPDATE,
@@ -669,4 +678,74 @@ SYNC_LINKS_BATCH = """
         weight = EXCLUDED.weight,
         metadata = EXCLUDED.metadata
     RETURNING id
+"""
+
+# ═══════════════════════════════════════════════════════════════
+# PROJECTS REGISTRY CRUD (Фаза 5.1, /api/projects; схема — миграция 017)
+# ═══════════════════════════════════════════════════════════════
+
+_PROJECT_CARD_COLUMNS = """
+    id::text, slug, name, description, kind, status, local_path,
+    repo_url, docs_url, homepage_url, default_branch, created_at, updated_at
+"""
+
+INSERT_PROJECT = f"""
+    INSERT INTO projects (
+        slug, name, description, kind, status, local_path,
+        repo_url, docs_url, homepage_url, default_branch
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    RETURNING {_PROJECT_CARD_COLUMNS}
+"""
+
+# Partial update: NULL-параметр = поле не меняется (PATCH-семантика REST).
+UPDATE_PROJECT = f"""
+    UPDATE projects SET
+        name = COALESCE($2, name),
+        description = COALESCE($3, description),
+        kind = COALESCE($4, kind),
+        status = COALESCE($5, status),
+        local_path = COALESCE($6, local_path),
+        repo_url = COALESCE($7, repo_url),
+        docs_url = COALESCE($8, docs_url),
+        homepage_url = COALESCE($9, homepage_url),
+        default_branch = COALESCE($10, default_branch),
+        updated_at = now()
+    WHERE slug = $1
+    RETURNING {_PROJECT_CARD_COLUMNS}
+"""
+
+SELECT_PROJECT_CARD = f"""
+    SELECT {_PROJECT_CARD_COLUMNS}
+    FROM projects
+    WHERE slug = $1
+"""
+
+# asyncpg не исполняет несколько стейтментов одним prepared statement —
+# replace-операции разбиты на пары DELETE+INSERT, атомарность даёт
+# conn.transaction() в репозитории.
+DELETE_PROJECT_LINKS = "DELETE FROM project_links WHERE project_id = $1::uuid"
+
+INSERT_PROJECT_LINKS = """
+    INSERT INTO project_links (project_id, link_type, url, title)
+    SELECT $1::uuid, t.link_type, t.url, t.title
+    FROM unnest($2::text[], $3::text[], $4::text[]) AS t(link_type, url, title)
+"""
+
+DELETE_PROJECT_TECHNOLOGIES = "DELETE FROM project_technologies WHERE project_id = $1::uuid"
+
+# Словарь technologies — глобальный: существующие записи не переписываем
+# (ON CONFLICT DO NOTHING), привязка через project_technologies.
+UPSERT_TECHNOLOGIES = """
+    INSERT INTO technologies (name, category, docs_url)
+    SELECT t.name, t.category, t.docs_url
+    FROM unnest($1::text[], $2::text[], $3::text[]) AS t(name, category, docs_url)
+    ON CONFLICT (name) DO NOTHING
+"""
+
+INSERT_PROJECT_TECHNOLOGIES = """
+    INSERT INTO project_technologies (project_id, technology_id, version, purpose)
+    SELECT $1::uuid, tech.id, t.version, t.purpose
+    FROM unnest($2::text[], $3::text[], $4::text[]) AS t(name, version, purpose)
+    JOIN technologies tech ON tech.name = t.name
 """

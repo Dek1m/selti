@@ -166,6 +166,9 @@ class TestSearch:
             query_text="find this",
             project_id=None,
             include_historical=False,
+            created_after=None,
+            created_before=None,
+            status=None,
         )
         assert result == results
 
@@ -495,6 +498,34 @@ class TestHybridSearch:
         hybrid_service.repository.search_hybrid.assert_awaited_once()
         kwargs = hybrid_service.repository.search_hybrid.await_args.kwargs
         assert kwargs["include_historical"] is True
+
+    @pytest.mark.asyncio
+    async def test_hybrid_score_decomposition_for_ui(self, hybrid_service):
+        """Фаза 5.1: выдача несёт разложение score = rrf × decay × importance
+        и мету карточки (namespace/даты/frozen) — ScoreGauge из WEB_UI_DESIGN §4.3."""
+        candidates = [
+            _candidate("c1", namespace="project_meta", importance=5,
+                       age_days=1.0, rank_dense=0),
+        ]
+        hybrid_service.embedding.embed = AsyncMock(return_value=[0.1])
+        hybrid_service.repository.search_hybrid = AsyncMock(return_value=candidates)
+        hybrid_service.repository.bump_access = AsyncMock()
+
+        results = await hybrid_service.search(query="q", limit=1)
+
+        assert len(results) == 1
+        top = results[0]
+        assert top.namespace == "project_meta"
+        assert top.frozen is False
+        assert top.created_at is not None
+        assert top.score_rrf is not None and top.score_rrf > 0
+        assert top.score_decay is not None and 0 < top.score_decay <= 1
+        # importance=5 → вес 5/3 (нейтраль 3) × множитель project_meta 1.1
+        assert top.score_importance == pytest.approx(5 / 3 * 1.1, abs=1e-6)
+        # Разложение сходится к итоговому score (round до 6 знаков)
+        assert top.score == pytest.approx(
+            top.score_rrf * top.score_decay * top.score_importance, abs=1e-5
+        )
 
 
 # ---------------------------------------------------------------------------

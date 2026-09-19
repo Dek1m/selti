@@ -104,6 +104,9 @@ class MemoryRepositoryProtocol(Protocol):
         query_text: str | None = None,
         project_id: str | None = None,
         include_historical: bool = False,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+        status: str | None = None,
     ) -> list[SearchResult]:
         """Векторный поиск по embedding. Если Qdrant недоступен — SQL FTS fallback."""
         ...
@@ -118,6 +121,9 @@ class MemoryRepositoryProtocol(Protocol):
         threshold: float = 0.7,
         prefetch: int = 100,
         include_historical: bool = False,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+        status: str | None = None,
     ) -> list[HybridCandidate]:
         """Двухканальный сбор кандидатов (Qdrant dense + PG FTS, Фаза 1.1)."""
         ...

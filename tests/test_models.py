@@ -103,6 +103,8 @@ def test_search_result_create():
 def test_search_result_serialization():
     sr = SearchResult(id="s1", content="text", metadata={"k": "v"}, score=0.8)
     dumped = sr.model_dump(mode="json")
+    # Фаза 5.1: контракт расширяется только в конец (правило плана) —
+    # score-разложение и мета карточки выдачи UI идут после полей Фазы 0
     assert dumped == {
         "id": "s1",
         "content": "text",
@@ -111,6 +113,13 @@ def test_search_result_serialization():
         "score": 0.8,
         "project_id": None,
         "status": "asserted",
+        "namespace": None,
+        "created_at": None,
+        "last_accessed_at": None,
+        "frozen": False,
+        "score_rrf": None,
+        "score_decay": None,
+        "score_importance": None,
     }
 
 
