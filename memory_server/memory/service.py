@@ -59,6 +59,15 @@ _CONTEXT_SECTION_MAP = {
     "infrastructure": "infra",
 }
 _CONTEXT_SECTION_ORDER = ("stack", "decisions", "code", "insights", "infra")
+
+# Квоты секций облачка (смысл как в хранимке 019, но отбор здесь —
+# с recency-ранжированием вместо голого importance; решение Мастера 19.09).
+_SECTION_QUOTAS = {
+    "decisions": 10,
+    "code": 15,
+    "insights": 5,
+    "infra": 5,
+}
 _SECTION_TITLES = {
     "stack": "Стек",
     "decisions": "Решения",
@@ -850,35 +859,82 @@ class MemoryService:
     async def _rebuild_context(self, record: ProjectRecord) -> ProjectContext:
         """Механическая сборка снапшота (fallback прозы Тиши, план 6.2).
 
-        Секции: стек из project_technologies/project_links (017) + топ-гранулы
-        по namespace (хранимка project_context_snapshot, квоты 10/15/5/5).
+        Секции: стек (project_technologies/project_links, 017) + топ-гранулы
+        по namespace. Кандидаты — pg.list по (namespace, project), ранжирование
+        Python-ом: importance × recency_decay (свежее поднимается, древнее
+        importance-5 тонет — решение Мастера 19.09; хранимка 019 сортирует
+        только по importance и тянет вечных чемпионов).
         content — маркдаун-список ≤100 строк: гранула → однострочный тезис.
         """
-        rows = await self.repository.fetch_project_context(record.id)
         sections: dict[str, list[str]] = {}
         stack_lines = self._stack_lines(await self.project_repo.fetch_stack(record.id))
         if stack_lines:
             sections["stack"] = stack_lines
-        for row in rows:
-            section = _CONTEXT_SECTION_MAP.get(row["namespace"], row["namespace"])
-            sections.setdefault(section, []).append(row["content"])
+
+        granule_count = 0
+        for uid, section in _CONTEXT_SECTION_MAP.items():
+            ns = await self.ns_repo.get_by_uid(uid)
+            if ns is None:
+                continue
+            result = await self.repository.list(
+                namespace_id=ns.id, project_id=record.id, limit=40
+            )
+            ranked = self._rank_candidates(
+                result.items, self.config.cloud_recency_half_life_days
+            )
+            quota = _SECTION_QUOTAS.get(section, 5)
+            sections[section] = [r.content for r in ranked[:quota]]
+            granule_count += min(len(ranked), quota)
 
         content = self._render_content(record, sections)
         saved = await self.repository.upsert_project_context(
             record.id,
             content=content,
             sections=sections,
-            granule_count=len(rows),
+            granule_count=granule_count,
         )
         context = ProjectContext(
             project_id=record.id,
             content=content,
             sections=sections,
-            granule_count=len(rows),
+            granule_count=granule_count,
             computed_at=saved.get("computed_at"),
         )
         await self._cache_context(record.slug, context)
         return context
+
+    @staticmethod
+    def _rank_candidates(items, half_life_days: float) -> list:
+        """Кандидаты секции → отсортированные по score = importance × decay^дней.
+
+        Период полураспада (cloud_recency_half_life_days, дефолт 30):
+        за месяц важность гранулы теряет половину веса — древние чемпионы
+        тонут, свежие решения всплывают. frozen не затухает. Обрезка
+        тезиса — на границе предложения, ≤300.
+        """
+        now = datetime.now(timezone.utc)
+
+        def _score(item) -> float:
+            updated = item.updated_at or item.created_at or now
+            if updated.tzinfo is None:
+                updated = updated.replace(tzinfo=timezone.utc)
+            days = max(0.0, (now - updated).total_seconds() / 86400)
+            decay = 1.0 if item.frozen else 0.5 ** (days / half_life_days)
+            return (item.importance or 3) * decay
+
+        ranked = sorted(items, key=_score, reverse=True)
+
+        def _teaser(text: str) -> str:
+            text = (text or "").strip()
+            if len(text) <= 300:
+                return text
+            cut = text[:300]
+            dot = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+            return (cut[: dot + 1] if dot > 120 else cut) + "…"
+
+        for item in ranked:
+            item.content = _teaser(item.content)
+        return ranked
 
     @staticmethod
     def _stack_lines(stack: dict) -> list[str]:

@@ -89,6 +89,9 @@ class Settings(BaseSettings):
     # TTL Redis-кеша ctx:{slug} и dirty-флага (синхронизирован с периодом
     # beat rebuild_contexts: флаг живёт не дольше периода пересборки).
     context_cache_ttl: int = 3600
+    # Период полураспада важности при отборе кандидатов облачка: за 30 дней
+    # гранула теряет половину веса — свежие решения всплывают над древними.
+    cloud_recency_half_life_days: int = 30
 
     api_key: str = ""
 

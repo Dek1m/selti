@@ -14,7 +14,7 @@ from memory_server.config import Settings
 from memory_server.exceptions import NotFoundError
 from memory_server.memory.project_repository import ProjectRecord
 from memory_server.memory.service import MemoryService
-from memory_server.models import ProjectContext
+from memory_server.models import MemoryListResult, MemoryRecord, ProjectContext
 
 SELTI_ID = "11111111-1111-1111-1111-111111111111"
 AKAME_ID = "22222222-2222-2222-2222-222222222222"
@@ -98,7 +98,6 @@ def fake_redis():
 @pytest.fixture
 def repository():
     repo = MagicMock()
-    repo.fetch_project_context = AsyncMock(return_value=granule_rows())
     repo.upsert_project_context = AsyncMock(
         return_value={"project_id": SELTI_ID, "computed_at": None}
     )
@@ -106,6 +105,33 @@ def repository():
     repo.insert = AsyncMock(return_value="granule-id")
     repo.get_by_id = AsyncMock(return_value=None)
     repo.update = AsyncMock(return_value=None)
+
+    def _list_items(namespace_id: str):
+        """Кандидаты секции: granule_rows() → MemoryRecord (uid = namespace_id)."""
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        uid = namespace_id.removeprefix("ns-")
+        items = [
+            MemoryRecord(
+                id=f"id-{uid}-{i}",
+                user_id="akame",
+                content=r["content"],
+                namespace=uid,
+                namespace_id=namespace_id,
+                importance=r["importance"],
+                created_at=now,
+                updated_at=now,
+                frozen=False,
+            )
+            for i, r in enumerate(granule_rows())
+            if r["namespace"] == uid
+        ]
+        return MemoryListResult(items=items, total=len(items))
+
+    repo.list = AsyncMock(
+        side_effect=lambda **kw: _list_items(kw["namespace_id"])
+    )
     return repo
 
 
@@ -130,9 +156,10 @@ def context_service(repository, project_repo, fake_redis):
     service = MemoryService(
         repository=repository,
         embedding_provider=MagicMock(embed=AsyncMock(return_value=[0.1])),
-        namespace_repository=MagicMock(get_or_create=AsyncMock(
-            return_value=MagicMock(id="ns-id")
-        )),
+        namespace_repository=MagicMock(
+            get_or_create=AsyncMock(return_value=MagicMock(id="ns-id")),
+            get_by_uid=AsyncMock(side_effect=lambda uid: MagicMock(id=f"ns-{uid}")),
+        ),
         config=Settings(dedup_enabled=False, context_cache_ttl=3600),
         project_repository=project_repo,
         redis_provider=provider,
@@ -288,7 +315,9 @@ class TestRebuild:
         """Гранул нет — снапшот из одного стека (облачко не пустое)."""
         import asyncio
 
-        repository.fetch_project_context.return_value = []
+        repository.list = AsyncMock(
+            side_effect=lambda **kw: MemoryListResult(items=[], total=0)
+        )
 
         result = asyncio.run(context_service.get_project_context("selti", refresh=True))
 
@@ -376,3 +405,52 @@ class TestCacheSerialization:
         parsed = json.loads(raw)
         assert parsed["project_id"] == SELTI_ID
         assert parsed["sections"]["stack"]
+
+
+class TestRecencyRanking:
+    """Recency-ранжирование облачка (решение Мастера 19.09): свежее важнее."""
+
+    def test_fresh_beats_ancient(self, context_service, repository):
+        """Важность 5 шестидесятидневная тонет под важностью 3 вчерашней."""
+        import asyncio
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+
+        def item(content: str, importance: int, age_days: int) -> MemoryRecord:
+            return MemoryRecord(
+                id=f"id-{content}", user_id="akame", content=content,
+                namespace="project_meta", namespace_id="ns-project_meta",
+                importance=importance, created_at=now,
+                updated_at=now - timedelta(days=age_days), frozen=False,
+            )
+
+        repository.list = AsyncMock(side_effect=lambda **kw: MemoryListResult(
+            items=[item("древняя важность-5", 5, 60), item("свежая важность-3", 3, 1)],
+            total=2,
+        ))
+
+        result = asyncio.run(context_service.get_project_context("selti", refresh=True))
+
+        decisions = result.sections["decisions"]
+        assert decisions.index("свежая важность-3") < decisions.index("древняя важность-5")
+
+    def test_teaser_truncated_on_sentence(self, context_service, repository):
+        """Длинный тезис обрезается на границе предложения с «…»."""
+        import asyncio
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        long_text = "Первое предложение. " + "Второе очень длинное предложение " * 20
+        repository.list = AsyncMock(side_effect=lambda **kw: MemoryListResult(
+            items=[MemoryRecord(
+                id="id-1", user_id="u", content=long_text,
+                namespace="project_meta", namespace_id="ns-project_meta",
+                importance=3, created_at=now, updated_at=now, frozen=False,
+            )], total=1,
+        ))
+
+        result = asyncio.run(context_service.get_project_context("selti", refresh=True))
+
+        teaser = result.sections["decisions"][0]
+        assert len(teaser) <= 301 and teaser.endswith(("…", "."))
