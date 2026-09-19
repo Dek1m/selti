@@ -90,8 +90,12 @@ def setup_signals(app):
         now = time.monotonic()
         _task_start_times[task_id] = now
 
-        # Проброс correlation_id из headers в contextvar
-        headers = estkw.get("headers") or {}
+        # Проброс correlation_id из headers в contextvar.
+        # Celery 5 диспатчит task_prerun БЕЗ headers (только sender, task_id,
+        # task, args, kwargs — см. celery/app/trace.py send_prerun) —
+        # заголовки сообщения доступны только через request-контекст задачи
+        # (push_request выполняется до диспатча сигнала)
+        headers = getattr(task.request, "headers", None) or {}
         cid = headers.get("correlation_id")
         if cid:
             request_id_var.set(cid)

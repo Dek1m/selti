@@ -28,9 +28,11 @@ def _send_prerun(task_id: str, headers: dict) -> None:
 
     task = MagicMock()
     task.name = "memory_server.tasks.memory_tasks.get_stats"
-    task_prerun.send(
-        sender=task, task_id=task_id, task=task, args=[], kwargs={}, headers=headers
-    )
+    # Как в реальном Celery 5: headers сообщения живут в request-контексте
+    # задачи, диспатч task_prerun идёт БЕЗ headers (send_prerun в trace.py).
+    # Диспатч с headers в kwargs — та самая дыра, что пропустила прод-баг.
+    task.request.headers = headers
+    task_prerun.send(sender=task, task_id=task_id, task=task, args=[], kwargs={})
 
 
 def _send_postrun(task_id: str, state: str = "SUCCESS") -> None:
