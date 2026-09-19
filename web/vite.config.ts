@@ -6,6 +6,7 @@ import { defineConfig } from "vitest/config";
 const apiTarget = process.env.SELTI_API_TARGET ?? "http://localhost:8000";
 
 export default defineConfig({
+  base: "/ui/",
   plugins: [react()],
   server: {
     proxy: {

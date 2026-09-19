@@ -12,7 +12,7 @@ function MemoryRoute() {
 
 export default function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter basename="/ui">
       <Topbar />
       <Routes>
         <Route path="/" element={<Navigate to="/search" replace />} />

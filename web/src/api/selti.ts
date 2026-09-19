@@ -41,7 +41,7 @@ export interface SearchOutcome {
 }
 
 function searchParams(f: SearchFilters, namespace: string | null): URLSearchParams {
-  const p = new URLSearchParams({ q: f.query, limit: String(SEARCH_LIMIT) });
+  const p = new URLSearchParams({ query: f.query, limit: String(SEARCH_LIMIT) });
   if (namespace) p.set("namespace", namespace);
   if (f.project) p.set("project_id", f.project);
   if (f.status) p.set("status", f.status);
