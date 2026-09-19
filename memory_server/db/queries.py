@@ -212,7 +212,8 @@ LIST_MEMORIES = f"""
 """
 
 # Мягкое забвение (бывшая memory_forget_soft): retracted + окно валидности
-# закрывается now(). CTE — один round-trip.
+# закрывается now(). CTE — один round-trip. $3 — опциональный срез по проекту
+# (Фаза 3.1: забыть знания юзера в рамках проекта, глобальный слой не трогаем).
 FORGET_MEMORIES = """
     WITH retracted AS (
         UPDATE memories
@@ -220,6 +221,7 @@ FORGET_MEMORIES = """
         WHERE user_id = $1
           AND status = 'asserted'
           AND ($2::uuid IS NULL OR namespace_id = $2)
+          AND ($3::uuid IS NULL OR project_id = $3)
         RETURNING id
     )
     SELECT count(*)::bigint FROM retracted
@@ -242,6 +244,7 @@ MEMORY_STATS = """
     FROM memories m
     JOIN namespaces n ON n.id = m.namespace_id
     WHERE ($1::text IS NULL OR m.user_id = $1)
+      AND ($2::uuid IS NULL OR m.project_id = $2)
       AND m.status = 'asserted' AND m.valid_to IS NULL
     GROUP BY n.uid
     ORDER BY n.uid

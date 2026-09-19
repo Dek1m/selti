@@ -5,7 +5,6 @@
 Единообразен с тем, что будет для EmbeddingClient.
 """
 
-import logging
 from typing import Optional
 
 from circuitbreaker import CircuitBreaker, CircuitBreakerError
@@ -14,9 +13,10 @@ from qdrant_client import models as qm
 from qdrant_client.http.models.models import QueryResponse as HttpQueryResponse
 from qdrant_client.http.models.models import UpdateStatus
 
+from memory_server.logger import get_logger
 from memory_server.metrics import QDRANT_CB_STATE
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # ── Circuit Breaker настройки ──
 # failure_threshold: сколько ошибок подряд → opening

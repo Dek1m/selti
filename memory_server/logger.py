@@ -21,10 +21,13 @@ from argenta_logging import get_logger, measure_duration, request_id_var
 async def async_measure_duration(
     logger: logging.Logger,
     message: str = "Operation completed",
-    level: int = logging.INFO,
+    level: int = logging.DEBUG,
     **extra: Any,
 ):
     """Async context manager for measuring operation duration.
+
+    Default DEBUG (Фаза 3.3): единственный INFO-маркер операции —
+    tool_handler в web-процессе; service-трассировка не дублирует его.
 
     Usage:
         async with async_measure_duration(logger, "store", namespace="code"):

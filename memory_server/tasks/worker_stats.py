@@ -4,12 +4,11 @@
 Вызывается через Beat schedule каждые 30 секунд.
 """
 
-import logging
-
 from memory_server.celery_app import app
+from memory_server.logger import get_logger
 from memory_server.metrics import CELERY_WORKERS_ACTIVE, CELERY_QUEUE_LENGTH
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @app.task(name="worker_stats.update")

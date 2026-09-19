@@ -5,7 +5,6 @@
 """
 from __future__ import annotations
 
-import logging
 import uuid
 from typing import NamedTuple
 
@@ -13,8 +12,9 @@ import asyncpg
 from cachetools import TTLCache
 
 from memory_server.exceptions import NotFoundError
+from memory_server.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _PROJECT_COLUMNS = "id::text, slug, name, kind, status"
 

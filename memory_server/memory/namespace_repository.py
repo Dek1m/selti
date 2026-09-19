@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import logging
 from typing import NamedTuple
 
 import asyncpg
 from cachetools import TTLCache
 
-logger = logging.getLogger(__name__)
+from memory_server.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class NamespaceRecord(NamedTuple):

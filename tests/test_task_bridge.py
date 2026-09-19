@@ -1,6 +1,7 @@
 """Tests for memory_server.tools.task_bridge.
 
-Coverage: run_task(), celery_call(), error handling, timeout.
+Coverage: run_task(), celery_call(), error handling, timeout,
+event-driven ожидание (BLPOP на ключ события завершения).
 """
 
 import asyncio
@@ -9,7 +10,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from memory_server.tools.task_bridge import TASK_RESULT_TIMEOUT, celery_call, run_task
+import redis as redis_sync
+
+from memory_server.tools.task_bridge import (
+    NOTIFY_KEY_PREFIX,
+    TASK_RESULT_TIMEOUT,
+    celery_call,
+    run_task,
+)
 
 
 # ── Fixtures ─────────────────────────────────────────────────────
@@ -52,7 +60,7 @@ class TestRunTask:
         mock_celery_app.send_task.assert_called_once_with(
             "memory_server.tasks.memory_tasks.store_memory",
             kwargs={"content": "hello", "user_id": "u1"},
-            headers=None,
+            headers={"bridge_wait": True},
         )
 
     def test_custom_timeout(self, mock_celery_app, mock_async_result):
@@ -90,6 +98,104 @@ class TestRunTask:
 
         with pytest.raises(TimeoutError, match="timed out"):
             run_task(mock_celery_app, "slow.task", timeout=0.001)
+
+    def test_wakes_on_bridge_notify_event(self, mock_celery_app):
+        """Event-driven: BLPOP-событие завершения будит ожидание (Фаза 3.3)."""
+        mock_async_result = MagicMock()
+        mock_async_result.id = "notify-id"
+        mock_async_result.ready.side_effect = [False, True, True]  # не готов → готов → готов
+        mock_async_result.failed.return_value = False
+        mock_async_result.result = {"ok": True}
+        mock_celery_app.send_task.return_value = mock_async_result
+
+        with patch(
+            "memory_server.tools.task_bridge._blpop_notify", return_value=True
+        ) as notify:
+            result = run_task(mock_celery_app, "notified.task", timeout=10)
+
+        assert result == {"ok": True}
+        notify.assert_called_once()
+        assert notify.call_args[0][0] == "notify-id"
+        # Чанк ожидания: не длиннее остатка таймаута и не длиннее 30с
+        assert 0 < notify.call_args[0][1] <= 10.0
+
+    def test_lost_notify_falls_back_to_readiness_check(self, mock_celery_app):
+        """Потерянное событие: контроль ready() между чанками подхватывает результат."""
+        mock_async_result = MagicMock()
+        mock_async_result.id = "lost-notify-id"
+        mock_async_result.ready.side_effect = [False, True, True]
+        mock_async_result.failed.return_value = False
+        mock_async_result.result = {"ok": True}
+        mock_celery_app.send_task.return_value = mock_async_result
+
+        with patch(
+            "memory_server.tools.task_bridge._blpop_notify", return_value=False
+        ) as notify:
+            result = run_task(mock_celery_app, "lost.task", timeout=10)
+
+        assert result == {"ok": True}
+        notify.assert_called_once()
+
+    def test_short_timeout_skips_redis_wait(self, mock_celery_app):
+        """Остаток < 1с не ходит в BLPOP (Redis не принимает субсекундные таймауты)."""
+        mock_async_result = MagicMock()
+        mock_async_result.id = "short-id"
+        mock_async_result.ready.return_value = False
+        mock_celery_app.send_task.return_value = mock_async_result
+
+        with patch("memory_server.tools.task_bridge._blpop_notify") as notify:
+            with pytest.raises(TimeoutError, match="timed out"):
+                run_task(mock_celery_app, "short.task", timeout=0.05)
+
+        notify.assert_not_called()
+
+
+# ── event-driven: _blpop_notify (BLPOP на ключ события) ──────────
+
+
+class TestBlpopNotify:
+    def _patch_client(self, blpop_return):
+        client = MagicMock()
+        client.blpop.return_value = blpop_return
+        return patch(
+            "memory_server.tools.task_bridge._get_notify_client",
+            return_value=client,
+        ), client
+
+    def test_event_received_returns_true(self):
+        with self._patch_client((f"{NOTIFY_KEY_PREFIX}t1", "SUCCESS"))[0]:
+            from memory_server.tools.task_bridge import _blpop_notify
+
+            assert _blpop_notify("t1", timeout=5.0) is True
+
+    def test_chunk_timeout_returns_false(self):
+        with self._patch_client(None)[0]:
+            from memory_server.tools.task_bridge import _blpop_notify
+
+            assert _blpop_notify("t2", timeout=5.0) is False
+
+    def test_redis_error_degrades_to_false(self):
+        """Notify-канал недоступен → False (не исключение): результат
+        всё равно читается из Celery backend по контролю ready()."""
+        with patch(
+            "memory_server.tools.task_bridge._get_notify_client",
+            side_effect=redis_sync.RedisError("connection refused"),
+        ):
+            from memory_server.tools.task_bridge import _blpop_notify
+
+            assert _blpop_notify("t3", timeout=5.0) is False
+
+    def test_blpop_timeout_floored_to_one_second(self):
+        """BLPOP не принимает субсекундные таймауты: минимум 1с."""
+        patcher, client = self._patch_client(None)
+        with patcher:
+            from memory_server.tools.task_bridge import _blpop_notify
+
+            _blpop_notify("t4", timeout=0.5)
+
+        client.blpop.assert_called_once_with(
+            [f"{NOTIFY_KEY_PREFIX}t4"], timeout=1
+        )
 
 
 # ── celery_call ─────────────────────────────────────────────────

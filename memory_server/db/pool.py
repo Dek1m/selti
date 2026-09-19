@@ -1,9 +1,10 @@
 import json
-import logging
 
 import asyncpg
 
-logger = logging.getLogger(__name__)
+from memory_server.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 async def create_pool(

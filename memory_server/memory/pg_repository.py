@@ -248,9 +248,11 @@ class PostgreSQLRepository:
             )
             return [self._to_record(row) for row in rows]
 
-    async def get_stats(self, user_id: str | None = None) -> list[MemoryStatsItem]:
+    async def get_stats(
+        self, user_id: str | None = None, project_id: str | None = None
+    ) -> list[MemoryStatsItem]:
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch(q.MEMORY_STATS, user_id)
+            rows = await conn.fetch(q.MEMORY_STATS, user_id, project_id)
             return [
                 MemoryStatsItem(
                     namespace=row["namespace"],
@@ -377,10 +379,15 @@ class PostgreSQLRepository:
             row = await conn.fetchrow(q.RETRACT_MEMORY, memory_id, reason)
             return row is not None
 
-    async def forget_soft(self, user_id: str, namespace_id: str | None = None) -> int:
+    async def forget_soft(
+        self,
+        user_id: str,
+        namespace_id: str | None = None,
+        project_id: str | None = None,
+    ) -> int:
         """Мягкое забвение всех гранул пользователя: status='retracted'."""
         async with self.pool.acquire() as conn:
-            return await conn.fetchval(q.FORGET_MEMORIES, user_id, namespace_id)
+            return await conn.fetchval(q.FORGET_MEMORIES, user_id, namespace_id, project_id)
 
     # ════════════════════════════════════════════════════════════
     # PROJECT CONTEXTS («облачко знаний», D9)

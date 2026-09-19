@@ -310,6 +310,20 @@ class TestGetStats:
         assert len(result) == 1
         assert result[0]["namespace"] == "default"
 
+    def test_project_id_passed_through_to_service(self):
+        """Фаза 3.1: срез статистики по проекту доходит до service."""
+        from memory_server.tasks.memory_tasks import get_stats
+
+        with patch("memory_server.tasks.memory_tasks._get_service") as mock_get_svc:
+            mock_svc = MagicMock()
+            mock_svc.get_stats = AsyncMock(return_value=[])
+            mock_get_svc.return_value = mock_svc
+
+            result = get_stats(user_id="u1", project_id="akame")
+
+        assert result == []
+        mock_svc.get_stats.assert_awaited_with(user_id="u1", project_id="akame")
+
 
 class TestGetNamespaces:
     def test_happy_path(self):
@@ -389,6 +403,32 @@ class TestTraverseGraph:
         assert "nodes" in result
         assert "edges" in result
 
+    def test_project_id_validated_via_service(self):
+        """Фаза 3.1: traverse принимает project_id (ранняя валидация slug)."""
+        from memory_server.tasks.memory_tasks import traverse_graph
+
+        with patch("memory_server.tasks.memory_tasks._get_service") as mock_get_svc:
+            mock_svc = MagicMock()
+            mock_result = MagicMock()
+            mock_result.nodes = [{"id": "n1"}]
+            mock_result.edges = []
+            mock_result.total_nodes = 1
+            mock_result.truncated = False
+            mock_svc.traverse = AsyncMock(return_value=mock_result)
+            mock_get_svc.return_value = mock_svc
+
+            result = traverse_graph(start_id="granule-1", project_id="akame")
+
+        assert result["total_nodes"] == 1
+        mock_svc.traverse.assert_awaited_with(
+            start_id="granule-1",
+            depth=3,
+            link_types=None,
+            limit=None,
+            offset=0,
+            project_id="akame",
+        )
+
     def test_empty_start_id_raises(self):
         from memory_server.tasks.memory_tasks import traverse_graph
 
@@ -466,6 +506,22 @@ class TestForgetMemories:
 
         result = forget_memories(user_id="u1")
         assert result["deleted_count"] == 3
+
+    def test_project_id_passed_through_to_service(self):
+        """Фаза 3.1: забвение в рамках проекта доходит до service."""
+        from memory_server.tasks.memory_tasks import forget_memories
+
+        with patch("memory_server.tasks.memory_tasks._get_service") as mock_get_svc:
+            mock_svc = MagicMock()
+            mock_svc.forget = AsyncMock(return_value=2)
+            mock_get_svc.return_value = mock_svc
+
+            result = forget_memories(user_id="u1", project_id="selti")
+
+        assert result["deleted_count"] == 2
+        mock_svc.forget.assert_awaited_with(
+            user_id="u1", namespace=None, project_id="selti"
+        )
 
     def test_empty_user_id_raises(self):
         from memory_server.tasks.memory_tasks import forget_memories

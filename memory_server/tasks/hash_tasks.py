@@ -7,18 +7,18 @@ Timeouts per plan v3:
 - hash_ops: soft=120s, hard=180s
 """
 
-import logging
 from datetime import datetime
 from typing import Any
 
 from celery import shared_task
 
+from memory_server.logger import get_logger
 from memory_server.state import get_state
 from memory_server.tasks.async_bridge import run_async
 from memory_server.tasks.base import SeltiTask
 from memory_server.tasks.errors import HashTaskError, ValidationError
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def _get_hash_repo():

@@ -11,15 +11,21 @@
 - task_retry: повторная попытка
 
 Метрики обновляются в <PREFIX>_celery_* (memory_server/metrics.py).
+
+task_postrun дополнительно публикует событие завершения в Redis
+(ключ selti:bridge:done:<task_id>) — на него просыпается task_bridge
+(BLPOP) вместо опроса result.ready() (Фаза 3.3, event-driven мост).
 """
 
 import time
 import logging
 
+import redis as redis_sync
 from celery.signals import task_prerun, task_postrun, task_failure, task_retry, worker_process_init
 
 from argenta_logging import request_id_var
 
+from memory_server.config import settings
 from memory_server.metrics import (
     CELERY_TASKS_TOTAL,
     CELERY_TASK_DURATION_SECONDS,
@@ -28,13 +34,51 @@ from memory_server.metrics import (
     CELERY_TASK_TIMEOUTS_TOTAL,
     CELERY_TASK_ERRORS_TOTAL,
 )
+from memory_server.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Thread-local для хранения start time по task_id
 # В prefork worker каждый процесс — свой event loop, thread-local безопасен
 _task_start_times: dict[str, float] = {}
 _task_send_times: dict[str, float] = {}
+
+# task_id задач, отправленных через task_bridge (headers.bridge_wait):
+# только их нужно будить событием завершения — beat/сервисные задачи
+# ключей не плодят
+_bridge_waiters: set[str] = set()
+
+# Sync-клиент notify-канала (ленивый, один на процесс воркера)
+_notify_client: redis_sync.Redis | None = None
+
+# TTL ключа события: bridge ждёт максимум таймаут задачи (300с) + запас
+_NOTIFY_TTL_SECONDS = 600
+
+
+def _notify_bridge_done(task_id: str, state: str) -> None:
+    """Разбудить ждущий task_bridge: LPUSH события с TTL.
+
+    Сбой публикации не роняет postrun: bridge разберётся страховочным
+    контролем result.ready() (см. task_bridge._wait_completion).
+    """
+    global _notify_client
+    key = f"selti:bridge:done:{task_id}"
+    try:
+        if _notify_client is None:
+            _notify_client = redis_sync.Redis.from_url(
+                settings.redis_url,
+                decode_responses=True,
+                socket_timeout=5.0,
+                socket_connect_timeout=2.0,
+            )
+        pipe = _notify_client.pipeline(transaction=False)
+        pipe.lpush(key, state)
+        pipe.expire(key, _NOTIFY_TTL_SECONDS)
+        pipe.execute()
+    except redis_sync.RedisError as exc:
+        logger.warning("bridge notify failed", extra={
+            "task_id": task_id, "error": str(exc)[:200],
+        })
 
 
 def setup_signals(app):
@@ -52,6 +96,10 @@ def setup_signals(app):
         if cid:
             request_id_var.set(cid)
 
+        # Задача от task_bridge: по завершении публикуем событие (Фаза 3.3)
+        if headers.get("bridge_wait"):
+            _bridge_waiters.add(task_id)
+
         # Пытаемся достать send_time из kwargs (передаётся через task_bridge)
         send_time = (kwargs or {}).get("_send_time")
         if send_time:
@@ -67,6 +115,11 @@ def setup_signals(app):
         """Задача завершилась (успех или ошибка)."""
         now = time.monotonic()
         task_name = task.name or "unknown"
+
+        # Событие завершения для ждущего task_bridge (должно идти ДО return)
+        if task_id in _bridge_waiters:
+            _bridge_waiters.discard(task_id)
+            _notify_bridge_done(task_id, state or "UNKNOWN")
 
         # Duration
         start = _task_start_times.pop(task_id, now)

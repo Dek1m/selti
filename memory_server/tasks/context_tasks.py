@@ -4,17 +4,17 @@
 Routed to the 'memory' queue. Beat-расписание rebuild и Redis-кеш — Фаза 6.
 """
 
-import logging
 from typing import Any
 
 from celery import shared_task
 
+from memory_server.logger import get_logger
 from memory_server.state import get_state
 from memory_server.tasks.async_bridge import run_async
 from memory_server.tasks.base import SeltiTask
 from memory_server.tasks.errors import ValidationError
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def _get_service():

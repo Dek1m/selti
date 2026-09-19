@@ -73,7 +73,18 @@ SEARCH_RESULTS = Histogram(
     f"{PREFIX}_search_results_count",
     "Number of results returned by search",
     ["tool"],
-    buckets=(1, 5, 10, 20, 50, 100),
+    # Малые бакеты (Фаза 3.3): выдача тулов короткая — важна гранулярность
+    # 0 (пустая) / 1 / 3 / 5 / 10 / 20+, а не хвост 50-100
+    buckets=(0, 1, 3, 5, 10, 20),
+)
+
+# Качество поиска (Фаза 3.3): счётчик пустых выдач по namespace.
+# Инкремент в MemoryService.search при пустом результате; namespace=None
+# (поиск по всему корпусу) → label "all".
+ZERO_RESULT_SEARCHES_TOTAL = Counter(
+    f"{PREFIX}_zero_result_searches_total",
+    "Total searches that returned no results",
+    ["namespace"],
 )
 
 # ============================================================

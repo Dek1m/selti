@@ -7,11 +7,12 @@
 """
 
 import asyncio
-import logging
 
 from fastapi import APIRouter
 
-logger = logging.getLogger(__name__)
+from memory_server.logger import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 

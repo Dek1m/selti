@@ -169,6 +169,49 @@ class TestSearch:
         )
         assert result == results
 
+    @pytest.mark.asyncio
+    async def test_search_empty_result_increments_zero_result_metric(self, service):
+        """Пустая выдача → zero_result_searches_total{namespace} +1 (Фаза 3.3)."""
+        from memory_server.memory.service import ZERO_RESULT_SEARCHES_TOTAL
+
+        service.embedding.embed = AsyncMock(return_value=[0.5])
+        service.repository.search = AsyncMock(return_value=[])
+
+        await service.search(query="nothing", namespace="ns")
+
+        counter = ZERO_RESULT_SEARCHES_TOTAL.labels(namespace="ns")
+        before = counter._value.get()
+        await service.search(query="nothing", namespace="ns")
+        assert counter._value.get() == before + 1
+
+    @pytest.mark.asyncio
+    async def test_search_no_namespace_counts_as_all(self, service):
+        """Поиск без namespace (весь корпус) → label namespace='all'."""
+        from memory_server.memory.service import ZERO_RESULT_SEARCHES_TOTAL
+
+        service.embedding.embed = AsyncMock(return_value=[0.5])
+        service.repository.search = AsyncMock(return_value=[])
+
+        counter = ZERO_RESULT_SEARCHES_TOTAL.labels(namespace="all")
+        before = counter._value.get()
+        await service.search(query="everything")
+        assert counter._value.get() == before + 1
+
+    @pytest.mark.asyncio
+    async def test_search_non_empty_does_not_increment_zero_result(self, service):
+        """Непустая выдача метрику не трогает."""
+        from memory_server.memory.service import ZERO_RESULT_SEARCHES_TOTAL
+
+        service.embedding.embed = AsyncMock(return_value=[0.5])
+        service.repository.search = AsyncMock(
+            return_value=[SearchResult(id="1", content="m", metadata={}, score=0.9)]
+        )
+
+        counter = ZERO_RESULT_SEARCHES_TOTAL.labels(namespace="ns2")
+        before = counter._value.get()
+        await service.search(query="hit", namespace="ns2")
+        assert counter._value.get() == before
+
 
 class TestGet:
     @pytest.mark.asyncio
@@ -321,8 +364,24 @@ class TestForget:
 
         result = await service.forget(user_id="u1", namespace="ns")
 
-        service.repository.forget.assert_awaited_once_with(user_id="u1", namespace="ns")
+        service.repository.forget.assert_awaited_once_with(
+            user_id="u1", namespace="ns", project_id=None
+        )
         assert result == 7
+
+    @pytest.mark.asyncio
+    async def test_forget_resolves_and_passes_project_id(self, service):
+        """Фаза 3.1: slug проекта резолвится и уходит в repository."""
+        service.resolve_project = AsyncMock(return_value="proj-uuid")
+        service.repository.forget = AsyncMock(return_value=1)
+
+        result = await service.forget(user_id="u1", project_id="akame")
+
+        service.resolve_project.assert_awaited_once_with("akame")
+        service.repository.forget.assert_awaited_once_with(
+            user_id="u1", namespace=None, project_id="proj-uuid"
+        )
+        assert result == 1
 
 
 # ---------------------------------------------------------------------------

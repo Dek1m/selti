@@ -31,8 +31,17 @@ logging.getLogger().addFilter(_MCPSdkFilter())
 
 @asynccontextmanager
 async def lifespan(server: FastMCP):
-    # Миграции — создают extension vector, таблицы, индексы
-    await run_migrations()
+    # Миграции — создают extension vector, таблицы, индексы.
+    # Мёртвый PG на старте — не crash-loop: схема уже деградирует
+    # graceful (SchemaPendingError в pg_repository), старт выровнен
+    # с этой философией — WARNING + degraded, миграции догонит воркер
+    # при первом тул-вызове, /health покажет degraded.
+    try:
+        await run_migrations()
+    except Exception as exc:
+        logger.warning("migrations pending, starting degraded", extra={
+            "error": str(exc)[:200],
+        })
 
     # Зависимости процесса — в SeltiState (state.py).
     # MCP tools отправляют задачи через Celery (task_bridge.py).

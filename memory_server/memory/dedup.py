@@ -1,16 +1,16 @@
 import asyncio
 import hashlib
-import logging
 from dataclasses import dataclass
 from enum import Enum
 
 from memory_server.config import Settings
 from memory_server.embedding.provider import EmbeddingProvider
+from memory_server.logger import get_logger
 from memory_server.memory.repository import MemoryRepository
 from memory_server.metrics import DEDUP_SKIPPED_TOTAL, DEDUP_INSERTED_TOTAL, DEDUP_RATIO
 from memory_server.models import SearchResult
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Бегущие счётчики для вычисления dedup ratio (per-process).
 # Корректно в single-worker; в multiprocess — приближение (достаточно для dashboards).

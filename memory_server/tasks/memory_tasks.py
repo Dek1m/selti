@@ -14,12 +14,13 @@ from typing import Any
 
 from celery import shared_task
 
+from memory_server.logger import get_logger
 from memory_server.state import get_state
 from memory_server.tasks.async_bridge import run_async
 from memory_server.tasks.base import SeltiTask
 from memory_server.tasks.errors import ValidationError
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _service: Any | None = None
 
@@ -340,10 +341,12 @@ def get_recent(
     queue="memory",
     routing_key="memory",
 )
-def get_stats(self, user_id: str | None = None) -> list[dict[str, Any]]:
-    """Get memory statistics per namespace."""
+def get_stats(
+    self, user_id: str | None = None, project_id: str | None = None
+) -> list[dict[str, Any]]:
+    """Get memory statistics per namespace; project_id — срез по проекту."""
     service = _get_service()
-    result = run_async(service.get_stats, user_id=user_id)
+    result = run_async(service.get_stats, user_id=user_id, project_id=project_id)
     return [item.model_dump(mode="json") for item in result]
 
 
@@ -513,10 +516,13 @@ def traverse_graph(
     link_types: list[str] | None = None,
     limit: int | None = None,
     offset: int = 0,
+    project_id: str | None = None,
 ) -> dict[str, Any]:
     """Traverse the knowledge graph from a starting node.
 
     limit/offset — курсорная пагинация узлов (cap traverse_max_nodes).
+    project_id — ранняя валидация проекта (slug/UUID); граф связей
+    глобальный, фильтра узлов нет.
     """
     if not start_id or not start_id.strip():
         raise ValidationError("start_id cannot be empty")
@@ -529,6 +535,7 @@ def traverse_graph(
         link_types=link_types,
         limit=limit,
         offset=offset,
+        project_id=project_id,
     )
     return {
         "nodes": result.nodes,
@@ -735,13 +742,16 @@ def forget_memories(
     self,
     user_id: str,
     namespace: str | None = None,
+    project_id: str | None = None,
 ) -> dict[str, Any]:
-    """Delete all memories for a user, optionally filtered by namespace."""
+    """Delete all memories for a user, optionally filtered by namespace/project."""
     if not user_id or not user_id.strip():
         raise ValidationError("user_id cannot be empty")
 
     service = _get_service()
-    deleted = run_async(service.forget, user_id=user_id, namespace=namespace)
+    deleted = run_async(
+        service.forget, user_id=user_id, namespace=namespace, project_id=project_id
+    )
     return {"deleted_count": deleted}
 
 

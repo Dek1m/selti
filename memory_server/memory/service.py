@@ -23,6 +23,7 @@ from memory_server.memory.search_fusion import (
     recency_decay,
     rrf_fuse,
 )
+from memory_server.metrics import ZERO_RESULT_SEARCHES_TOTAL
 from memory_server.models import (
     ClusterRecord,
     GraphStats,
@@ -100,7 +101,7 @@ class MemoryService:
                 decision = await self.dedup.check(content, user_id, namespace, metadata=metadata)
                 content_hash = decision.content_hash
                 embedding = decision.embedding
-                logger.info("store: dedup", extra={
+                logger.debug("store: dedup", extra={
                     "action": decision.action.value,
                     "existing_id": decision.existing_id,
                     "score": decision.existing_score,
@@ -149,7 +150,7 @@ class MemoryService:
             if metadata and "links" in metadata:
                 try:
                     synced = await self.repository.sync_links_to_relations(memory_id)
-                    logger.info("store: sync_links", extra={"synced": synced, "id": memory_id})
+                    logger.debug("store: sync_links", extra={"synced": synced, "id": memory_id})
                 except Exception:
                     logger.exception("store: sync_links FAILED (non-fatal)", extra={"id": memory_id})
 
@@ -171,7 +172,7 @@ class MemoryService:
             if not self.config.hybrid_search_enabled:
                 # Фича-флаг отката (не legacy): выключенный hybrid = плотный
                 # Qdrant-путь Фазы 0, документирован в конфиге.
-                return await self.repository.search(
+                results = await self.repository.search(
                     query_embedding=query_embedding,
                     user_id=user_id,
                     limit=limit,
@@ -181,16 +182,21 @@ class MemoryService:
                     project_id=resolved_project,
                     include_historical=include_historical,
                 )
-            return await self._search_hybrid(
-                query=query,
-                query_embedding=query_embedding,
-                user_id=user_id,
-                limit=limit,
-                threshold=threshold,
-                namespace=namespace,
-                project_id=resolved_project,
-                include_historical=include_historical,
-            )
+            else:
+                results = await self._search_hybrid(
+                    query=query,
+                    query_embedding=query_embedding,
+                    user_id=user_id,
+                    limit=limit,
+                    threshold=threshold,
+                    namespace=namespace,
+                    project_id=resolved_project,
+                    include_historical=include_historical,
+                )
+            if not results:
+                # Качество поиска (Фаза 3.3): пустая выдача — сигнал для дашборда
+                ZERO_RESULT_SEARCHES_TOTAL.labels(namespace=namespace or "all").inc()
+            return results
 
     async def _search_hybrid(
         self,
@@ -315,7 +321,7 @@ class MemoryService:
             if metadata is not None and "links" in metadata:
                 try:
                     synced = await self.repository.sync_links_to_relations(memory_id)
-                    logger.info("update: sync_links", extra={"synced": synced, "id": memory_id})
+                    logger.debug("update: sync_links", extra={"synced": synced, "id": memory_id})
                 except Exception:
                     logger.exception("update: sync_links FAILED (non-fatal)", extra={"id": memory_id})
 
@@ -381,7 +387,7 @@ class MemoryService:
             )
             if record is None:
                 raise NotFoundError(granule_id)
-            logger.info("create_version: done", extra={
+            logger.debug("create_version: done", extra={
                 "old_id": granule_id, "new_id": record.id,
                 "confidence": confidence,
             })
@@ -408,13 +414,13 @@ class MemoryService:
         Единый путь retract для всех тулов (разовый memory_archive и
         причина отзыва для аудита).
         """
-        logger.info("retract", extra={"id": memory_id, "reason": reason})
+        logger.debug("retract", extra={"id": memory_id, "reason": reason})
         record = await self.repository.get_by_id(memory_id)
         if record is None:
-            logger.info("retract: not found", extra={"id": memory_id})
+            logger.debug("retract: not found", extra={"id": memory_id})
             raise NotFoundError(memory_id)
         result = await self.repository.archive(memory_id, reason=reason)
-        logger.info("retract: done", extra={"id": memory_id, "success": result})
+        logger.debug("retract: done", extra={"id": memory_id, "success": result})
         return result
 
     async def freeze(self, memory_id: str, frozen: bool) -> MemoryRecord:
@@ -454,7 +460,7 @@ class MemoryService:
         limit: int = 20,
         project_id: str | None = None,
     ) -> list[MemoryRecord]:
-        logger.info("recent", extra={"namespace": namespace, "limit": limit, "since": str(since)})
+        logger.debug("recent", extra={"namespace": namespace, "limit": limit, "since": str(since)})
         resolved_project = await self.resolve_project(project_id)
         results = await self.repository.recent(
             namespace=namespace,
@@ -462,26 +468,40 @@ class MemoryService:
             limit=limit,
             project_id=resolved_project,
         )
-        logger.info("recent: done", extra={"count": len(results)})
+        logger.debug("recent: done", extra={"count": len(results)})
         return results
 
     async def forget(
         self,
         user_id: str,
         namespace: str | None = None,
+        project_id: str | None = None,
     ) -> int:
-        logger.info("forget", extra={"user_id": user_id, "namespace": namespace})
+        """Забвение гранул пользователя (retract): опционально namespace и проект.
+
+        project_id (slug/UUID, Фаза 3.1) ограничивает забвение гранулами
+        проекта — глобальный слой юзера не трогаем.
+        """
+        logger.debug("forget", extra={
+            "user_id": user_id, "namespace": namespace, "project_id": project_id,
+        })
+        resolved_project = await self.resolve_project(project_id)
         count = await self.repository.forget(
             user_id=user_id,
             namespace=namespace,
+            project_id=resolved_project,
         )
-        logger.info("forget: done", extra={"deleted_count": count})
+        logger.debug("forget: done", extra={"deleted_count": count})
         return count
 
-    async def get_stats(self, user_id: str | None = None) -> list:
-        logger.info("get_stats", extra={"user_id": user_id})
-        result = await self.repository.get_stats(user_id)
-        logger.info("get_stats: done", extra={"namespaces": len(result)})
+    async def get_stats(
+        self, user_id: str | None = None, project_id: str | None = None
+    ) -> list:
+        """Статистика по namespace; project_id (slug/UUID) — срез по проекту."""
+        logger.debug("get_stats", extra={"user_id": user_id, "project_id": project_id})
+        resolved_project = await self.resolve_project(project_id)
+        result = await self.repository.get_stats(user_id, project_id=resolved_project)
+        logger.debug("get_stats: done", extra={"namespaces": len(result)})
         return result
 
     async def archive(self, memory_id: str) -> bool:
@@ -704,7 +724,7 @@ class MemoryService:
         # Fallback: ищем по entity_name
         record = await self.repository.find_by_entity_name(granule_id)
         if record is not None:
-            logger.info("resolve: found by entity_name", extra={
+            logger.debug("resolve: found by entity_name", extra={
                 "input": granule_id, "resolved_id": record.id,
             })
             return record
@@ -730,7 +750,7 @@ class MemoryService:
         project_id — только ранняя валидация проекта (понятная ошибка при
         неизвестном slug); связи фильтром проекта не ограничены.
         """
-        logger.info("add_relation", extra={
+        logger.debug("add_relation", extra={
             "source": source_id, "target": target_id,
             "type": link_type, "weight": weight,
         })
@@ -762,27 +782,27 @@ class MemoryService:
             weight=weight,
             metadata=metadata,
         )
-        logger.info("add_relation: done", extra={"relation_id": rel_id})
+        logger.debug("add_relation: done", extra={"relation_id": rel_id})
         return rel_id
 
     async def get_relations(
         self, memory_id: str, link_type: str | None = None
     ) -> RelationListResult:
         """Получить входящие и исходящие связи гранулы. Один запрос вместо двух."""
-        logger.info("get_relations", extra={"id": memory_id, "link_type": link_type})
+        logger.debug("get_relations", extra={"id": memory_id, "link_type": link_type})
         result = await self.repository.get_relations(memory_id, link_type)
-        logger.info("get_relations: done", extra={"incoming": len(result.incoming), "outgoing": len(result.outgoing)})
+        logger.debug("get_relations: done", extra={"incoming": len(result.incoming), "outgoing": len(result.outgoing)})
         return result
 
     async def delete_relation(
         self, source_id: str, target_id: str, link_type: str
     ) -> bool:
         """Удалить связь."""
-        logger.info("delete_relation", extra={
+        logger.debug("delete_relation", extra={
             "source": source_id, "target": target_id, "type": link_type,
         })
         result = await self.repository.delete_relation(source_id, target_id, link_type)
-        logger.info("delete_relation: done", extra={"success": result})
+        logger.debug("delete_relation: done", extra={"success": result})
         return result
 
     async def traverse(
@@ -792,6 +812,7 @@ class MemoryService:
         link_types: list[str] | None = None,
         limit: int | None = None,
         offset: int = 0,
+        project_id: str | None = None,
     ) -> TraverseResult:
         """Обход графа от начальной ноды. Один round-trip вместо 2N+2.
 
@@ -799,11 +820,16 @@ class MemoryService:
         хранимки graph_traverse_full (Фаза 1.5, миграций нет): стабильный
         порядок сортировкой id, срез [offset : offset+limit], рёбра —
         только между выданными узлами. total_nodes/truncated — навигация.
+
+        project_id — только ранняя валидация проекта (понятная ошибка при
+        неизвестном slug, паттерн memory_link): граф связей глобальный,
+        фильтра узлов по проекту в контракте хранимки нет.
         """
-        logger.info("traverse", extra={
+        logger.debug("traverse", extra={
             "start_id": start_id, "depth": depth, "link_types": link_types,
-            "limit": limit, "offset": offset,
+            "limit": limit, "offset": offset, "project_id": project_id,
         })
+        await self.resolve_project(project_id)
         # Валидация: start_id должен существовать
         start = await self.repository.get_by_id(start_id)
         if start is None:
@@ -832,7 +858,7 @@ class MemoryService:
             if str(e["source_id"]) in visible_ids
             and (e.get("target_id") is None or str(e["target_id"]) in visible_ids)
         ]
-        logger.info("traverse: done", extra={
+        logger.debug("traverse: done", extra={
             "nodes": len(page), "edges": len(edges), "total_nodes": total,
         })
         return TraverseResult(
@@ -844,9 +870,9 @@ class MemoryService:
 
     async def get_graph_stats(self) -> GraphStats:
         """Статистика графа знаний."""
-        logger.info("get_graph_stats")
+        logger.debug("get_graph_stats")
         result = await self.repository.get_graph_stats()
-        logger.info("get_graph_stats: done", extra={
+        logger.debug("get_graph_stats: done", extra={
             "granules": result.total_granules,
             "relations": result.total_relations,
             "orphans": result.orphans,

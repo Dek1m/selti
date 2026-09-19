@@ -1,17 +1,17 @@
 import hashlib
 import json
-import logging
 import time
 from typing import Optional
 
 import redis.asyncio as aioredis
 
+from memory_server.logger import get_logger
 from memory_server.metrics import (
     REDIS_OPS_TOTAL,
     REDIS_OPS_DURATION_SECONDS,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Таймаут на Redis операции — 10 секунд
 REDIS_TIMEOUT = 10.0

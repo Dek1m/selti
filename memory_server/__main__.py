@@ -116,7 +116,7 @@ app.include_router(tasks_router)
 # ---- Middleware: аутентификация ----
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    if request.url.path in ("/health", "/metrics"):
+    if request.url.path in ("/health", "/live", "/metrics"):
         return await call_next(request)
 
     if not settings.api_key:
@@ -152,6 +152,14 @@ async def metrics_middleware(request: Request, call_next):
 
     response.headers["X-Correlation-ID"] = request_id
     return response
+
+
+# ---- Liveness: процесс жив, без проверок зависимостей ----
+# Readiness (PG/Redis/Celery) остаётся на /health — liveness не должен
+# падать из-за медленного бэкенда, иначе оркестратор убивает живой процесс
+@app.get("/live")
+async def live():
+    return {"status": "alive", "server": settings.mcp_server_name}
 
 
 # ---- Health ----

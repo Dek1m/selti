@@ -31,6 +31,16 @@ async def health():
     }
 
 
+# Liveness: реальный обработчик из __main__ — лёгкий 200-ok без
+# проверок зависимостей (Фаза 3.3; readiness остаётся на /health)
+from memory_server.__main__ import live as _live_handler
+
+
+@test_app.get("/live")
+async def live():
+    return await _live_handler()
+
+
 class TestServerVersion:
     def test_server_version_reads_version_file(self):
         """_server_version — единственный источник правды: VERSION-файл корня репо."""
@@ -61,6 +71,20 @@ class TestHealth:
 
         assert response.status_code == 200
         assert response.json()["status"] == "ok"
+
+
+class TestLive:
+    def test_live_returns_200_without_dependency_checks(self):
+        """GET /live → 200 мгновенно: liveness не зависит от бэкендов."""
+        with TestClient(test_app) as client:
+            response = client.get("/live")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "alive"
+        assert data["server"] == os.getenv("SERVICE_NAME", "selti")
+        # Liveness — лёгкий: никаких checks зависимостей в ответе
+        assert "checks" not in data
 
     def test_health_contains_server_and_version(self):
         """GET /health → содержит server и version (из VERSION-файла)."""

@@ -10,11 +10,12 @@ Celery prefork workers — sync. Весь код selti — async.
 """
 
 import asyncio
-import logging
 import threading
 from typing import Any, Callable
 
-logger = logging.getLogger(__name__)
+from memory_server.logger import get_logger
+
+logger = get_logger(__name__)
 
 # Persistent event loop для worker process (per-process singleton)
 _worker_loop: asyncio.AbstractEventLoop | None = None

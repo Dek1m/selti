@@ -296,7 +296,7 @@ class TestForget:
         deleted = await repo.forget(user_id="u1", namespace="ns")
 
         assert deleted == 3
-        conn.fetchval.assert_awaited_once_with(q.FORGET_MEMORIES, "u1", NS_ID)
+        conn.fetchval.assert_awaited_once_with(q.FORGET_MEMORIES, "u1", NS_ID, None)
 
     @pytest.mark.asyncio
     async def test_forget_without_namespace(self, repo, conn):
@@ -304,7 +304,17 @@ class TestForget:
 
         deleted = await repo.forget(user_id="u1", namespace=None)
         assert deleted == 0
-        conn.fetchval.assert_awaited_once_with(q.FORGET_MEMORIES, "u1", None)
+        conn.fetchval.assert_awaited_once_with(q.FORGET_MEMORIES, "u1", None, None)
+
+    @pytest.mark.asyncio
+    async def test_forget_project_scope(self, repo, conn):
+        """Фаза 3.1: забвение в рамках проекта — project_id уходит в SQL."""
+        conn.fetchval = AsyncMock(return_value=2)
+
+        deleted = await repo.forget(user_id="u1", namespace=None, project_id="proj-uuid")
+
+        assert deleted == 2
+        conn.fetchval.assert_awaited_once_with(q.FORGET_MEMORIES, "u1", None, "proj-uuid")
 
 
 # ---------------------------------------------------------------------------

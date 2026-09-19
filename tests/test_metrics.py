@@ -23,6 +23,7 @@ from memory_server.metrics import (
     MEMORY_COUNT,
     MEMORY_GROWTH_RATE,
     SEARCH_RESULTS,
+    ZERO_RESULT_SEARCHES_TOTAL,
 )
 
 
@@ -46,6 +47,9 @@ class TestMetricsTypes:
 
     def test_search_results_is_histogram(self):
         assert isinstance(SEARCH_RESULTS, Histogram)
+
+    def test_zero_result_searches_is_counter(self):
+        assert isinstance(ZERO_RESULT_SEARCHES_TOTAL, Counter)
 
     def test_memory_count_is_gauge(self):
         assert isinstance(MEMORY_COUNT, Gauge)
@@ -81,6 +85,14 @@ class TestMetricsLabels:
     def test_search_results_has_tool_label(self):
         labels = SEARCH_RESULTS._labelnames
         assert "tool" in labels
+
+    def test_zero_result_searches_has_namespace_label(self):
+        labels = ZERO_RESULT_SEARCHES_TOTAL._labelnames
+        assert "namespace" in labels
+
+    def test_search_results_small_buckets(self):
+        """Малые бакеты (Фаза 3.3): различимы пустая выдача, 1-2 и 3-4 результата."""
+        assert list(SEARCH_RESULTS._upper_bounds) == [0.0, 1.0, 3.0, 5.0, 10.0, 20.0, float("Inf")]
 
     def test_dedup_ratio_has_namespace_label(self):
         labels = DEDUP_RATIO._labelnames

@@ -10,13 +10,13 @@
 4. snapshot_0 = snapshot_1 для следующего цикла
 """
 
-import logging
 import time
 
 from memory_server.celery_app import app
+from memory_server.logger import get_logger
 from memory_server.metrics import MEMORY_GROWTH_RATE
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Предыдущий snapshot: {namespace: (count, timestamp)}
 _prev_snapshot: dict[str, tuple[int, float]] = {}

@@ -13,12 +13,14 @@
 """
 
 import logging
+
 from celery import Celery
 from kombu import Exchange, Queue
 
 from memory_server.config import settings
+from memory_server.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # ── Create Celery instance ──
 app = Celery(settings.mcp_server_name)

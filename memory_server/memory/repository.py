@@ -529,15 +529,21 @@ class MemoryRepository:
         self,
         user_id: str,
         namespace: str | None = None,
+        project_id: str | None = None,
     ) -> int:
         namespace_id = await self._ns_id(namespace)
         if isinstance(namespace_id, _UnknownNamespace):
             return 0
-        count = await self.pg.forget_soft(user_id, namespace_id)
+        count = await self.pg.forget_soft(user_id, namespace_id, project_id)
         if self._has_qdrant():
-            # active_only=False: забвение стирает вектора независимо от статуса
+            # active_only=False: забвение стирает вектора независимо от статуса.
+            # project_id в фильтре обязателен: PG ретрактнул срез проекта —
+            # Qdrant-фильтр должен совпадать, иначе сотрём чужие точки юзера
             search_filter = QdrantStore.build_filter(
-                user_id=user_id, namespace_id=namespace_id, active_only=False
+                user_id=user_id,
+                namespace_id=namespace_id,
+                project_id=project_id,
+                active_only=False,
             )
             if search_filter:
                 self.qdrant.delete_by_filter(search_filter)
@@ -740,8 +746,10 @@ class MemoryRepository:
             limit=limit,
         )
 
-    async def get_stats(self, user_id: str | None = None) -> list[MemoryStatsItem]:
-        return await self.pg.get_stats(user_id)
+    async def get_stats(
+        self, user_id: str | None = None, project_id: str | None = None
+    ) -> list[MemoryStatsItem]:
+        return await self.pg.get_stats(user_id, project_id)
 
     # ════════════════════════════════════════════════════════════
     # PROJECT CONTEXTS («облачко знаний», D9)

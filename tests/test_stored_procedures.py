@@ -366,7 +366,7 @@ class TestForgetSoft:
         result = await pg.forget_soft(user_id="u1", namespace_id="ns-uuid")
 
         assert result == 5
-        conn.fetchval.assert_awaited_once_with(q.FORGET_MEMORIES, "u1", "ns-uuid")
+        conn.fetchval.assert_awaited_once_with(q.FORGET_MEMORIES, "u1", "ns-uuid", None)
 
     @pytest.mark.asyncio
     async def test_forget_soft_no_namespace(self, pg, conn):
@@ -376,7 +376,19 @@ class TestForgetSoft:
         result = await pg.forget_soft(user_id="u1", namespace_id=None)
 
         assert result == 10
-        conn.fetchval.assert_awaited_once_with(q.FORGET_MEMORIES, "u1", None)
+        conn.fetchval.assert_awaited_once_with(q.FORGET_MEMORIES, "u1", None, None)
+
+    @pytest.mark.asyncio
+    async def test_forget_soft_with_project_scope(self, pg, conn):
+        """Фаза 3.1: project_id уходит третьим параметром (срез проекта)."""
+        conn.fetchval = AsyncMock(return_value=4)
+
+        result = await pg.forget_soft(
+            user_id="u1", namespace_id=None, project_id="proj-uuid"
+        )
+
+        assert result == 4
+        conn.fetchval.assert_awaited_once_with(q.FORGET_MEMORIES, "u1", None, "proj-uuid")
 
     @pytest.mark.asyncio
     async def test_forget_soft_no_matches(self, pg, conn):

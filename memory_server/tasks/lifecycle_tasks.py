@@ -8,16 +8,16 @@ orphans_cleanup (05:30). Расписание — celery_app.beat_schedule; оч
 Все задачи идемпотентны: повтор по уже обработанному состоянию — no-op.
 """
 
-import logging
 from typing import Any
 
 from celery import shared_task
 
+from memory_server.logger import get_logger
 from memory_server.state import get_state
 from memory_server.tasks.async_bridge import run_async
 from memory_server.tasks.base import SeltiTask
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def _get_service():

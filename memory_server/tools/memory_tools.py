@@ -176,10 +176,14 @@ async def memory_ingest_batch(
 @tool_handler("memory_stats")
 async def memory_stats(
     user_id: str | None = None,
+    project_id: str | None = None,
     ctx: Context | None = None,
 ) -> list[dict]:
-    """Get memory statistics for a user — per-namespace counts and last updated."""
-    result = await celery_call(TASK_STATS, user_id=user_id)
+    """Get memory statistics for a user — per-namespace counts and last updated.
+
+    project_id: optional project slug or UUID to scope stats to one project.
+    """
+    result = await celery_call(TASK_STATS, user_id=user_id, project_id=project_id)
     for item in result:
         MEMORY_COUNT.labels(namespace=item["namespace"]).set(item["count"])
     return result
@@ -314,13 +318,19 @@ async def memory_recent(
 async def memory_forget(
     user_id: str,
     namespace: str | None = None,
+    project_id: str | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
-    """Retract all memories for a user (status='retracted'), optionally filtered by namespace."""
+    """Retract all memories for a user (status='retracted'), optionally filtered.
+
+    namespace/project_id narrow the scope: e.g. forget a user's knowledge
+    of one project (project_id: slug or UUID) without touching the global layer.
+    """
     return await celery_call(
         TASK_FORGET,
         user_id=user_id,
         namespace=namespace,
+        project_id=project_id,
     )
 
 
@@ -418,6 +428,7 @@ async def memory_traverse(
     link_types: list[str] | None = None,
     limit: int | None = None,
     offset: int = 0,
+    project_id: str | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Обход графа от начальной гранулы (BFS).
@@ -427,6 +438,8 @@ async def memory_traverse(
     limit/offset: курсорная пагинация узлов (стабильный порядок —
     сортировка по id; total_nodes в ответе — для навигации);
     hard-cap узлов — 500 (конфиг traverse_max_nodes)
+    project_id: опционально — валидация проекта (slug/UUID) ранней понятной
+    ошибкой; граф связей глобальный, фильтра узлов по проекту нет
     """
     return await celery_call(
         TASK_TRAVERSE,
@@ -435,6 +448,7 @@ async def memory_traverse(
         link_types=link_types,
         limit=limit,
         offset=offset,
+        project_id=project_id,
     )
 
 

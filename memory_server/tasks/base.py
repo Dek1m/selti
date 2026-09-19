@@ -4,12 +4,12 @@ Provides common settings: retry, timeout, logging, metrics.
 All selti tasks inherit from SeltiTask.
 """
 
-import logging
 from typing import Any
 
 from celery import Task
 from celery.exceptions import SoftTimeLimitExceeded, TimeLimitExceeded
 
+from memory_server.logger import get_logger
 from memory_server.tasks.errors import (
     SeltiConnectionError,
     SeltiTaskError,
@@ -17,7 +17,7 @@ from memory_server.tasks.errors import (
     ValidationError,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class SeltiTask(Task):

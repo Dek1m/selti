@@ -173,12 +173,13 @@
 
 ### 3.3 Наблюдаемость
 
-- [ ] Дедуп логов: service-INFO → DEBUG (`service.py:190+`), остаётся 1 INFO/tool_handler; task_bridge SEND/OK → DEBUG (`task_bridge.py:35,60`)
-- [ ] `get_logger` во всех 9 модулях (список в п.12 требований)
-- [ ] Исключения не глотать: `metrics_decorator.py:39`, `service.py:238-239` — лог с request_id + re-raise/признак в ответе
-- [ ] busy-wait task_bridge → asyncio-friendly ожидание (poll 100ms → wait/notify через Redis BLPOP или async result) (`task_bridge.py:47-51`)
-- [ ] Метрики качества: `search_hit_rate` (клик→использование гранулы — прокси: факт последующей ссылки), `zero_result_searches`, `hybrid_vs_dense_latency`; дашборд-секция Prometheus
-- [ ] Redis health — переиспользовать singleton client (`__main__.py:168-171`); liveness `/live` (лёгкий) vs readiness `/health`
+- [x] Дедуп логов: service-INFO → DEBUG (`service.py:190+`), остаётся 1 INFO/tool_handler; task_bridge SEND/OK → DEBUG (`task_bridge.py:35,60`)
+- [x] `get_logger` во всех 9 модулях (список в п.12 требований)
+- [x] Исключения не глотать: `metrics_decorator.py:39`, `service.py:238-239` — лог с request_id + re-raise/признак в ответе
+- [x] busy-wait task_bridge → event-driven ожидание: Redis BLPOP на ключ `selti:bridge:done:{task_id}` (публикация в `signals.on_task_postrun` при `headers.bridge_wait`), страховка — контроль `result.ready()` чанками 30с; таймауты/ошибки без изменений
+- [x] Метрики качества: `zero_result_searches_total{namespace}` (инкремент в `MemoryService.search` при пустой выдаче), `search_results_count` переведён на малые бакеты (0/1/3/5/10/20+); дашборд-секция Prometheus
+      **TODO:** `search_hit_rate` (клик → использование гранулы) — ОТЛОЖЕНО: в MCP-контракте нет сигнала клика/использования выданной гранулы; нужен отдельный механизм обратной связи (например, тул-вызов «memory_feedback» или факт последующего memory_get по id из выдачи). `hybrid_vs_dense_latency` — тоже отложено: без A/B-разворота каналов прокси-метрика вводит в заблуждение
+- [x] Redis health — переиспользовать singleton client (`__main__.py:168-171`); liveness `/live` (лёгкий) vs readiness `/health`
 
 **Критерии приёмки:** все 23+4 тула принимают project_id и проходят тесты матрицы (namespace × project × global-NULL); на операцию ≤ 1 INFO-запись; grep подтверждает отсутствие logging.getLogger мимо фасада; p95 тулов ≤ 300мс (без эмбеддинга).
 
