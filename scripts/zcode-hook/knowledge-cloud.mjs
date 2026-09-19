@@ -25,6 +25,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 const HTTP_TIMEOUT_MS = 3000;
+let currentEvent = "SessionStart"; // для catch: имя события обязано совпадать
 const AGENTS_DIR = join(homedir(), ".zcode", "cli", "agents");
 const DIGEST_DIR = join(homedir(), ".zcode", "cli", "agents");
 const RECENT_COMPLETED_MS = 60 * 60 * 1000; // completed засчитан час
@@ -51,7 +52,9 @@ const AGENT_NAMES = {
   krisy: "Кристи",
 };
 
-/** Любой сбой — молча пустой хук: ZCode не должен видеть ошибок облачка. */
+/** Любой сбой — молча пустой хук: ZCode не должен видеть ошибок облачка.
+ *  hookEventName в выводе ОБЯЗАН совпадать с событием (валидатор ZCode
+ *  отклоняет чужое имя → hook.run.failed). */
 function emitEmpty(eventName) {
   process.stdout.write(JSON.stringify({ hookEventName: eventName || "SessionStart" }));
   process.exit(0);
@@ -227,6 +230,7 @@ async function main() {
     event = {};
   }
   const eventName = event.hook_event_name || "SessionStart";
+  currentEvent = eventName;
 
   const projectDir = process.env.ZCODE_PROJECT_DIR;
   if (!projectDir) emitEmpty(eventName);
@@ -290,4 +294,4 @@ async function main() {
   }));
 }
 
-main().catch(() => emitEmpty());
+main().catch(() => emitEmpty(currentEvent));
