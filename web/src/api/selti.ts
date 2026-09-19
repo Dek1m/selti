@@ -13,8 +13,9 @@ import type {
   SearchHit,
 } from "./types";
 
-/** No REST offset yet — one shot per query, bounded by the API hard-cap */
-export const SEARCH_LIMIT = 50;
+/** Page size for /ui pagination — the backend ranks offset+limit
+ * deterministically, so pages are stable across requests. */
+export const PAGE_SIZE = 20;
 
 export type StatusFilter = "asserted" | "superseded" | "retracted" | "uncertain";
 export type PeriodPreset = "24h" | "7d" | "30d" | "all";
@@ -40,8 +41,8 @@ export interface SearchOutcome {
   tookMs: number;
 }
 
-function searchParams(f: SearchFilters, namespace: string | null): URLSearchParams {
-  const p = new URLSearchParams({ query: f.query, limit: String(SEARCH_LIMIT) });
+function searchParams(f: SearchFilters, namespace: string | null, offset: number, limit: number): URLSearchParams {
+  const p = new URLSearchParams({ query: f.query, limit: String(limit), offset: String(offset) });
   if (namespace) p.set("namespace", namespace);
   if (f.project) p.set("project_id", f.project);
   if (f.status) p.set("status", f.status);
@@ -61,16 +62,32 @@ export function mergeHits(lists: SearchHit[][]): SearchHit[] {
       if (!prev || hit.score > prev.score) byId.set(hit.id, hit);
     }
   }
-  return [...byId.values()].sort((a, b) => b.score - a.score).slice(0, SEARCH_LIMIT);
+  return [...byId.values()].sort((a, b) => b.score - a.score);
 }
 
-export async function searchGranules(f: SearchFilters): Promise<SearchOutcome> {
+export async function searchGranules(f: SearchFilters, page = 1): Promise<SearchOutcome> {
   const t0 = performance.now();
+  const offset = (page - 1) * PAGE_SIZE;
   const scopes = f.namespaces.length > 0 ? f.namespaces : [null];
-  const lists = await Promise.all(
-    scopes.map((ns) => apiGet<SearchHit[]>("/api/search", searchParams(f, ns))),
+  if (scopes.length === 1) {
+    // Single channel: the backend slices its deterministic ranking.
+    const results = await apiGet<SearchHit[]>(
+      "/api/search",
+      searchParams(f, scopes[0], offset, PAGE_SIZE),
+    );
+    return { results, tookMs: performance.now() - t0 };
+  }
+  // Fan-out: each channel returns its own [0, offset+PAGE_SIZE) head, the
+  // merged ranking is sliced afterwards — naive per-channel offsets would
+  // skip different heads and double pages across channels.
+  const fetches = scopes.map((ns) =>
+    apiGet<SearchHit[]>("/api/search", searchParams(f, ns, 0, offset + PAGE_SIZE)),
   );
-  return { results: mergeHits(lists), tookMs: performance.now() - t0 };
+  const lists = await Promise.all(fetches);
+  return {
+    results: mergeHits(lists).slice(offset, offset + PAGE_SIZE),
+    tookMs: performance.now() - t0,
+  };
 }
 
 export function getMemory(id: string): Promise<MemoryDetail> {

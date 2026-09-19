@@ -220,6 +220,7 @@ class MemoryService:
         created_after: datetime | None = None,
         created_before: datetime | None = None,
         status: str | None = None,
+        offset: int = 0,
     ) -> list[SearchResult]:
         async with async_measure_duration(logger, "search", namespace=namespace, user_id=user_id):
             resolved_project = await self.resolve_project(project_id)
@@ -230,7 +231,7 @@ class MemoryService:
                 results = await self.repository.search(
                     query_embedding=query_embedding,
                     user_id=user_id,
-                    limit=limit,
+                    limit=limit + offset,
                     threshold=threshold,
                     namespace=namespace,
                     query_text=query,
@@ -240,6 +241,7 @@ class MemoryService:
                     created_before=created_before,
                     status=status,
                 )
+                results = results[offset:]
             else:
                 results = await self._search_hybrid(
                     query=query,
@@ -253,6 +255,7 @@ class MemoryService:
                     created_after=created_after,
                     created_before=created_before,
                     status=status,
+                    offset=offset,
                 )
             if not results:
                 # Качество поиска (Фаза 3.3): пустая выдача — сигнал для дашборда
@@ -272,8 +275,13 @@ class MemoryService:
         created_after: datetime | None = None,
         created_before: datetime | None = None,
         status: str | None = None,
+        offset: int = 0,
     ) -> list[SearchResult]:
-        """Hybrid search (Фаза 1.1/1.2): RRF-fusion → MMR → D4-ранжирование."""
+        """Hybrid search (Фаза 1.1/1.2): RRF-fusion → MMR → D4-ранжирование.
+
+        offset — пагинация /api/search: пул кандидатов масштабируется до
+        offset+limit на канал, слайс делается после полного ранжирования,
+        поэтому страницы детерминированы."""
         candidates = await self.repository.search_hybrid(
             query_embedding=query_embedding,
             query_text=query,
@@ -281,7 +289,7 @@ class MemoryService:
             namespace=namespace,
             project_id=project_id,
             threshold=threshold,
-            prefetch=self.config.hybrid_prefetch,
+            prefetch=max(self.config.hybrid_prefetch, offset + limit),
             include_historical=include_historical,
             created_after=created_after,
             created_before=created_before,
@@ -297,8 +305,8 @@ class MemoryService:
         rrf_scores = rrf_fuse(rankings, k=self.config.rrf_k)
         vectors = {c.id: c.vector for c in candidates if c.vector}
         ordered = mmr_rerank(
-            rrf_scores, vectors, top_k=limit, lambda_=self.config.mmr_lambda
-        )
+            rrf_scores, vectors, top_k=offset + limit, lambda_=self.config.mmr_lambda
+        )[offset:]
 
         now = datetime.now(timezone.utc)
         by_id = {c.id: c for c in candidates}

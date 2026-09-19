@@ -555,3 +555,28 @@ select.chip option { background: var(--sl-bg-shell); color: var(--sl-text); }
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ═══════════ Pagination (§4.4) ═══════════ */
+
+.pagination {
+  display: flex; align-items: center; justify-content: center;
+  gap: var(--sl-s-4);
+  margin: var(--sl-s-6) 0 var(--sl-s-8);
+}
+.page-btn {
+  display: inline-flex; align-items: center; gap: var(--sl-s-2);
+  padding: 8px 16px;
+  border: 1px solid var(--sl-border); border-radius: 999px;
+  background: transparent; color: var(--sl-text-2);
+  font: 500 13px var(--sl-font-body);
+  cursor: pointer;
+  transition: border-color var(--sl-dur) var(--sl-ease), color var(--sl-dur) var(--sl-ease);
+}
+.page-btn:hover:not(:disabled) {
+  border-color: var(--sl-accent); color: var(--sl-accent);
+}
+.page-btn:disabled { opacity: 0.35; cursor: default; }
+.page-indicator {
+  color: var(--sl-text-3); font: 400 13px var(--sl-font-body);
+  font-variant-numeric: tabular-nums;
+}

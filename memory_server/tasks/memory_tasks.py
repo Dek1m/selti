@@ -226,11 +226,13 @@ def search_memories(
     created_after: str | None = None,
     created_before: str | None = None,
     status: str | None = None,
+    offset: int = 0,
 ) -> list[dict[str, Any]]:
     """Search memories (hybrid: dense + FTS, Фаза 1.1).
 
     created_after/created_before — ISO-строки (Celery JSON не несёт
     datetime), парсятся здесь; REST-фильтры /api/search (Фаза 5.1).
+    offset — пагинация /api/search (Фаза 5.2).
     """
     if not query or not query.strip():
         raise ValidationError("query cannot be empty")
@@ -248,6 +250,7 @@ def search_memories(
         created_after=datetime.fromisoformat(created_after) if created_after else None,
         created_before=datetime.fromisoformat(created_before) if created_before else None,
         status=status,
+        offset=offset,
     )
     return [r.model_dump(mode="json") for r in results]
 

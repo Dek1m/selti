@@ -20,9 +20,10 @@ describe("mergeHits (namespace fan-out merge)", () => {
     expect(merged.map((h) => h.id)).toEqual(["y", "x"]);
   });
 
-  it("caps the merged list at SEARCH_LIMIT", () => {
+  it("keeps the full merged ranking — pagination slices outside", () => {
     const many = Array.from({ length: 80 }, (_, i) => hit(`id${i}`, i / 100));
-    expect(mergeHits([many, many]).length).toBe(50);
+    expect(mergeHits([many, many]).length).toBe(80);
+    expect(mergeHits([many, many])[0].id).toBe("id79");
   });
 
   it("returns empty for empty inputs", () => {

@@ -12,6 +12,8 @@ export interface FiltersSnapshot {
   status: StatusFilter | null;
   period: PeriodPreset;
   project: string | null;
+  /** 1-based; any filter change snaps it back to the first page */
+  page: number;
 }
 
 interface FiltersState extends FiltersSnapshot {
@@ -20,6 +22,7 @@ interface FiltersState extends FiltersSnapshot {
   setStatus: (s: StatusFilter | null) => void;
   setPeriod: (p: PeriodPreset) => void;
   setProject: (slug: string | null) => void;
+  setPage: (page: number) => void;
   hydrate: (from: Partial<FiltersSnapshot>) => void;
   reset: () => void;
   hasActive: () => boolean;
@@ -31,20 +34,23 @@ const INITIAL: FiltersSnapshot = {
   status: null,
   period: "all",
   project: null,
+  page: 1,
 };
 
 export const useFilters = create<FiltersState>((set, get) => ({
   ...INITIAL,
-  setQuery: (query) => set({ query }),
+  setQuery: (query) => set({ query, page: 1 }),
   toggleNamespace: (uid) =>
     set((s) => ({
       namespaces: s.namespaces.includes(uid)
         ? s.namespaces.filter((n) => n !== uid)
         : [...s.namespaces, uid],
+      page: 1,
     })),
-  setStatus: (status) => set({ status }),
-  setPeriod: (period) => set({ period }),
-  setProject: (project) => set({ project: project || null }),
+  setStatus: (status) => set({ status, page: 1 }),
+  setPeriod: (period) => set({ period, page: 1 }),
+  setProject: (project) => set({ project: project || null, page: 1 }),
+  setPage: (page) => set({ page: Math.max(1, page) }),
   hydrate: (from) => set(from),
   reset: () => set(INITIAL),
   hasActive: () => {

@@ -4,6 +4,7 @@ import { useNavigate } from "react-router";
 import { searchGranules, type SearchFilters } from "../api/selti";
 import type { SearchHit } from "../api/types";
 import { FilterBar } from "../components/FilterBar";
+import { Pagination } from "../components/Pagination";
 import { GranuleCard } from "../components/GranuleCard";
 import { GranulePanel } from "../components/GranulePanel";
 import { ResultsSkeleton } from "../components/Skeletons";
@@ -31,7 +32,7 @@ export function SearchScreen({ panelId }: { panelId?: string }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
 
-  const { query, namespaces, status, period, project } = useFilters();
+  const { query, namespaces, status, period, project, page, setPage } = useFilters();
   const debouncedQuery = useDebouncedValue(query, 300);
   const submitted = debouncedQuery.trim().length > 0;
 
@@ -46,8 +47,8 @@ export function SearchScreen({ panelId }: { panelId?: string }) {
   };
 
   const search = useQuery({
-    queryKey: ["search", filters],
-    queryFn: () => searchGranules(filters),
+    queryKey: ["search", filters, page],
+    queryFn: () => searchGranules(filters, page),
     enabled: submitted,
     placeholderData: keepPreviousData,
   });
@@ -66,7 +67,7 @@ export function SearchScreen({ panelId }: { panelId?: string }) {
 
   // Keyboard (§9): "/" focuses the search, arrows walk the results,
   // Enter opens the active card. Reset the walk on every new result set.
-  useEffect(() => setActiveIndex(null), [debouncedQuery, namespaces, status, period, project]);
+  useEffect(() => setActiveIndex(null), [debouncedQuery, namespaces, status, period, project, page]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -91,6 +92,10 @@ export function SearchScreen({ panelId }: { panelId?: string }) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [results, activeIndex, navigate]);
+
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }, [page]);
 
   useEffect(() => {
     if (activeIndex !== null) {
@@ -149,7 +154,7 @@ export function SearchScreen({ panelId }: { panelId?: string }) {
         <div className={`results-grid${panelId ? " with-panel" : ""}`} style={{ marginTop: 24 }}>
           <section aria-label="Результаты поиска">
             <span className="sr-only" role="status" aria-live="polite">
-              {search.data ? `Найдено ${search.data.results.length} гранул` : ""}
+              {search.data ? `Показаны ${(page - 1) * 20 + 1}–${(page - 1) * 20 + search.data.results.length} гранул` : ""}
             </span>
 
             {search.isPending ? (
@@ -173,7 +178,7 @@ export function SearchScreen({ panelId }: { panelId?: string }) {
               <>
                 <div className="results-head">
                   <span className="count">
-                    Найдено <b>{results.length}</b> гранул
+                    Показаны <b>{(page - 1) * 20 + 1}–{(page - 1) * 20 + results.length}</b>
                   </span>
                   <span className="took">{((search.data?.tookMs ?? 0) / 1000).toFixed(2)} с</span>
                   <span className="formula" title="Разложение релевантности">
@@ -191,6 +196,7 @@ export function SearchScreen({ panelId }: { panelId?: string }) {
                     />
                   ))}
                 </div>
+                <Pagination page={page} resultCount={results.length} onPage={setPage} />
               </>
             )}
           </section>

@@ -99,6 +99,7 @@ async def search(
     query: str,
     user_id: str | None = None,
     limit: int = Query(10, ge=1, le=MAX_SEARCH_LIMIT),
+    offset: int = Query(0, ge=0),
     threshold: float = Query(settings.search_default_threshold, ge=0.0, le=1.0),
     namespace: str | None = None,
     project_id: str | None = None,
@@ -108,12 +109,14 @@ async def search(
     status: GranuleStatus | None = None,
 ) -> list[dict[str, Any]]:
     """Hybrid-поиск (тот же JSON, что тул memory_search) + фильтры Фазы 5.1:
-    namespace/project_id, окно created_at, точный статус."""
+    namespace/project_id, окно created_at, точный статус. offset —
+    пагинация /ui (Фаза 5.2): слайс детерминированного ранжирования."""
     return await _call(
         TASK_SEARCH,
         query=query,
         user_id=user_id,
         limit=limit,
+        offset=offset,
         threshold=threshold,
         namespace=namespace,
         project_id=project_id,

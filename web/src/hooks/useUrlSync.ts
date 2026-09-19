@@ -10,13 +10,14 @@ import { useFilters, type FiltersSnapshot } from "../store/filters";
 const PERIODS: PeriodPreset[] = ["24h", "7d", "30d", "all"];
 const STATUSES: StatusFilter[] = ["asserted", "superseded", "retracted", "uncertain"];
 
-function snapshotToParams({ query, namespaces, status, period, project }: FiltersSnapshot): string {
+function snapshotToParams({ query, namespaces, status, period, project, page }: FiltersSnapshot): string {
   const next = new URLSearchParams();
   if (query) next.set("q", query);
   namespaces.forEach((n) => next.append("ns", n));
   if (status) next.set("status", status);
   if (period !== "all") next.set("period", period);
   if (project) next.set("project", project);
+  if (page > 1) next.set("page", String(page));
   return next.toString();
 }
 
@@ -34,6 +35,7 @@ export function useUrlSync(): void {
       status: STATUSES.includes(status as StatusFilter) ? (status as StatusFilter) : null,
       period: PERIODS.includes(period as PeriodPreset) ? (period as PeriodPreset) : "all",
       project: search.get("project"),
+      page: Math.max(1, parseInt(search.get("page") ?? "1", 10) || 1),
     });
   }, []);
 
