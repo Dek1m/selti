@@ -33,3 +33,22 @@ export function namespaceColor(uid: string | null): string {
 
 /** Link-type badge color — deterministic, from the same ladder. */
 export const linkTypeColor = ladderColor;
+
+// WebGL (sigma) paints with literal color strings — CSS custom properties
+// are invisible to it. Resolved values are cached per token.
+const resolvedTokens = new Map<string, string>();
+
+export function resolveCssColor(color: string): string {
+  if (!color.startsWith("var(")) return color;
+  const cached = resolvedTokens.get(color);
+  if (cached !== undefined) return cached;
+  let value = "#8A97AC"; // --sl-ns-default hex fallback (SSR/tests)
+  if (typeof getComputedStyle === "function") {
+    const css = getComputedStyle(document.documentElement)
+      .getPropertyValue(color.slice(4, -1))
+      .trim();
+    if (css) value = css;
+  }
+  resolvedTokens.set(color, value);
+  return value;
+}

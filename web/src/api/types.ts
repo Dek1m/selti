@@ -90,7 +90,7 @@ export interface NamespaceStat {
   last_updated: string | null;
 }
 
-/** GET /api/projects item (registry card, no stack) */
+/** GET /api/projects item (registry card, no stack) — _PROJECT_COLUMNS */
 export interface ProjectCard {
   id: string;
   slug: string;
@@ -98,5 +98,57 @@ export interface ProjectCard {
   description: string | null;
   kind: string;
   status: string;
+  local_path: string | null;
+  repo_url: string | null;
+}
+
+export interface ProjectLink {
+  link_type: string;
+  url: string;
+  title: string | null;
+}
+
+export interface ProjectTechnology {
+  name: string;
+  category: string | null;
+  docs_url: string | null;
+  version: string | null;
+  purpose: string | null;
+}
+
+/** GET /api/projects/{slug} — full card with stack */
+export interface ProjectDetail extends ProjectCard {
+  docs_url: string | null;
+  homepage_url: string | null;
   updated_at: string | null;
+  links: ProjectLink[];
+  technologies: ProjectTechnology[];
+}
+
+/** GET /api/contexts/{slug} — ProjectContext model («облачко знаний»)
+ * sections: {stack, decisions, code, insights, infra, …} — line arrays */
+export interface ProjectContext {
+  project_id: string;
+  content: string | null;
+  sections: Record<string, string[]>;
+  granule_count: number;
+  computed_at: string | null;
+  stale: boolean;
+}
+
+/** GET /health — readiness payload */
+export interface HealthPayload {
+  status: "ok" | "degraded";
+  server: string;
+  version: string;
+  checks: {
+    config?: {
+      dedup_enabled: boolean;
+      api_key_configured: boolean;
+      redis_configured: boolean;
+    };
+    postgres?: string;
+    redis?: string;
+    celery?: string;
+  };
 }

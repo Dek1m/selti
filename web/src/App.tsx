@@ -1,13 +1,32 @@
+import { lazy, Suspense } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useParams } from "react-router";
 import { Topbar } from "./components/Topbar";
 import { SearchScreen } from "./screens/SearchScreen";
-import { StubScreen } from "./components/StubScreen";
+import { ProjectsScreen } from "./screens/ProjectsScreen";
+import { StatsScreen } from "./screens/StatsScreen";
+
+// sigma + graphology weigh ~100KB gz — the constellation loads on demand
+const GraphScreen = lazy(() =>
+  import("./screens/GraphScreen").then((m) => ({ default: m.GraphScreen })),
+);
 
 /** /memory/:id keeps the search results behind it (§3): same screen + panel */
 function MemoryRoute() {
   const { id } = useParams<{ id: string }>();
   if (!id) return <Navigate to="/search" replace />;
   return <SearchScreen panelId={id} />;
+}
+
+/** Chunk-level spinner for the lazy graph screen */
+function GraphFallback() {
+  return (
+    <div className="graph-root">
+      <div className="state-block graph-empty">
+        <span className="pulse-dot big" aria-hidden="true" />
+        <h3>Пробуждаю WebGL…</h3>
+      </div>
+    </div>
+  );
 }
 
 export default function App() {
@@ -21,33 +40,13 @@ export default function App() {
         <Route
           path="/graph"
           element={
-            <StubScreen
-              icon="bi-diagram-3"
-              title="Созвездие собирается"
-              hint="Экран «Граф» (@react-sigma, WebGL) — в следующей итерации Фазы 5. Пока свет ищут через поиск."
-            />
+            <Suspense fallback={<GraphFallback />}>
+              <GraphScreen />
+            </Suspense>
           }
         />
-        <Route
-          path="/projects"
-          element={
-            <StubScreen
-              icon="bi-collection"
-              title="Проекты спят во тьме"
-              hint="Реестр проектов с облачками знаний — в следующей итерации Фазы 5."
-            />
-          }
-        />
-        <Route
-          path="/stats"
-          element={
-            <StubScreen
-              icon="bi-graph-up"
-              title="Глубина ещё не измерена"
-              hint="Дашборд метрик из /api/stats — в следующей итерации Фазы 5."
-            />
-          }
-        />
+        <Route path="/projects" element={<ProjectsScreen />} />
+        <Route path="/stats" element={<StatsScreen />} />
         <Route path="*" element={<Navigate to="/search" replace />} />
       </Routes>
     </BrowserRouter>

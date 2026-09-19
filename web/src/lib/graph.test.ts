@@ -1,0 +1,158 @@
+import { describe, expect, it } from "vitest";
+import type { RelationsPayload, SearchHit } from "../api/types";
+import { buildGraphModel, edgeThickness, nodeLabel, nodeSize } from "./graph";
+import { resolveCssColor } from "./colors";
+
+const hit = (id: string, score = 0.5, importance = 3, ns = "code_knowledge"): SearchHit =>
+  ({
+    id,
+    content: `контент гранулы ${id} с достаточно длинным текстом для обрезки подписи узла`,
+    metadata: {},
+    importance,
+    score,
+    project_id: null,
+    status: "asserted",
+    namespace: ns,
+    created_at: null,
+    last_accessed_at: null,
+    frozen: false,
+    score_rrf: null,
+    score_decay: null,
+    score_importance: null,
+  });
+
+const relations = (outgoing: Array<[string, string]>, incoming: Array<[string, string]> = []): RelationsPayload => ({
+  outgoing: outgoing.map(([target, linkType], i) => ({
+    id: `o${i}`,
+    source_id: "seed",
+    target_id: target,
+    target_name: null,
+    link_type: linkType,
+    description: null,
+    weight: 1,
+    metadata: {},
+    created_at: null,
+  })),
+  incoming: incoming.map(([source, linkType], i) => ({
+    id: `i${i}`,
+    source_id: source,
+    target_id: "seed",
+    target_name: null,
+    link_type: linkType,
+    description: null,
+    weight: 1,
+    metadata: {},
+    created_at: null,
+  })),
+});
+
+describe("buildGraphModel", () => {
+  it("seeds nodes from hits and expands relation neighbors", () => {
+    const model = buildGraphModel(
+      [hit("seed"), hit("other")],
+      new Map([["seed", relations([["n1", "related_to"], ["n2", "references"]], [["n3", "supports"]])]]),
+    );
+    expect(model.nodes.map((n) => n.id)).toEqual(["seed", "other", "n1", "n2", "n3"]);
+    expect(model.edges.map((e) => `${e.source}>${e.target}`)).toEqual(["seed>n1", "seed>n2", "n3>seed"]);
+  });
+
+  it("marks neighbors as non-seed satellites with no importance", () => {
+    const model = buildGraphModel([hit("seed")], new Map([["seed", relations([["n1", "related_to"]])]]));
+    const neighbor = model.nodes.find((n) => n.id === "n1");
+    expect(neighbor?.seed).toBe(false);
+    expect(neighbor?.importance).toBeNull();
+    expect(neighbor?.namespace).toBeNull();
+  });
+
+  it("dedups identical (source, target, linkType) triples", () => {
+    const once = relations([["n1", "related_to"]]).outgoing;
+    const payload: RelationsPayload = {
+      outgoing: [...once, ...once.map((r, i) => ({ ...r, id: `dup${i}` }))],
+      incoming: [],
+    };
+    const model = buildGraphModel([hit("seed")], new Map([["seed", payload]]));
+    expect(model.edges.length).toBe(1);
+  });
+
+  it("keeps opposite directions of the same pair as separate edges", () => {
+    const payload: RelationsPayload = {
+      outgoing: relations([["n1", "related_to"]]).outgoing,
+      incoming: relations([], [["n1", "related_to"]]).incoming,
+    };
+    const model = buildGraphModel([hit("seed")], new Map([["seed", payload]]));
+    expect(model.edges.length).toBe(2);
+  });
+
+  it("drops self-loops and edges with no target", () => {
+    const payload = relations([["seed", "self_link"], ["", "broken"], ["n1", "ok"]]);
+    const model = buildGraphModel([hit("seed")], new Map([["seed", payload]]));
+    expect(model.edges.length).toBe(1);
+    expect(model.edges[0].target).toBe("n1");
+  });
+
+  it("respects the node cap, dropping edges outside the survivor set", () => {
+    const many = Array.from({ length: 10 }, (_, i) => hit(`h${i}`));
+    const payload = relations(Array.from({ length: 20 }, (_, i) => [`n${i}`, "related_to"]));
+    const model = buildGraphModel(many, new Map([["h0", payload]]), { maxNodes: 15 });
+    expect(model.nodes.length).toBe(15);
+    expect(model.edges.every((e) => model.nodes.some((n) => n.id === e.source) && model.nodes.some((n) => n.id === e.target))).toBe(true);
+  });
+
+  it("expands only the first seedExpansion seeds", () => {
+    const two = [hit("a"), hit("b")];
+    const map = new Map([
+      ["a", relations([["na", "related_to"]])],
+      ["b", relations([["nb", "related_to"]])],
+    ]);
+    const model = buildGraphModel(two, map, { seedExpansion: 1 });
+    expect(model.nodes.map((n) => n.id)).toContain("na");
+    expect(model.nodes.map((n) => n.id)).not.toContain("nb");
+  });
+
+  it("returns empty model for empty input", () => {
+    expect(buildGraphModel([], new Map())).toEqual({ nodes: [], edges: [] });
+  });
+});
+
+describe("nodeLabel", () => {
+  it("prefers metadata.entity_name", () => {
+    const named = { ...hit("x"), metadata: { entity_name: "ADR-018" } };
+    expect(nodeLabel("x", named)).toBe("ADR-018");
+  });
+
+  it("truncates long content to 60 chars with an ellipsis", () => {
+    const label = nodeLabel("x", hit("x"));
+    expect(label.length).toBe(61);
+    expect(label.endsWith("…")).toBe(true);
+  });
+
+  it("falls back to id head when no hit is given", () => {
+    expect(nodeLabel("12345678-9abc")).toBe("12345678");
+  });
+});
+
+describe("sigma attribute mapping", () => {
+  it("maps importance 1–5 onto a 4–13px radius", () => {
+    expect(nodeSize({ id: "x", label: "x", namespace: null, importance: 1, seed: true })).toBe(4);
+    expect(nodeSize({ id: "x", label: "x", namespace: null, importance: 5, seed: true })).toBeCloseTo(13);
+    expect(nodeSize({ id: "x", label: "x", namespace: null, importance: null, seed: false })).toBe(4);
+  });
+
+  it("clamps edge weight onto a 1–3px thickness", () => {
+    expect(edgeThickness(1)).toBe(1);
+    expect(edgeThickness(2.5)).toBe(2.5);
+    expect(edgeThickness(9)).toBe(3);
+    expect(edgeThickness(0)).toBe(1);
+  });
+});
+
+describe("resolveCssColor", () => {
+  it("passes literal colors through", () => {
+    expect(resolveCssColor("#FF8E7A")).toBe("#FF8E7A");
+  });
+
+  it("resolves var() tokens to the palette fallback when getComputedStyle is absent", () => {
+    // node test env: no DOM — the slate default keeps WebGL painting sane
+    expect(resolveCssColor("var(--sl-ns-code-knowledge)")).toBe("#8A97AC");
+  });
+});

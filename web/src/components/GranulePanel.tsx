@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { useLocation, useNavigate } from "react-router";
+import { Link, useLocation, useNavigate } from "react-router";
 import { getMemory, getRelations, getSimilar } from "../api/selti";
 import type { MemoryRecord, SearchHit } from "../api/types";
 import { decomposeScore, factorsFromHit, formatScore } from "../lib/score";
@@ -286,9 +286,9 @@ export function GranulePanel({ id, onClose, centered = false }: { id: string; on
         <button className="btn primary" onClick={() => setShowSimilar((v) => !v)}>
           <i className="bi bi-stars" aria-hidden="true" /> {showSimilar ? "Скрыть похожие" : "Показать похожие"}
         </button>
-        <a className="btn" href="/graph" aria-disabled="true" title="Экран «Граф» — в следующей итерации">
+        <Link className="btn" to="/graph" title="Созвездие на WebGL-графе">
           <i className="bi bi-diagram-3" aria-hidden="true" /> Открыть в графе
-        </a>
+        </Link>
       </div>
     </aside>
   );

@@ -53,7 +53,7 @@ export const GranuleCard = memo(function GranuleCard({
           </span>
           {hit.project_id && <span>{hit.project_id}</span>}
           <span className="mono">{timeAgo(hit.created_at)}</span>
-          <span className="id">{hit.id.slice(0, 8)}</span>
+          <span className="id" title={hit.id}>{hit.id.slice(0, 8)}</span>
           {hit.frozen && (
             <span className="badge frozen">
               <i className="bi bi-snow" aria-hidden="true" /> frozen

@@ -5,10 +5,13 @@
 
 import { apiGet } from "./client";
 import type {
+  HealthPayload,
   MemoryDetail,
   NamespaceInfo,
   NamespaceStat,
   ProjectCard,
+  ProjectContext,
+  ProjectDetail,
   RelationsPayload,
   SearchHit,
 } from "./types";
@@ -112,4 +115,16 @@ export function getStats(): Promise<NamespaceStat[]> {
 
 export function getProjects(): Promise<{ projects: ProjectCard[] }> {
   return apiGet<{ projects: ProjectCard[] }>("/api/projects");
+}
+
+export function getProject(slug: string): Promise<ProjectDetail> {
+  return apiGet<ProjectDetail>(`/api/projects/${encodeURIComponent(slug)}`);
+}
+
+export function getContext(slug: string): Promise<ProjectContext> {
+  return apiGet<ProjectContext>(`/api/contexts/${encodeURIComponent(slug)}`);
+}
+
+export function getHealth(): Promise<HealthPayload> {
+  return apiGet<HealthPayload>("/health");
 }

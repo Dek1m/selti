@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import "bootstrap-icons/font/bootstrap-icons.css";
 import "./styles/tokens.css";
 import "./styles/base.css";
+import "./styles/screens.css";
 import App from "./App";
 
 // One retry is enough for an internal tool — errors must surface fast
