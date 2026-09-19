@@ -130,7 +130,7 @@ def repository():
         return MemoryListResult(items=items, total=len(items))
 
     repo.list = AsyncMock(
-        side_effect=lambda **kw: _list_items(kw["namespace_id"])
+        side_effect=lambda **kw: _list_items(f"ns-{kw['namespace']}")
     )
     return repo
 

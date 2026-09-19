@@ -873,11 +873,8 @@ class MemoryService:
 
         granule_count = 0
         for uid, section in _CONTEXT_SECTION_MAP.items():
-            ns = await self.ns_repo.get_by_uid(uid)
-            if ns is None:
-                continue
             result = await self.repository.list(
-                namespace_id=ns.id, project_id=record.id, limit=40
+                namespace=uid, project_id=record.id, limit=40
             )
             ranked = self._rank_candidates(
                 result.items, self.config.cloud_recency_half_life_days
