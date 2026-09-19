@@ -1,0 +1,1060 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Argenta Team — команда, которая помнит всё</title>
+<meta name="description" content="Argenta Team: память, платформы, агенты и инфраструктура. Шесть проектов, живущих в одном графе знаний. Открыть память — ai.atom.ui/memory.">
+<meta name="theme-color" content="#060A12">
+<meta property="og:title" content="Argenta Team — команда, которая помнит всё">
+<meta property="og:description" content="Память, платформы, агенты и инфраструктура: шесть проектов Argenta, живущих в одном графе знаний.">
+<meta property="og:type" content="website">
+<!-- Inline favicon: three-node constellation mark -->
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg stroke='%23273354' stroke-width='1.4'%3E%3Cline x1='12' y1='7' x2='6' y2='17'/%3E%3Cline x1='12' y1='7' x2='18' y2='17'/%3E%3C/g%3E%3Ccircle cx='12' cy='7' r='3' fill='%235FE8C8'/%3E%3Ccircle cx='6' cy='17' r='2.4' fill='%234DC9FF'/%3E%3Ccircle cx='18' cy='17' r='2.4' fill='%23A78BFF'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   Argenta Team landing — "Deep Lumen" design language
+   Tokens mirror selti WEB_UI_DESIGN.md (--sl-* contract)
+   ============================================================ */
+:root {
+  /* Surfaces — water depth: the higher the layer, the lighter */
+  --sl-bg-abyss:   #060A12;
+  --sl-bg-deep:    #0A101B;
+  --sl-bg-shell:   #0E1524;
+  --sl-bg-raised:  #141D30;
+  --sl-bg-inset:   #080D16;
+
+  /* Borders */
+  --sl-border:        #1B2540;
+  --sl-border-strong: #273354;
+
+  /* Text */
+  --sl-text:   #E8EEF7;
+  --sl-text-2: #9DACC6;
+  --sl-text-3: #63728F;
+
+  /* Accent — bioluminescence */
+  --sl-accent:        #5FE8C8;
+  --sl-accent-bright: #79EFD3; /* hover tint of the accent */
+  --sl-accent-dim:  rgba(95, 232, 200, 0.14);
+  --sl-accent-ink:  #06251E;
+  --sl-accent-glow: 0 0 24px rgba(95, 232, 200, 0.20);
+
+  /* Project spectrum (semantic hues from the Deep Lumen ladder) */
+  --sl-p-pearl:  #5FE8C8;  /* selti — the pearl          */
+  --sl-p-code:   #4DC9FF;  /* code projects — azure      */
+  --sl-p-org:    #A78BFF;  /* org node — iris            */
+  --sl-p-space:  #86E3A0;  /* workspace — mint           */
+
+  /* Typography */
+  --sl-font-display: "Sora", "Inter", system-ui, sans-serif;
+  --sl-font-body:    "Inter", system-ui, sans-serif;
+  --sl-font-mono:    "JetBrains Mono", ui-monospace, monospace;
+
+  /* Spacing — 4px base */
+  --sl-s-2: 8px;  --sl-s-3: 12px; --sl-s-4: 16px;
+  --sl-s-5: 24px; --sl-s-6: 32px; --sl-s-7: 48px; --sl-s-8: 64px;
+
+  /* Radii */
+  --sl-r-md: 10px;
+  --sl-r-lg: 16px;
+  --sl-r-xl: 24px;
+  --sl-r-full: 999px;
+
+  /* Elevation — always blue-ish, never pure black */
+  --sl-shadow-1: 0 2px 8px  rgba(2, 6, 14, 0.50);
+  --sl-shadow-2: 0 8px 32px rgba(2, 6, 14, 0.60);
+
+  /* Motion */
+  --sl-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --sl-dur: 250ms;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  background: var(--sl-bg-abyss);
+  /* Light sinks from above: the water metaphor, kept very subtle */
+  background-image: linear-gradient(180deg, #0B1220 0%, var(--sl-bg-abyss) 480px);
+  background-repeat: no-repeat;
+  color: var(--sl-text);
+  font-family: var(--sl-font-body);
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+::selection { background: rgba(95, 232, 200, 0.25); }
+
+a { color: var(--sl-accent); text-decoration: none; }
+
+:focus-visible {
+  outline: 2px solid var(--sl-accent);
+  outline-offset: 2px;
+  box-shadow: var(--sl-accent-glow);
+  border-radius: 4px;
+}
+
+.container {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 0 var(--sl-s-5);
+}
+
+/* ---------- Header ---------- */
+.site-header {
+  border-bottom: 1px solid rgba(27, 37, 64, 0.6);
+  background: rgba(6, 10, 18, 0.72);
+  backdrop-filter: blur(10px);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.site-header .container {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 64px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sl-s-3);
+  color: var(--sl-text);
+}
+
+.brand svg { display: block; }
+
+.brand-name {
+  font-family: var(--sl-font-display);
+  font-weight: 600;
+  font-size: 17px;
+  letter-spacing: 0.01em;
+}
+
+.header-nav {
+  display: flex;
+  align-items: center;
+  gap: var(--sl-s-5);
+}
+
+.header-nav a {
+  color: var(--sl-text-2);
+  font-size: 14px;
+  font-weight: 500;
+  transition: color var(--sl-dur) var(--sl-ease);
+}
+
+.header-nav a:hover { color: var(--sl-text); }
+
+.header-nav .domain {
+  font-family: var(--sl-font-mono);
+  font-size: 12.5px;
+  color: var(--sl-text-3);
+}
+
+/* ---------- Hero ---------- */
+.hero {
+  text-align: center;
+  padding: calc(var(--sl-s-8) + 24px) 0 var(--sl-s-6);
+}
+
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sl-s-2);
+  font-family: var(--sl-font-mono);
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--sl-text-3);
+}
+
+.eyebrow::before,
+.eyebrow::after {
+  content: "";
+  width: 24px;
+  height: 1px;
+  background: var(--sl-border-strong);
+}
+
+.hero h1 {
+  font-family: var(--sl-font-display);
+  font-size: clamp(34px, 5.4vw, 58px);
+  font-weight: 600;
+  line-height: 1.12;
+  letter-spacing: -0.02em;
+  margin: var(--sl-s-4) auto var(--sl-s-4);
+  max-width: 16ch;
+}
+
+.hero h1 .lumen {
+  color: var(--sl-accent);
+  text-shadow: 0 0 32px rgba(95, 232, 200, 0.35);
+}
+
+.hero-sub {
+  color: var(--sl-text-2);
+  font-size: clamp(15px, 1.6vw, 18px);
+  max-width: 56ch;
+  margin: 0 auto var(--sl-s-6);
+}
+
+.hero-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sl-s-4);
+  flex-wrap: wrap;
+}
+
+/* Primary CTA — bioluminescent pearl button */
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  height: 54px;
+  padding: 0 30px;
+  border: none;
+  border-radius: var(--sl-r-full);
+  background: var(--sl-accent);
+  color: var(--sl-accent-ink);
+  font-family: var(--sl-font-body);
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 0 0 rgba(95, 232, 200, 0);
+  transition: box-shadow var(--sl-dur) var(--sl-ease),
+              transform var(--sl-dur) var(--sl-ease),
+              background var(--sl-dur) var(--sl-ease);
+}
+
+.btn-primary:hover {
+  background: var(--sl-accent-bright);
+  box-shadow: 0 0 36px rgba(95, 232, 200, 0.35);
+}
+
+.btn-primary:active { transform: scale(0.98); }
+
+.btn-primary .arrow { transition: transform var(--sl-dur) var(--sl-ease); }
+.btn-primary:hover .arrow { transform: translateX(3px); }
+
+/* Ghost secondary action */
+.btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 54px;
+  padding: 0 24px;
+  border-radius: var(--sl-r-full);
+  border: 1px solid var(--sl-border-strong);
+  color: var(--sl-text-2);
+  font-size: 15px;
+  font-weight: 500;
+  transition: border-color var(--sl-dur) var(--sl-ease),
+              color var(--sl-dur) var(--sl-ease),
+              background var(--sl-dur) var(--sl-ease);
+}
+
+.btn-ghost:hover {
+  border-color: var(--sl-accent);
+  color: var(--sl-text);
+  background: rgba(95, 232, 200, 0.06);
+}
+
+/* ---------- Graph scene ---------- */
+.scene {
+  position: relative;
+  height: clamp(420px, 58vh, 580px);
+  border-top: 1px solid rgba(27, 37, 64, 0.5);
+  border-bottom: 1px solid rgba(27, 37, 64, 0.5);
+  background: var(--sl-bg-deep);
+  overflow: hidden;
+}
+
+.scene canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.scene-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  font-family: var(--sl-font-mono);
+  font-size: 12px;
+  color: var(--sl-text-3);
+  pointer-events: none;
+  transition: opacity var(--sl-dur) var(--sl-ease);
+}
+
+.scene.is-hover .scene-hint { opacity: 0; }
+
+.scene-legend {
+  position: absolute;
+  right: 16px;
+  top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 14px;
+  background: rgba(8, 13, 22, 0.82);
+  border: 1px solid var(--sl-border);
+  border-radius: var(--sl-r-md);
+  font-size: 12.5px;
+  color: var(--sl-text-2);
+}
+
+.scene-legend span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.dot--pearl { background: var(--sl-p-pearl); box-shadow: 0 0 8px rgba(95, 232, 200, 0.6); }
+.dot--code  { background: var(--sl-p-code); }
+.dot--org   { background: var(--sl-p-org); }
+.dot--space { background: var(--sl-p-space); }
+
+.noscript-note {
+  text-align: center;
+  padding: var(--sl-s-4);
+  color: var(--sl-text-3);
+  font-size: 13px;
+}
+
+/* ---------- Projects catalog ---------- */
+.projects { padding: var(--sl-s-8) 0 var(--sl-s-7); }
+
+.section-head { margin-bottom: var(--sl-s-6); }
+
+.section-head h2 {
+  font-family: var(--sl-font-display);
+  font-size: clamp(24px, 3vw, 32px);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.section-head p {
+  color: var(--sl-text-2);
+  margin-top: var(--sl-s-2);
+  max-width: 60ch;
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: var(--sl-s-4);
+}
+
+.card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sl-s-3);
+  padding: var(--sl-s-5) var(--sl-s-5) var(--sl-s-4) calc(var(--sl-s-5) + 3px);
+  background: var(--sl-bg-shell);
+  border: 1px solid var(--sl-border);
+  border-radius: var(--sl-r-lg);
+  box-shadow: var(--sl-shadow-1);
+  transition: background var(--sl-dur) var(--sl-ease),
+              border-color var(--sl-dur) var(--sl-ease),
+              transform var(--sl-dur) var(--sl-ease),
+              box-shadow var(--sl-dur) var(--sl-ease);
+  cursor: default;
+}
+
+.card:hover,
+.card:focus-visible,
+.card.is-linked {
+  background: var(--sl-bg-raised);
+  border-color: var(--sl-border-strong);
+  transform: translateY(-2px);
+  box-shadow: var(--sl-shadow-2);
+}
+
+/* Spine — semantic color stripe, 3px by default, 4px on hover */
+.card::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: var(--sl-s-5);
+  bottom: var(--sl-s-4);
+  width: 3px;
+  border-radius: 2px;
+  background: var(--spine, var(--sl-border-strong));
+  transition: width var(--sl-dur) var(--sl-ease);
+}
+
+.card:hover::before,
+.card:focus-visible::before,
+.card.is-linked::before { width: 4px; }
+
+.card--pearl { --spine: var(--sl-p-pearl); }
+.card--code  { --spine: var(--sl-p-code); }
+.card--org   { --spine: var(--sl-p-org); }
+.card--space { --spine: var(--sl-p-space); }
+
+.card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sl-s-2);
+  flex-wrap: wrap;
+}
+
+.card-head h3 {
+  font-family: var(--sl-font-mono);
+  font-size: 19px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.card--pearl .card-head h3 {
+  color: var(--sl-accent);
+  text-shadow: 0 0 18px rgba(95, 232, 200, 0.30);
+}
+
+.card-type {
+  font-family: var(--sl-font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--sl-text-3);
+  border: 1px solid var(--sl-border);
+  border-radius: var(--sl-r-full);
+  padding: 3px 10px;
+  white-space: nowrap;
+}
+
+.card-pearl-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--sl-accent);
+  background: var(--sl-accent-dim);
+  border-radius: var(--sl-r-full);
+  padding: 3px 10px;
+  white-space: nowrap;
+}
+
+.card-pearl-badge .dot { width: 6px; height: 6px; }
+
+.card p {
+  color: var(--sl-text-2);
+  font-size: 14.5px;
+  line-height: 1.55;
+}
+
+.card-tags {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: auto;
+}
+
+.card-tags li {
+  font-family: var(--sl-font-mono);
+  font-size: 11.5px;
+  color: var(--sl-text-2);
+  background: var(--sl-bg-inset);
+  border: 1px solid var(--sl-border);
+  border-radius: var(--sl-r-full);
+  padding: 3px 10px;
+}
+
+/* Brief glow flash after "jump to card" from the graph */
+.card.flash {
+  border-color: var(--sl-accent);
+  box-shadow: 0 0 0 1px var(--sl-accent), 0 0 32px rgba(95, 232, 200, 0.18);
+  transition: border-color 200ms var(--sl-ease), box-shadow 200ms var(--sl-ease);
+}
+
+/* ---------- Final CTA ---------- */
+.final-cta {
+  padding: var(--sl-s-7) 0 var(--sl-s-8);
+  text-align: center;
+}
+
+.final-cta .panel {
+  background: var(--sl-bg-shell);
+  border: 1px solid var(--sl-border);
+  border-radius: var(--sl-r-xl);
+  box-shadow: var(--sl-shadow-2);
+  padding: var(--sl-s-7) var(--sl-s-5);
+}
+
+.final-cta h2 {
+  font-family: var(--sl-font-display);
+  font-size: clamp(22px, 2.8vw, 30px);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin-bottom: var(--sl-s-3);
+}
+
+.final-cta p {
+  color: var(--sl-text-2);
+  max-width: 52ch;
+  margin: 0 auto var(--sl-s-5);
+}
+
+/* ---------- Footer ---------- */
+.site-footer {
+  border-top: 1px solid rgba(27, 37, 64, 0.6);
+  padding: var(--sl-s-5) 0;
+}
+
+.site-footer .container {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sl-s-3);
+  flex-wrap: wrap;
+}
+
+.footer-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sl-s-2);
+  color: var(--sl-text-2);
+  font-size: 14px;
+}
+
+.footer-brand b {
+  color: var(--sl-text);
+  font-weight: 600;
+}
+
+.footer-year {
+  font-family: var(--sl-font-mono);
+  font-size: 13px;
+  color: var(--sl-text-3);
+}
+
+/* ---------- Responsive ---------- */
+@media (max-width: 720px) {
+  .hero { padding-top: var(--sl-s-8); }
+  .header-nav .domain { display: none; }
+  .scene { height: clamp(460px, 78vh, 620px); }
+  .scene-legend { right: 12px; top: 12px; padding: 8px 10px; font-size: 11.5px; }
+  .card-grid { grid-template-columns: 1fr; }
+  .final-cta .panel { padding: var(--sl-s-6) var(--sl-s-4); }
+}
+
+/* ---------- Reduced motion: opacity-only, static scene ---------- */
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+</style>
+</head>
+<body>
+
+<header class="site-header">
+  <div class="container">
+    <a class="brand" href="#" aria-label="Argenta Team — на главную">
+      <!-- Constellation mark: three linked nodes -->
+      <svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true">
+        <g stroke="#273354" stroke-width="1.5">
+          <line x1="13" y1="7" x2="6.5" y2="18.5"/>
+          <line x1="13" y1="7" x2="19.5" y2="18.5"/>
+          <line x1="6.5" y1="18.5" x2="19.5" y2="18.5" stroke-dasharray="2 3"/>
+        </g>
+        <circle cx="13" cy="7" r="3.4" fill="#5FE8C8"/>
+        <circle cx="6.5" cy="18.5" r="2.7" fill="#4DC9FF"/>
+        <circle cx="19.5" cy="18.5" r="2.7" fill="#A78BFF"/>
+      </svg>
+      <span class="brand-name">Argenta Team</span>
+    </a>
+    <nav class="header-nav" aria-label="Основная навигация">
+      <a href="#projects">Проекты</a>
+      <span class="domain">ai.atom.ui</span>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <section class="hero container">
+    <p class="eyebrow">Argenta Team</p>
+    <h1>Команда, которая <span class="lumen">помнит</span> всё</h1>
+    <p class="hero-sub">
+      Память, платформы, агенты и инфраструктура — шесть проектов,
+      живущих в одном графе знаний.
+    </p>
+    <div class="hero-actions">
+      <a class="btn-primary" href="https://ai.atom.ui/memory/">
+        Открыть память
+        <span class="arrow" aria-hidden="true">→</span>
+      </a>
+      <a class="btn-ghost" href="#projects">Смотреть проекты</a>
+    </div>
+  </section>
+
+  <!-- Interactive constellation of projects -->
+  <section class="scene" aria-label="Граф проектов Argenta: интерактивная сцена. Ниже — текстовый каталог всех проектов.">
+    <canvas id="graph"></canvas>
+    <noscript>
+      <p class="noscript-note">Интерактивная сцена требует JavaScript — каталог проектов ниже.</p>
+    </noscript>
+    <div class="scene-legend" aria-hidden="true">
+      <span><i class="dot dot--pearl"></i>жемчужина — selti</span>
+      <span><i class="dot dot--code"></i>код</span>
+      <span><i class="dot dot--org"></i>команда</span>
+      <span><i class="dot dot--space"></i>пространство</span>
+    </div>
+    <p class="scene-hint">наведите на узел — он покажет связи · клик ведёт к карточке</p>
+  </section>
+
+  <!-- Catalog -->
+  <section class="projects container" id="projects">
+    <div class="section-head">
+      <h2>Созвездие проектов</h2>
+      <p>Шесть узлов: от сервера памяти до рабочего пространства.
+         Каждый проект — часть одного графа.</p>
+    </div>
+
+    <div class="card-grid">
+
+      <article class="card card--pearl" id="card-selti" data-project="selti" tabindex="0">
+        <div class="card-head">
+          <h3>selti</h3>
+          <span class="card-pearl-badge"><i class="dot dot--pearl"></i>ключевой проект</span>
+          <span class="card-type">код</span>
+        </div>
+        <p>Сервер памяти команды: MCP + REST, гибридный поиск,
+           жизненный цикл гранул и граф знаний.</p>
+        <ul class="card-tags">
+          <li>Python</li><li>FastAPI</li><li>PostgreSQL</li><li>Qdrant</li>
+        </ul>
+      </article>
+
+      <article class="card card--code" id="card-mia" data-project="mia" tabindex="0">
+        <div class="card-head">
+          <h3>mia</h3>
+          <span class="card-type">код</span>
+        </div>
+        <p>Платформенные модули для сервисов команды:
+           auth, admin, preferences.</p>
+        <ul class="card-tags">
+          <li>auth</li><li>admin</li><li>preferences</li>
+        </ul>
+      </article>
+
+      <article class="card card--code" id="card-belle" data-project="belle" tabindex="0">
+        <div class="card-head">
+          <h3>belle</h3>
+          <span class="card-type">код</span>
+        </div>
+        <p>Сервис и воркер-инфраструктура
+           на выделенном сервере.</p>
+        <ul class="card-tags">
+          <li>Docker</li><li>Nginx</li><li>Workers</li>
+        </ul>
+      </article>
+
+      <article class="card card--code" id="card-albedo" data-project="albedo" tabindex="0">
+        <div class="card-head">
+          <h3>albedo</h3>
+          <span class="card-type">код</span>
+        </div>
+        <p>AI Agent &amp; Infrastructure Orchestrator.</p>
+        <ul class="card-tags">
+          <li>AI Agents</li><li>Orchestration</li><li>LLM</li>
+        </ul>
+      </article>
+
+      <article class="card card--org" id="card-argenta-team" data-project="argenta-team" tabindex="0">
+        <div class="card-head">
+          <h3>argenta-team</h3>
+          <span class="card-type">команда</span>
+        </div>
+        <p>Организационный узел: команда,
+           её стандарты и правила работы.</p>
+        <ul class="card-tags">
+          <li>Standards</li><li>Culture</li>
+        </ul>
+      </article>
+
+      <article class="card card--space" id="card-zcode-local" data-project="zcode-local" tabindex="0">
+        <div class="card-head">
+          <h3>zcode-local</h3>
+          <span class="card-type">пространство</span>
+        </div>
+        <p>Рабочее пространство разработки
+           команды на ZCode.</p>
+        <ul class="card-tags">
+          <li>ZCode</li><li>Agents</li><li>Workspace</li>
+        </ul>
+      </article>
+
+    </div>
+  </section>
+
+  <!-- Final CTA -->
+  <section class="final-cta container">
+    <div class="panel">
+      <h2>Память уже ждёт в глубине</h2>
+      <p>Публичный вход в память команды: поиск по гранулам,
+         жизненный цикл знаний и живой граф.</p>
+      <a class="btn-primary" href="https://ai.atom.ui/memory/">
+        Открыть память
+        <span class="arrow" aria-hidden="true">→</span>
+      </a>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="container">
+    <div class="footer-brand">
+      <svg width="18" height="18" viewBox="0 0 26 26" aria-hidden="true">
+        <g stroke="#273354" stroke-width="1.8">
+          <line x1="13" y1="7" x2="6.5" y2="18.5"/>
+          <line x1="13" y1="7" x2="19.5" y2="18.5"/>
+        </g>
+        <circle cx="13" cy="7" r="3.4" fill="#5FE8C8"/>
+        <circle cx="6.5" cy="18.5" r="2.7" fill="#4DC9FF"/>
+        <circle cx="19.5" cy="18.5" r="2.7" fill="#A78BFF"/>
+      </svg>
+      <span><b>Argenta Team</b> · ai.atom.ui</span>
+    </div>
+    <span class="footer-year">2026</span>
+  </div>
+</footer>
+
+<script>
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('graph');
+  const scene = canvas.parentElement;
+  const ctx = canvas.getContext('2d');
+  const reducedMq = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+  /* ------- Data: nodes and edges of the project graph ------- */
+  const COLORS = {
+    pearl: '#5FE8C8',
+    code:  '#4DC9FF',
+    org:   '#A78BFF',
+    space: '#86E3A0'
+  };
+
+  const NODES = [
+    { id: 'selti',        label: 'selti',        type: 'pearl', r: 11 },
+    { id: 'argenta-team', label: 'argenta-team', type: 'org',   r: 8  },
+    { id: 'mia',          label: 'mia',          type: 'code',  r: 6.5 },
+    { id: 'belle',        label: 'belle',        type: 'code',  r: 6.5 },
+    { id: 'albedo',       label: 'albedo',       type: 'code',  r: 6.5 },
+    { id: 'zcode-local',  label: 'zcode-local',  type: 'space', r: 6.5 }
+  ];
+
+  // selti is the focus; argenta-team is the foundation; the rest orbit it
+  const EDGES = [
+    ['selti', 'mia'],
+    ['selti', 'belle'],
+    ['selti', 'albedo'],
+    ['argenta-team', 'selti'],
+    ['argenta-team', 'mia'],
+    ['argenta-team', 'belle'],
+    ['argenta-team', 'albedo'],
+    ['argenta-team', 'zcode-local']
+  ];
+
+  // Base positions (normalized 0..1): wide desktop vs narrow/tall layout
+  const LAYOUT_WIDE = {
+    'selti':        [0.50, 0.46],
+    'argenta-team': [0.50, 0.90],
+    'albedo':       [0.20, 0.24],
+    'mia':          [0.80, 0.22],
+    'belle':        [0.79, 0.66],
+    'zcode-local':  [0.21, 0.68]
+  };
+  const LAYOUT_NARROW = {
+    'selti':        [0.50, 0.38],
+    'argenta-team': [0.50, 0.92],
+    'albedo':       [0.27, 0.15],
+    'mia':          [0.73, 0.13],
+    'belle':        [0.75, 0.62],
+    'zcode-local':  [0.25, 0.64]
+  };
+
+  // Ambient dust — sleeping memory in the depth (very dim)
+  const DUST = Array.from({ length: 36 }, (_, i) => ({
+    x: (i * 137.5) % 100 / 100,
+    y: (i * 61.8) % 100 / 100,
+    r: 0.6 + (i % 3) * 0.4,
+    a: 0.04 + (i % 5) * 0.02,
+    sp: 0.5 + (i % 4) * 0.3,
+    ph: i * 1.7
+  }));
+
+  const state = {
+    w: 0, h: 0, dpr: 1,
+    layout: LAYOUT_WIDE,
+    hoverId: null,
+    edges: EDGES.map(([a, b]) => ({ a, b, alpha: 0.5 }))
+  };
+
+  function byId(id) {
+    return NODES.find(n => n.id === id);
+  }
+
+  /* ------- Geometry ------- */
+  function resize() {
+    state.dpr = Math.min(window.devicePixelRatio || 1, 2);
+    state.w = scene.clientWidth;
+    state.h = scene.clientHeight;
+    canvas.width = Math.round(state.w * state.dpr);
+    canvas.height = Math.round(state.h * state.dpr);
+    ctx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
+    // Portrait-ish scenes switch to the taller arrangement
+    state.layout = state.w / state.h < 1.05 ? LAYOUT_NARROW : LAYOUT_WIDE;
+  }
+
+  // Gentle deterministic drift around the base point
+  function nodePos(node, t) {
+    const [nx, ny] = state.layout[node.id];
+    const still = reducedMq.matches;
+    const ax = still ? 0 : Math.sin(t * 0.45 + node.r * 2.1) * 7;
+    const ay = still ? 0 : Math.cos(t * 0.38 + node.r * 1.3) * 5;
+    const labelPad = 30;
+    const x = Math.min(Math.max(nx * state.w + ax, labelPad), state.w - labelPad);
+    const y = ny * state.h + ay;
+    return { x, y };
+  }
+
+  /* ------- Rendering ------- */
+  function hexToRgba(hex, alpha) {
+    const n = parseInt(hex.slice(1), 16);
+    return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+  }
+
+  function drawBackground(t) {
+    // Light sinks from above; the pearl emits its own halo (glow = data)
+    const bg = ctx.createLinearGradient(0, 0, 0, state.h);
+    bg.addColorStop(0, '#0B1220');
+    bg.addColorStop(1, '#060A12');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, state.w, state.h);
+
+    const pearl = nodePos(byId('selti'), t);
+    const halo = ctx.createRadialGradient(pearl.x, pearl.y, 0, pearl.x, pearl.y, Math.max(state.w, state.h) * 0.42);
+    halo.addColorStop(0, 'rgba(95, 232, 200, 0.07)');
+    halo.addColorStop(1, 'rgba(95, 232, 200, 0)');
+    ctx.fillStyle = halo;
+    ctx.fillRect(0, 0, state.w, state.h);
+  }
+
+  function drawDust(t) {
+    if (reducedMq.matches) return; // static depth when motion is reduced
+    for (const d of DUST) {
+      const x = d.x * state.w + Math.sin(t * 0.1 * d.sp + d.ph) * 14;
+      const y = d.y * state.h + Math.cos(t * 0.08 * d.sp + d.ph) * 10;
+      ctx.beginPath();
+      ctx.arc(x, y, d.r, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(157, 172, 198, ${d.a})`;
+      ctx.fill();
+    }
+  }
+
+  function drawEdges(t) {
+    const hover = state.hoverId;
+    for (const e of state.edges) {
+      const p1 = nodePos(byId(e.a), t);
+      const p2 = nodePos(byId(e.b), t);
+      const active = hover === e.a || hover === e.b;
+      const target = hover ? (active ? 1 : 0.12) : 0.5;
+      // Soft alpha interpolation — no flicker
+      e.alpha += (target - e.alpha) * 0.12;
+
+      // Synapse curve: slight perpendicular bow
+      const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
+      const dx = p2.x - p1.x, dy = p2.y - p1.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const cx = mx - (dy / len) * len * 0.10;
+      const cy = my + (dx / len) * len * 0.10;
+
+      ctx.beginPath();
+      ctx.moveTo(p1.x, p1.y);
+      ctx.quadraticCurveTo(cx, cy, p2.x, p2.y);
+
+      if (active) {
+        ctx.strokeStyle = hexToRgba(COLORS.pearl, 0.28 + e.alpha * 0.55);
+        ctx.lineWidth = 1.6;
+      } else {
+        ctx.strokeStyle = `rgba(39, 51, 84, ${0.35 + e.alpha * 0.6})`;
+        ctx.lineWidth = 1;
+      }
+      ctx.stroke();
+    }
+  }
+
+  function drawNodes(t) {
+    const hover = state.hoverId;
+    for (const node of NODES) {
+      const { x, y } = nodePos(node, t);
+      const color = COLORS[node.type];
+      const active = hover === node.id;
+      const dimmed = hover && !active;
+      const pulse = reducedMq.matches ? 1 : 0.85 + 0.15 * Math.sin(t * 1.1 + x * 0.01);
+      const r = node.r * (active ? 1.25 : 1);
+
+      // Glow = importance (the pearl glows the brightest)
+      ctx.save();
+      ctx.globalAlpha = dimmed ? 0.45 : 1;
+      ctx.shadowColor = color;
+      ctx.shadowBlur = (active ? 34 : 18) * pulse;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.restore();
+
+      // Inner core highlight
+      ctx.beginPath();
+      ctx.arc(x, y, Math.max(r - 3, 2), 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(232, 238, 247, 0.85)';
+      ctx.fill();
+
+      // Label
+      ctx.font = `${active ? '500 ' : ''}12px "JetBrains Mono", monospace`;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = active ? '#E8EEF7' : 'rgba(157, 172, 198, 0.9)';
+      ctx.shadowColor = 'rgba(6, 10, 18, 0.9)';
+      ctx.shadowBlur = 4;
+      ctx.fillText(node.label, x, y + r + 18);
+      ctx.shadowBlur = 0;
+    }
+  }
+
+  function render(t) {
+    drawBackground(t);
+    drawDust(t);
+    drawEdges(t);
+    drawNodes(t);
+  }
+
+  /* ------- Interaction ------- */
+  function hitTest(px, py, t) {
+    for (const node of NODES) {
+      const { x, y } = nodePos(node, t);
+      if (Math.hypot(px - x, py - y) <= node.r + 10) return node.id;
+    }
+    return null;
+  }
+
+  function setHover(id) {
+    if (state.hoverId === id) return;
+    state.hoverId = id;
+    canvas.style.cursor = id ? 'pointer' : 'default';
+    // Hide the hint while a node is lit
+    scene.classList.toggle('is-hover', id !== null);
+    // Link the scene to the catalog cards
+    for (const card of document.querySelectorAll('.card')) {
+      card.classList.toggle('is-linked', card.dataset.project === id);
+    }
+  }
+
+  let time = 0;
+
+  canvas.addEventListener('pointermove', (ev) => {
+    const rect = canvas.getBoundingClientRect();
+    setHover(hitTest(ev.clientX - rect.left, ev.clientY - rect.top, time));
+  });
+
+  canvas.addEventListener('pointerleave', () => setHover(null));
+
+  canvas.addEventListener('pointerdown', (ev) => {
+    const rect = canvas.getBoundingClientRect();
+    const id = hitTest(ev.clientX - rect.left, ev.clientY - rect.top, time);
+    if (id) jumpToCard(id);
+  });
+
+  function jumpToCard(id) {
+    const card = document.getElementById('card-' + id);
+    if (!card) return;
+    card.scrollIntoView({
+      behavior: reducedMq.matches ? 'auto' : 'smooth',
+      block: 'center'
+    });
+    card.classList.add('flash');
+    setTimeout(() => card.classList.remove('flash'), 1400);
+  }
+
+  // Cards drive the scene back: hover / keyboard focus lights the node
+  for (const card of document.querySelectorAll('.card')) {
+    const id = card.dataset.project;
+    card.addEventListener('mouseenter', () => setHover(id));
+    card.addEventListener('mouseleave', () => setHover(null));
+    card.addEventListener('focusin', () => setHover(id));
+    card.addEventListener('focusout', () => setHover(null));
+  }
+
+  /* ------- Loop ------- */
+  let rafId = null;
+
+  function loop(now) {
+    time = now / 1000;
+    render(time);
+    rafId = requestAnimationFrame(loop);
+  }
+
+  function start() {
+    resize();
+    if (reducedMq.matches) {
+      render(0); // single static frame, no animation
+    } else if (rafId === null) {
+      rafId = requestAnimationFrame(loop);
+    }
+  }
+
+  function stop() {
+    if (rafId !== null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+  }
+
+  reducedMq.addEventListener('change', () => {
+    stop();
+    start();
+  });
+
+  let resizeTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      resize();
+      if (reducedMq.matches) render(0);
+    }, 120);
+  });
+
+  // Canvas is fully described by the aria-label + catalog below
+  start();
+})();
+</script>
+</body>
+</html>

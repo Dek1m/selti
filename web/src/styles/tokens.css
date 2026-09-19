@@ -1,0 +1,77 @@
+/* ═══════════════════════════════════════════════════════════════════
+   selti design tokens — «Deep Lumen» (WEB_UI_DESIGN.md §2).
+   Single source of truth, imported before every other stylesheet.
+   Hardcoding colors/sizes in components is forbidden — tokens only.
+   ═══════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* Surfaces — water column: the higher the layer, the lighter */
+  --sl-bg-abyss:   #060A12;  /* application background */
+  --sl-bg-deep:    #0A101B;  /* large zones, graph canvas */
+  --sl-bg-shell:   #0E1524;  /* panels, cards */
+  --sl-bg-raised:  #141D30;  /* hover, popovers, input */
+  --sl-bg-inset:   #080D16;  /* recessed: metadata table, code */
+
+  /* Borders */
+  --sl-border:        #1B2540;
+  --sl-border-strong: #273354;
+
+  /* Text — AAA/AA on abyss */
+  --sl-text:   #E8EEF7;
+  --sl-text-2: #9DACC6;
+  --sl-text-3: #63728F;
+
+  /* Accent — bioluminescence */
+  --sl-accent:      #5FE8C8;
+  --sl-accent-dim:  rgba(95, 232, 200, 0.14);
+  --sl-accent-glow: 0 0 24px rgba(95, 232, 200, 0.20);
+
+  /* Semantic */
+  --sl-danger:  #FF7A8A;
+  --sl-warn:    #FFC15E;
+  --sl-success: #5FE8C8;
+
+  /* Namespace spectrum (§2.2) */
+  --sl-ns-user-facts:        #FF8E7A;  /* coral      */
+  --sl-ns-project-meta:      #A78BFF;  /* iris       */
+  --sl-ns-code-knowledge:    #4DC9FF;  /* azure      */
+  --sl-ns-dialogue-insights: #86E3A0;  /* mint       */
+  --sl-ns-infrastructure:    #FFC15E;  /* amber      */
+  --sl-ns-default:           #8A97AC;  /* slate      */
+  --sl-ns-frozen:            #7DD3FC;  /* ice (frozen granules) */
+  --sl-ns-superseded:        #4A5670;  /* faded node */
+
+  /* Typography */
+  --sl-font-display: "Sora", system-ui, sans-serif;
+  --sl-font-body:    "Inter", system-ui, sans-serif;
+  --sl-font-mono:    "JetBrains Mono", ui-monospace, monospace;
+
+  --sl-text-xs:  12px;  --sl-text-xs-lh:  16px;
+  --sl-text-sm:  13px;  --sl-text-sm-lh:  20px;
+  --sl-text-md:  15px;  --sl-text-md-lh:  24px;
+  --sl-text-lg:  18px;  --sl-text-lg-lh:  28px;
+  --sl-text-xl:  24px;  --sl-text-xl-lh:  32px;
+  --sl-text-2xl: 32px;  --sl-text-2xl-lh: 40px;
+
+  /* Spacing — 4px base */
+  --sl-s-1: 4px;   --sl-s-2: 8px;   --sl-s-3: 12px;  --sl-s-4: 16px;
+  --sl-s-5: 24px;  --sl-s-6: 32px;  --sl-s-7: 48px;  --sl-s-8: 64px;
+
+  /* Radii */
+  --sl-r-sm:   6px;
+  --sl-r-md:   10px;
+  --sl-r-lg:   16px;
+  --sl-r-xl:   24px;
+  --sl-r-full: 999px;
+
+  /* Elevation — depth shadow, always blueish, never black */
+  --sl-shadow-1: 0 2px 8px  rgba(2, 6, 14, 0.50);
+  --sl-shadow-2: 0 8px 32px rgba(2, 6, 14, 0.60);
+  --sl-shadow-3: 0 16px 64px rgba(2, 6, 14, 0.70);
+
+  /* Motion */
+  --sl-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --sl-dur-fast: 150ms;
+  --sl-dur: 250ms;
+  --sl-dur-slow: 400ms;
+}

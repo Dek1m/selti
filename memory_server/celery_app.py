@@ -66,6 +66,7 @@ app.conf.task_default_routing_key = "default"
 # поэтому ingest_batch (queue='batch') route memory_tasks.* не перебивает.
 app.conf.task_routes = {
     "memory_server.tasks.memory_tasks.*": {"queue": "memory"},
+    "memory_server.tasks.project_tasks.*": {"queue": "memory"},
     "memory_server.tasks.hash_tasks.*": {"queue": "hash"},
     "memory_server.tasks.lifecycle_tasks.*": {"queue": "memory"},
     "memory_server.tasks.context_tasks.*": {"queue": "memory"},
