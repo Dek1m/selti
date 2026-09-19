@@ -429,6 +429,7 @@ class MemoryRepository:
         frozen: bool | None = None,
         supersedes: str | None = None,
         content_hash: str | None = None,
+        clear_project_id: bool = False,
     ) -> MemoryRecord | None:
         record = await self.pg.update(
             memory_id=memory_id,
@@ -440,6 +441,7 @@ class MemoryRepository:
             frozen=frozen,
             supersedes=supersedes,
             content_hash=content_hash,
+            clear_project_id=clear_project_id,
         )
         if record is None:
             return None
@@ -453,6 +455,9 @@ class MemoryRepository:
                 payload["importance"] = importance
             if project_id is not None:
                 payload["project_id"] = str(project_id)
+            if clear_project_id:
+                # Пустая строка не матчится ни с одним UUID-фильтром
+                payload["project_id"] = ""
             if content_hash is not None:
                 payload["content_hash"] = content_hash
             if payload:

@@ -342,6 +342,7 @@ class MemoryService:
         importance: int | None = None,
         project_id: str | None = None,
         supersedes: str | None = None,
+        clear_project_id: bool = False,
     ) -> MemoryRecord:
         """Обновить гранулу: metadata merge-ится, version бампит триггер БД.
 
@@ -351,7 +352,7 @@ class MemoryService:
         (status='superseded', valid_to=valid_from этой, superseded_by=id этой).
         """
         async with async_measure_duration(logger, "update"):
-            resolved_project = await self.resolve_project(project_id)
+            resolved_project = None if clear_project_id else await self.resolve_project(project_id)
             embedding = None
             content_hash = None
             if content is not None:
@@ -366,6 +367,7 @@ class MemoryService:
                 project_id=resolved_project,
                 supersedes=supersedes,
                 content_hash=content_hash,
+                clear_project_id=clear_project_id,
             )
             if record is None:
                 raise NotFoundError(memory_id)

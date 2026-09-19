@@ -233,6 +233,7 @@ async def memory_update(
     importance: int | None = None,
     project_id: str | None = None,
     supersedes: str | None = None,
+    clear_project_id: bool = False,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Update an existing memory record.
@@ -241,12 +242,14 @@ async def memory_update(
     (existing keys are kept, new ones overwrite matching keys).
 
     project_id: optional project slug or UUID to (re)bind the granule.
+    clear_project_id: true — отвязать гранулу от проекта (NULL = глобальный слой, D2).
     supersedes: optional ID of a previous version this granule replaces —
     the old granule is closed (status='superseded', valid window ends now).
     """
     metadata = _coerce_metadata(metadata)
     return await celery_call(
         TASK_UPDATE,
+        clear_project_id=clear_project_id,
         memory_id=id,
         content=content,
         metadata=metadata,

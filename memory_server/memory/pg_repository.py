@@ -277,6 +277,7 @@ class PostgreSQLRepository:
         frozen: bool | None = None,
         supersedes: str | None = None,
         content_hash: str | None = None,
+        clear_project_id: bool = False,
     ) -> MemoryRecord | None:
         """Обновление гранулы: metadata merge-ится (dict-merge), version бампит триггер БД.
 
@@ -298,6 +299,7 @@ class PostgreSQLRepository:
                     frozen,
                     supersedes,
                     content_hash,
+                    clear_project_id,
                 )
                 if row is None:
                     return None

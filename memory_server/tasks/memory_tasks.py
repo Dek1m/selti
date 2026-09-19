@@ -143,6 +143,7 @@ def update_memory(
     importance: int | None = None,
     project_id: str | None = None,
     supersedes: str | None = None,
+    clear_project_id: bool = False,
 ) -> dict[str, Any]:
     """Update an existing memory record.
 
@@ -160,6 +161,7 @@ def update_memory(
         importance=importance,
         project_id=project_id,
         supersedes=supersedes,
+        clear_project_id=clear_project_id,
     )
     return record.model_dump(mode="json")
 

@@ -220,6 +220,7 @@ class TestUpdate:
             None,
             None,
             None,  # content_hash
+            False,  # clear_project_id
         )
 
     @pytest.mark.asyncio

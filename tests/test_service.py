@@ -265,6 +265,7 @@ class TestUpdate:
             project_id=None,
             supersedes=None,
             content_hash=hashlib.sha256(b"updated").hexdigest(),
+            clear_project_id=False,
         )
         assert result == record
 
@@ -291,7 +292,7 @@ class TestUpdate:
             importance=None,
             project_id=None,
             supersedes=None,
-            content_hash=None,
+            content_hash=None, clear_project_id=False,
         )
         assert result == record
 
