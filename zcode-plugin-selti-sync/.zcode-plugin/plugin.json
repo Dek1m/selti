@@ -1,0 +1,13 @@
+{
+  "name": "selti-sync",
+  "version": "0.1.0",
+  "description": "Auto-register git workspaces in selti project registry",
+  "author": {
+    "name": "Argenta Team"
+  },
+  "keywords": [
+    "selti",
+    "registry",
+    "hook"
+  ]
+}

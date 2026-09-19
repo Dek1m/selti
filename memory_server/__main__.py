@@ -116,15 +116,20 @@ app.include_router(tasks_router)
 from memory_server.api.context import router as context_router
 app.include_router(context_router)
 
+# ---- REST API: машинная регистрация проектов (ADR-018, плагин selti-sync) ----
+from memory_server.api.projects import router as projects_router
+app.include_router(projects_router)
+
 
 # ---- Middleware: аутентификация ----
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    # Публичные пути: health/live/metrics + context-облачко для ZCode-хука
-    # (localhost-сервис как /live; хук не умеет Bearer-токены)
+    # Публичные пути: health/live/metrics + context-облачко и регистрация
+    # для ZCode-хуков (localhost-сервис как /live; хуки не умеют Bearer).
+    # /projects/register защищён собственным X-SELTI-KEY (ADR-018, решение B)
     path = request.url.path
     if (
-        path in ("/health", "/live", "/metrics", "/projects")
+        path in ("/health", "/live", "/metrics", "/projects", "/projects/register")
         or path.startswith("/context/")
     ):
         return await call_next(request)

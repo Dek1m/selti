@@ -95,6 +95,11 @@ class Settings(BaseSettings):
 
     api_key: str = ""
 
+    # ── Регистрация проектов (ADR-018) ──
+    # Непустой → POST /projects/register требует заголовок X-SELTI-KEY;
+    # пустой → эндпоинт открыт (совместимость с существующими клиентами).
+    selti_api_key: str = ""
+
     redis_url: str = "redis://:@redis:6379/0"
 
     # ── Celery: асинхронные задачи ──
