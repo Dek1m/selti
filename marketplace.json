@@ -1,0 +1,13 @@
+{
+  "name": "dev-selti-local",
+  "plugins": [
+    {
+      "name": "selti-sync",
+      "source": "./zcode-plugin-selti-sync",
+      "version": "0.1.2",
+      "description": "Auto-register git workspaces in selti project registry",
+      "displayName": "selti-sync",
+      "category": "developer-tools"
+    }
+  ]
+}
