@@ -13,8 +13,11 @@ jobs:
       - name: Sync code to server
         run: |
           rsync -av --delete \
+            --exclude .git \
+            --exclude node_modules \
+            --exclude .venv \
             $GITHUB_WORKSPACE/ \
-            /home/svc_athene_ai/opencode/projects/selti/
+            $HOME/app/src/selti/
 
       - name: Build and deploy
         run: |
