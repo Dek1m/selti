@@ -100,6 +100,51 @@ services:
           cpus: "2.0"
           memory: 512M
 
+  # ── Celery Beat (периодические задачи) ───────────────────
+  # Обязателен в проде: без него beat_schedule из celery_app.py
+  # (lifecycle-задачи Фазы 2 + легаси worker_stats/business_metrics) не исполняются.
+  # Schedule-файл персистентен (volume) — beat помнит last-run метки crontab-задач.
+  celery-beat:
+    build: .
+    container_name: ${SERVICE_NAME}-beat
+    restart: unless-stopped
+    command: >
+      celery -A memory_server.celery_app beat
+      -l INFO
+      --schedule=/data/celerybeat-schedule
+    env_file: .env
+    environment:
+      - SERVICE_NAME=${SERVICE_NAME}
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - DATABASE_URL=postgresql+asyncpg://svc_athene_ai:${SELTI_DB_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - QDRANT_URL=http://qdrant:6333
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "grep -lqs beat /proc/[0-9]*/cmdline"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - app-net
+    volumes:
+      - beat-schedule:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+
   # ── Flower (dev profile) ──────────────────────────────────
   flower:
     build: .
@@ -223,6 +268,7 @@ volumes:
   postgres-data:
   qdrant-data:
   prometheus-data:
+  beat-schedule:
 
 # ── Networks ───────────────────────────────────────────────
 networks:

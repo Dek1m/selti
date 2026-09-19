@@ -213,8 +213,17 @@ class MemoryRepositoryProtocol(Protocol):
         """Удалить связи без адреса целиком. Идемпотентно."""
         ...
 
-    async def refresh_clusters(self, namespace_id: str, threshold: float) -> list[dict]:
-        """Пересчёт кластеров хранимкой assign_clusters (022)."""
+    async def refresh_clusters(
+        self,
+        namespace_id: str,
+        threshold: float,
+        top_k: int = 10,
+        min_members: int = 2,
+    ) -> list[dict]:
+        """Кластеризация Level 2 v2: Qdrant ANN-пары → assign_clusters_from_pairs (022).
+
+        Qdrant-фаза поднимает VectorStoreError (пар нет — пересчёт запрещён).
+        """
         ...
 
     async def list_clusters(

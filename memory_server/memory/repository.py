@@ -17,10 +17,11 @@ from datetime import datetime
 
 from qdrant_client import models as qm
 
+from memory_server.exceptions import VectorStoreError
 from memory_server.logger import get_logger
 from memory_server.memory.namespace_repository import NamespaceRepository
 from memory_server.memory.pg_repository import PostgreSQLRepository
-from memory_server.memory.qdrant_store import QdrantStore
+from memory_server.memory.qdrant_store import QdrantStore, RETRIEVE_BATCH_SIZE
 from memory_server.memory.search_fusion import HybridCandidate
 from memory_server.models import (
     GraphStats,
@@ -33,6 +34,39 @@ from memory_server.models import (
 )
 
 logger = get_logger(__name__)
+
+# Прогресс-лог ANN-скролла кластеризации: каждые 1000 гранул namespace
+# (8К code_knowledge ≈ 8 записей за прогон — наблюдаемо в логах воркера).
+CLUSTER_PROGRESS_EVERY = 1000
+
+
+def collect_cluster_pairs(
+    origin_ids: list[str],
+    batch_results: list[list[dict]],
+    seen: set[tuple[str, str]],
+) -> list[tuple[str, str, float]]:
+    """ANN-выдачи → канонические пары близости (a, b, score), a < b.
+
+    Чистая функция (юнит-тестируется без Qdrant):
+      * self-match (HNSW возвращает саму точку с score ≈ 1.0) отбрасывается;
+      * симметричный дубль (a нашёл b, затем b нашла a) дедупится через
+        `seen` — в _cluster_pairs льём каждую пару один раз (хранимка
+        022 перепроверит нормализацию least/greatest);
+      * score не фильтруется — порог уже применён Qdrant (score_threshold
+        в query_batch_points), повторная проверка дублировала бы источник истины.
+    """
+    pairs: list[tuple[str, str, float]] = []
+    for origin_id, hits in zip(origin_ids, batch_results):
+        for hit in hits:
+            other = str(hit["id"])
+            if other == origin_id:
+                continue
+            key = (origin_id, other) if origin_id < other else (other, origin_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            pairs.append((key[0], key[1], hit["score"]))
+    return pairs
 
 
 class _UnknownNamespace:
@@ -562,8 +596,80 @@ class MemoryRepository:
     async def delete_orphan_relations(self) -> int:
         return await self.pg.delete_orphan_relations()
 
-    async def refresh_clusters(self, namespace_id: str, threshold: float) -> list[dict]:
-        return await self.pg.refresh_clusters(namespace_id, threshold)
+    async def refresh_clusters(
+        self,
+        namespace_id: str,
+        threshold: float,
+        top_k: int = 10,
+        min_members: int = 2,
+    ) -> list[dict]:
+        """Кластеризация Level 2 v2 (022): Qdrant ANN → пары → SQL-группировка.
+
+        Разделение ответственности (прод-факты 2026-09-18: триграммный
+        prefix-фильтр v1 квадратично деградировал — 620 с / temp-разлив):
+          * кандидаты — Qdrant HNSW (O(N·K)): пачки RETRIEVE_BATCH_SIZE id →
+            retrieve векторов → query_batch_points (score ≥ threshold,
+            фильтр namespace + status='asserted');
+          * группировка — хранимка assign_clusters_from_pairs (022) по парам,
+            залитым COPY в pg_temp._cluster_pairs (паттерн 016).
+
+        Qdrant-фаза под VectorStoreError: отказ векторного бэкенда = пар нет,
+        пересчёт запрещён (пустой apply стёр бы разметку кластеров).
+        Меньше двух гранул — ANN не зовём, apply с пустыми парами снимет
+        протухшую разметку (identity-пересчёт, гранул меньше — кластеров нет).
+        """
+        ids = await self.pg.fetch_asserted_ids(namespace_id)
+        if len(ids) < 2:
+            return await self.pg.apply_cluster_pairs(namespace_id, [], min_members)
+        if not self._has_qdrant():
+            raise VectorStoreError(
+                f"refresh_clusters: qdrant store not configured "
+                f"(namespace_id={namespace_id}, granules={len(ids)})"
+            )
+
+        pairs: list[tuple[str, str, float]] = []
+        seen: set[tuple[str, str]] = set()
+        qdrant_filter = QdrantStore.build_filter(
+            namespace_id=namespace_id, active_only=True
+        )
+        processed = 0
+        try:
+            for start in range(0, len(ids), RETRIEVE_BATCH_SIZE):
+                chunk = ids[start : start + RETRIEVE_BATCH_SIZE]
+                vectors = self.qdrant.retrieve_vectors(chunk)
+                # точек без вектора (рассинхрон PG ↔ Qdrant) в ANN не участвуют
+                with_vector = [i for i in chunk if i in vectors]
+                if with_vector:
+                    batch_results = self.qdrant.search_batch(
+                        query_vectors=[vectors[i] for i in with_vector],
+                        limit=top_k + 1,  # +1: HNSW вернёт саму точку (score ≈ 1.0)
+                        score_threshold=threshold,
+                        query_filter=qdrant_filter,
+                    )
+                    pairs.extend(
+                        collect_cluster_pairs(with_vector, batch_results, seen)
+                    )
+                processed += len(chunk)
+                # прогресс каждые CLUSTER_PROGRESS_EVERY гранул
+                if processed // CLUSTER_PROGRESS_EVERY > (
+                    processed - len(chunk)
+                ) // CLUSTER_PROGRESS_EVERY:
+                    logger.info(
+                        "refresh_clusters: ann progress",
+                        extra={
+                            "namespace_id": namespace_id,
+                            "processed": processed,
+                            "total": len(ids),
+                            "pairs": len(pairs),
+                        },
+                    )
+        except Exception as exc:
+            raise VectorStoreError(
+                f"refresh_clusters: qdrant ann failed at "
+                f"{processed}/{len(ids)} granules: {exc}"
+            ) from exc
+
+        return await self.pg.apply_cluster_pairs(namespace_id, pairs, min_members)
 
     async def list_clusters(
         self, namespace: str | None = None, project_id: str | None = None

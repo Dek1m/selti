@@ -20,6 +20,12 @@ from memory_server.vector.circuit_breaker import CircuitBreakerQdrantClient
 
 logger = get_logger(__name__)
 
+# Батчи массовых операций кластеризации (Фаза 2.3 v2):
+# retrieve — 256 id (только векторы, payload не нужен);
+# batch ANN — 64 запроса × 4096-dim ≈ 1 МБ payload на вызов.
+RETRIEVE_BATCH_SIZE = 256
+QUERY_BATCH_SIZE = 64
+
 
 class QdrantStore:
     """Vector store — только Qdrant-операции (upsert, search, delete)."""
@@ -103,6 +109,84 @@ class QdrantStore:
             {"id": r.id, "score": r.score, "payload": r.payload, "vector": r.vector}
             for r in result.points
         ]
+
+    def search_batch(
+        self,
+        query_vectors: list[list[float]],
+        limit: int = 10,
+        score_threshold: float | None = None,
+        query_filter: Optional[qm.Filter] = None,
+    ) -> list[list[dict]]:
+        """Batch ANN: ближайшие соседи для пачки векторов одним вызовом.
+
+        Фаза 2.3 v2 (кластеризация): кандидаты пар ищутся здесь, а не
+        триграммами в PG. Возвращает список выдач строго в порядке
+        query_vectors: [[{id, score, payload}, ...], ...].
+        Исключения НЕ глотаются (нет CB-обёртки) — вызывающая сторона
+        различает «Qdrant недоступен» и обрабатывает graceful.
+        """
+        if not query_vectors:
+            return []
+        qstart = time.monotonic()
+        results: list[list[dict]] = []
+        for start in range(0, len(query_vectors), QUERY_BATCH_SIZE):
+            chunk = query_vectors[start : start + QUERY_BATCH_SIZE]
+            requests = [
+                qm.QueryRequest(
+                    query=vector,
+                    filter=query_filter,
+                    limit=limit,
+                    score_threshold=score_threshold,
+                    with_payload=False,
+                )
+                for vector in chunk
+            ]
+            responses = self.client.query_batch_points(
+                collection_name=self.collection, requests=requests
+            )
+            results.extend(
+                [
+                    {"id": p.id, "score": p.score, "payload": p.payload}
+                    for p in response.points
+                ]
+                for response in responses
+            )
+        QDRANT_OPS_TOTAL.labels(operation="batch_search").inc()
+        QDRANT_OPS_DURATION_SECONDS.labels(operation="batch_search").observe(
+            time.monotonic() - qstart
+        )
+        QDRANT_SEARCH_RESULTS.observe(
+            sum(len(batch) for batch in results)
+        )
+        return results
+
+    def retrieve_vectors(self, point_ids: list[str]) -> dict[str, list[float]]:
+        """Batch retrieve векторов точек по id. Возвращает {id: vector}.
+
+        Точки без вектора (либо отсутствующие) в результат не попадают —
+        вызывающая сторона считает их missing. Кластеризация v2 берёт
+        здесь векторы asserted-гранул namespace для ANN-поиска соседей.
+        """
+        vectors: dict[str, list[float]] = {}
+        if not point_ids:
+            return vectors
+        qstart = time.monotonic()
+        for start in range(0, len(point_ids), RETRIEVE_BATCH_SIZE):
+            chunk = point_ids[start : start + RETRIEVE_BATCH_SIZE]
+            records = self.client.retrieve(
+                collection_name=self.collection,
+                ids=chunk,
+                with_payload=False,
+                with_vectors=True,
+            )
+            for record in records:
+                if record.vector is not None:
+                    vectors[str(record.id)] = record.vector
+        QDRANT_OPS_TOTAL.labels(operation="retrieve").inc()
+        QDRANT_OPS_DURATION_SECONDS.labels(operation="retrieve").observe(
+            time.monotonic() - qstart
+        )
+        return vectors
 
     # ════════════════════════════════════════════════════════════
     # UPDATE

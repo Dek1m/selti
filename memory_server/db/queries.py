@@ -377,13 +377,35 @@ DELETE_ORPHAN_RELATIONS = """
 """
 
 
-# ── Фаза 2.3: кластеризация Level 2 (миграция 022 — Нора) ──
+# ── Фаза 2.3 v2: кластеризация Level 2 (миграция 022 — Нора) ──
+# Архитектура v2: кандидаты ищет Qdrant ANN (Python, MemoryRepository),
+# SQL группирует готовые пары. Порог близости применяется на стороне
+# Qdrant (score_threshold), сюда приходит уже отфильтрованное.
 
-# Сигнатура — миграция 022: assign_clusters(p_namespace_id UUID, p_threshold REAL
-# DEFAULT 0.92) RETURNS TABLE(cluster_id, member_count, coherence); threshold
-# пробрасываем из конфига явно. До применения 022 — SchemaPendingError (graceful).
+# Вход ANN-скролла: id актуальных гранул namespace (пачками → Qdrant).
+SELECT_ASSERTED_CLUSTER_IDS = """
+    SELECT id::text
+    FROM memories
+    WHERE namespace_id = $1::uuid
+      AND status = 'asserted'
+      AND valid_to IS NULL
+"""
+
+# Temp-таблица пар (паттерн _similarity_pairs из 016): создаётся в той же
+# транзакции, что и вызов хранимки, — ON COMMIT DROP подчищает за собой.
+CREATE_CLUSTER_PAIRS_TEMP = """
+    CREATE TEMP TABLE _cluster_pairs (
+        a_id       UUID NOT NULL,
+        b_id       UUID NOT NULL,
+        similarity REAL NOT NULL
+    ) ON COMMIT DROP
+"""
+
+# Сигнатура — миграция 022 v2: assign_clusters_from_pairs(p_namespace_id
+# UUID, p_min_members INT DEFAULT 2) RETURNS TABLE(cluster_id, member_count,
+# coherence). До применения 022 — SchemaPendingError (graceful).
 REFRESH_CLUSTERS = """
-    SELECT * FROM assign_clusters($1::uuid, $2::real)
+    SELECT * FROM assign_clusters_from_pairs($1::uuid, $2::int)
 """
 
 LIST_CLUSTERS = """

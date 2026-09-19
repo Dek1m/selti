@@ -10,6 +10,7 @@ decay не трогает frozen; GC dry-run/real; идемпотентност�
 """
 
 import hashlib
+import uuid as uuid_module
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -21,9 +22,10 @@ from memory_server.exceptions import (
     DatabaseError,
     NotFoundError,
     SchemaPendingError,
+    VectorStoreError,
 )
 from memory_server.memory.pg_repository import PostgreSQLRepository
-from memory_server.memory.repository import MemoryRepository
+from memory_server.memory.repository import MemoryRepository, collect_cluster_pairs
 from memory_server.memory.service import MemoryService
 from memory_server.models import MemoryHistory, MemoryRecord
 from tests.conftest import memory_row
@@ -313,6 +315,51 @@ class TestServiceLifecycle:
         assert "022" in result["reason"]
         assert result["clusters"] == []
 
+    @pytest.mark.asyncio
+    async def test_refresh_clusters_passes_v2_config(self, mock_service):
+        """Сервис пробрасывает порог/top_k/min_members из конфига в фасад v2."""
+        cluster_row = {"cluster_id": OLD_ID, "member_count": 3, "coherence": 0.95}
+        mock_service.repository.refresh_clusters = AsyncMock(return_value=[cluster_row])
+
+        result = await mock_service.refresh_clusters("default")
+
+        assert result == {"ok": True, "clusters": [cluster_row]}
+        kwargs = mock_service.repository.refresh_clusters.await_args.kwargs
+        assert kwargs["threshold"] == mock_service.config.cluster_threshold
+        assert kwargs["top_k"] == mock_service.config.cluster_top_k
+        assert kwargs["min_members"] == mock_service.config.cluster_min_members
+
+    @pytest.mark.asyncio
+    async def test_refresh_clusters_graceful_when_migration_pending(self, mock_service):
+        mock_service.repository.refresh_clusters = AsyncMock(
+            side_effect=SchemaPendingError("assign_clusters_from_pairs: undefined")
+        )
+
+        result = await mock_service.refresh_clusters("default")
+
+        assert result == {"ok": False, "reason": "migration 022 pending", "clusters": []}
+
+    @pytest.mark.asyncio
+    async def test_refresh_clusters_graceful_when_qdrant_unavailable(self, mock_service):
+        """Граничный: Qdrant недоступен → ok=False qdrant_unavailable, разметка не тронута."""
+        mock_service.repository.refresh_clusters = AsyncMock(
+            side_effect=VectorStoreError("qdrant ann failed at 512/8130 granules")
+        )
+
+        result = await mock_service.refresh_clusters("default")
+
+        assert result == {"ok": False, "reason": "qdrant_unavailable", "clusters": []}
+
+    @pytest.mark.asyncio
+    async def test_refresh_clusters_unknown_namespace(self, mock_service):
+        mock_service.ns_repo.get_by_uid = AsyncMock(return_value=None)
+        mock_service.repository.refresh_clusters = AsyncMock()
+
+        with pytest.raises(NotFoundError):
+            await mock_service.refresh_clusters("no-such-namespace")
+
+        mock_service.repository.refresh_clusters.assert_not_awaited()
+
 
 # ══════════════════════════════════════════════════════════════════
 # PG repository: SQL-контракты Фазы 2
@@ -545,19 +592,78 @@ class TestPgLifecycleSql:
         assert conn.fetch.await_args.args[0] == q.DELETE_ORPHAN_RELATIONS
 
 
-class TestPgClustersGraceful:
+class TestPgClustersV2:
+    """PG-слой кластеризации v2: fetch входа ANN + apply готовых пар."""
+
     @pytest.mark.asyncio
-    async def test_refresh_clusters_schema_pending(self, mock_pool):
+    async def test_fetch_asserted_ids_contract(self, mock_pool):
+        from memory_server.db import queries as q
+
+        pg = PostgreSQLRepository(pool=mock_pool)
+        conn = mock_pool.acquire.return_value.__aenter__.return_value
+        conn.fetch = AsyncMock(return_value=[{"id": OLD_ID}, {"id": NEW_ID}])
+
+        ids = await pg.fetch_asserted_ids(NS_ID)
+
+        assert ids == [OLD_ID, NEW_ID]
+        sql = conn.fetch.await_args.args[0]
+        assert sql == q.SELECT_ASSERTED_CLUSTER_IDS
+        # канонические грани входа — те же, что у Qdrant active_only
+        assert "status = 'asserted'" in sql
+        assert "valid_to IS NULL" in sql
+
+    @pytest.mark.asyncio
+    async def test_apply_cluster_pairs_copy_and_call(self, mock_pool):
+        from memory_server.db import queries as q
+
+        pg = PostgreSQLRepository(pool=mock_pool)
+        conn = mock_pool.acquire.return_value.__aenter__.return_value
+        cluster_row = {"cluster_id": OLD_ID, "member_count": 2, "coherence": 0.97}
+        conn.fetch = AsyncMock(return_value=[cluster_row])
+
+        rows = await pg.apply_cluster_pairs(NS_ID, [(OLD_ID, NEW_ID, 0.97)], min_members=2)
+
+        assert rows == [cluster_row]
+        assert conn.execute.await_args.args[0] == q.CREATE_CLUSTER_PAIRS_TEMP
+        assert "ON COMMIT DROP" in q.CREATE_CLUSTER_PAIRS_TEMP
+        # COPY в temp-таблицу — без подготовленных планов
+        copy_kwargs = conn.copy_records_to_table.await_args.kwargs
+        assert copy_kwargs["records"] == [
+            (
+                uuid_module.UUID(OLD_ID),
+                uuid_module.UUID(NEW_ID),
+                0.97,
+            )
+        ]
+        assert copy_kwargs["columns"] == ("a_id", "b_id", "similarity")
+        assert conn.fetch.await_args.args == (q.REFRESH_CLUSTERS, NS_ID, 2)
+        assert "assign_clusters_from_pairs" in q.REFRESH_CLUSTERS
+
+    @pytest.mark.asyncio
+    async def test_apply_cluster_pairs_empty_still_calls_proc(self, mock_pool):
+        """Пустые пары — identity-пересчёт: хранимка снимет протухшую разметку."""
+        pg = PostgreSQLRepository(pool=mock_pool)
+        conn = mock_pool.acquire.return_value.__aenter__.return_value
+        conn.fetch = AsyncMock(return_value=[])
+
+        rows = await pg.apply_cluster_pairs(NS_ID, [])
+
+        assert rows == []
+        conn.copy_records_to_table.assert_not_awaited()
+        conn.fetch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_apply_cluster_pairs_schema_pending(self, mock_pool):
         pg = PostgreSQLRepository(pool=mock_pool)
         conn = mock_pool.acquire.return_value.__aenter__.return_value
         conn.fetch = AsyncMock(
             side_effect=asyncpg.exceptions.UndefinedFunctionError(
-                'function assign_clusters(uuid) does not exist'
+                'function assign_clusters_from_pairs(uuid, integer) does not exist'
             )
         )
 
         with pytest.raises(SchemaPendingError):
-            await pg.refresh_clusters(NS_ID, 0.92)
+            await pg.apply_cluster_pairs(NS_ID, [(OLD_ID, NEW_ID, 0.97)])
 
     @pytest.mark.asyncio
     async def test_list_clusters_undefined_table_pending(self, mock_pool):
@@ -569,6 +675,158 @@ class TestPgClustersGraceful:
 
         with pytest.raises(SchemaPendingError):
             await pg.list_clusters()
+
+
+class TestCollectClusterPairs:
+    """Юнит разбора ANN-выдач → канонические пары (без Qdrant, чистая функция)."""
+
+    def test_self_match_excluded_and_dedup_symmetric(self):
+        seen: set[tuple[str, str]] = set()
+
+        # A нашла соседей: себя (score 1.0) и B; B нашла A — симметричный дубль
+        pairs_a = collect_cluster_pairs(
+            [OLD_ID],
+            [[{"id": OLD_ID, "score": 1.0}, {"id": NEW_ID, "score": 0.97}]],
+            seen,
+        )
+        pairs_b = collect_cluster_pairs(
+            [NEW_ID], [[{"id": OLD_ID, "score": 0.97}]], seen
+        )
+
+        assert pairs_a == [(OLD_ID, NEW_ID, 0.97)]  # self отброшен, канонич. a < b
+        assert pairs_b == []  # дубль (B,A) не дублируется
+
+    def test_canonical_order_regardless_of_direction(self):
+        # id_b < id_a лексикографически: пара нормализована в (b, a)
+        seen: set[tuple[str, str]] = set()
+        pairs = collect_cluster_pairs(
+            [NEW_ID], [[{"id": OLD_ID, "score": 0.93}]], seen
+        )
+        assert pairs == [(OLD_ID, NEW_ID, 0.93)]
+
+    def test_batch_alignment_and_chain(self):
+        """Выдачи строго по порядку origin'ов: A-B, B-C → цепочка двумя парами."""
+        c_id = "00000000-0000-0000-0000-0000000000c1"
+        seen: set[tuple[str, str]] = set()
+        pairs = collect_cluster_pairs(
+            [OLD_ID, NEW_ID, c_id],
+            [
+                [{"id": NEW_ID, "score": 0.95}],
+                [{"id": OLD_ID, "score": 0.95}, {"id": c_id, "score": 0.90}],
+                [{"id": NEW_ID, "score": 0.90}],
+            ],
+            seen,
+        )
+        assert pairs == [(OLD_ID, NEW_ID, 0.95), (NEW_ID, c_id, 0.90)]
+
+    def test_empty_inputs(self):
+        assert collect_cluster_pairs([], [], set()) == []
+
+
+class TestFacadeRefreshClustersV2:
+    """Оркестрация v2: scroll 256 → retrieve → batch ANN → пары → apply."""
+
+    def _repo(self, pg, qdrant) -> MemoryRepository:
+        return MemoryRepository(pg=pg, qdrant=qdrant, ns_repo=MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_ann_pairs_flow_to_apply(self, mock_pool):
+        pg = PostgreSQLRepository(pool=mock_pool)
+        pg.fetch_asserted_ids = AsyncMock(return_value=[OLD_ID, NEW_ID])
+        cluster_row = {"cluster_id": OLD_ID, "member_count": 2, "coherence": 0.97}
+        pg.apply_cluster_pairs = AsyncMock(return_value=[cluster_row])
+
+        qdrant = MagicMock()
+        qdrant.retrieve_vectors = MagicMock(
+            return_value={OLD_ID: [0.1, 0.0], NEW_ID: [0.0, 0.1]}
+        )
+        qdrant.search_batch = MagicMock(
+            return_value=[
+                [{"id": OLD_ID, "score": 1.0}, {"id": NEW_ID, "score": 0.97}],
+                [{"id": OLD_ID, "score": 0.97}],
+            ]
+        )
+        repo = self._repo(pg, qdrant)
+
+        rows = await repo.refresh_clusters(NS_ID, threshold=0.92, top_k=10)
+
+        assert rows == [cluster_row]
+        # пары дедупнуты, self исключён — в apply ушла одна каноническая пара
+        pg.apply_cluster_pairs.assert_awaited_once_with(NS_ID, [(OLD_ID, NEW_ID, 0.97)], 2)
+        # ANN-параметры: limit = top_k + 1 (self-match), порог, фильтр namespace
+        kwargs = qdrant.search_batch.call_args.kwargs
+        assert kwargs["limit"] == 11
+        assert kwargs["score_threshold"] == 0.92
+        from qdrant_client import models as qm
+
+        assert isinstance(kwargs["query_filter"], qm.Filter)
+        keys = {c.key for c in kwargs["query_filter"].must}
+        assert keys == {"namespace_id", "status"}  # границы namespace + asserted
+
+    @pytest.mark.asyncio
+    async def test_granules_without_vector_skipped(self, mock_pool):
+        """Точка без вектора (рассинхрон PG ↔ Qdrant) не участвует в ANN,
+        но и не роняет пересчёт остальных."""
+        pg = PostgreSQLRepository(pool=mock_pool)
+        pg.fetch_asserted_ids = AsyncMock(return_value=[OLD_ID, NEW_ID])
+        pg.apply_cluster_pairs = AsyncMock(return_value=[])
+        qdrant = MagicMock()
+        qdrant.retrieve_vectors = MagicMock(return_value={OLD_ID: [0.1]})  # NEW_ID missing
+        qdrant.search_batch = MagicMock(return_value=[[{"id": OLD_ID, "score": 1.0}]])
+        repo = self._repo(pg, qdrant)
+
+        await repo.refresh_clusters(NS_ID, threshold=0.9)
+
+        # искали только для одной точки; пар нет — apply с пустым списком
+        assert len(qdrant.search_batch.call_args.kwargs["query_vectors"]) == 1
+        pg.apply_cluster_pairs.assert_awaited_once_with(NS_ID, [], 2)
+
+    @pytest.mark.asyncio
+    async def test_fewer_than_two_granules_skips_ann(self, mock_pool):
+        """Меньше 2 гранул — ANN не зовём вовсе; пустой apply снимает
+        протухшую разметку (кластеров из <2 гранул быть не может)."""
+        pg = PostgreSQLRepository(pool=mock_pool)
+        pg.fetch_asserted_ids = AsyncMock(return_value=[OLD_ID])
+        pg.apply_cluster_pairs = AsyncMock(return_value=[])
+        qdrant = MagicMock()
+        repo = self._repo(pg, qdrant)
+
+        await repo.refresh_clusters(NS_ID, threshold=0.9)
+
+        qdrant.retrieve_vectors.assert_not_called()
+        qdrant.search_batch.assert_not_called()
+        pg.apply_cluster_pairs.assert_awaited_once_with(NS_ID, [], 2)
+
+    @pytest.mark.asyncio
+    async def test_qdrant_failure_wrapped_and_no_apply(self, mock_pool):
+        """Отказ Qdrant mid-scroll → VectorStoreError; apply НЕ вызван —
+        существующая разметка кластеров не стирается пустыми парами."""
+        pg = PostgreSQLRepository(pool=mock_pool)
+        pg.fetch_asserted_ids = AsyncMock(return_value=[OLD_ID, NEW_ID])
+        pg.apply_cluster_pairs = AsyncMock()
+        qdrant = MagicMock()
+        qdrant.retrieve_vectors = MagicMock(
+            side_effect=ConnectionError("qdrant unreachable")
+        )
+        repo = self._repo(pg, qdrant)
+
+        with pytest.raises(VectorStoreError, match="qdrant ann failed"):
+            await repo.refresh_clusters(NS_ID, threshold=0.9)
+
+        pg.apply_cluster_pairs.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_qdrant_not_configured_raises(self, mock_pool):
+        """Qdrant-стора нет вовсе — та же честная ошибка, не тихая заливка пустоты."""
+        pg = PostgreSQLRepository(pool=mock_pool)
+        pg.fetch_asserted_ids = AsyncMock(return_value=[OLD_ID, NEW_ID])
+        pg.apply_cluster_pairs = AsyncMock()
+        repo = MemoryRepository(pg=pg, qdrant=None, ns_repo=MagicMock())
+
+        with pytest.raises(VectorStoreError, match="not configured"):
+            await repo.refresh_clusters(NS_ID, threshold=0.9)
+
+        pg.apply_cluster_pairs.assert_not_awaited()
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -803,6 +1061,26 @@ class TestLifecycleTasks:
         assert result["ok"] is False
         assert result["reason"] == "migration 022 pending"
         # первый же ns сообщил об отсутствии хранимки — остальные не дёргаем
+        assert patch_lifecycle_service.refresh_clusters.await_count == 1
+
+    def test_refresh_clusters_all_graceful_on_qdrant_down(self, patch_lifecycle_service):
+        """Граничный: Qdrant недоступен — beat не падает, обход останавливается
+        на первом ns (retry подхватит весь прогон)."""
+        from memory_server.tasks.lifecycle_tasks import refresh_clusters
+
+        ns_repo = MagicMock()
+        ns_repo.list_all = AsyncMock(
+            return_value=[MagicMock(uid="default"), MagicMock(uid="code_knowledge")]
+        )
+        patch_lifecycle_service.ns_repo = ns_repo
+        patch_lifecycle_service.refresh_clusters = AsyncMock(
+            return_value={"ok": False, "reason": "qdrant_unavailable", "clusters": []}
+        )
+
+        result = refresh_clusters()
+
+        assert result["ok"] is False
+        assert result["reason"] == "qdrant_unavailable"
         assert patch_lifecycle_service.refresh_clusters.await_count == 1
 
 

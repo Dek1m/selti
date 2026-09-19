@@ -1,0 +1,360 @@
+networks:
+  app_default:
+    external: true
+services:
+  celery-worker:
+    image: app-celery-worker:latest
+    command: |
+      celery -A memory_server.celery_app worker -Q memory,batch,hash -c 4 --without-gossip --without-mingle --without-heartbeat --max-tasks-per-child=1000 --max-memory-per-child=200000 -l INFO --logfile=-
+    container_name: selti-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      selti:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      DATABASE_URL: postgresql+asyncpg://svc_athene_ai:${SELTI_DB_PASSWORD}@postgres:5432/memory
+      EMBEDDING_API_URL: http://10.0.0.21:8080/v1
+      EMBEDDING_DIMENSION: '4096'
+      EMBEDDING_MODEL: qwen3-embedding-8b
+      LOG_FORMAT: posix
+      LOG_LEVEL: INFO
+      QDRANT_COLLECTION: memories
+      QDRANT_ENABLED: 'true'
+      QDRANT_URL: http://qdrant:6333
+      REDIS_URL: redis://redis:6379/0
+      SERVICE_NAME: selti-worker
+    healthcheck:
+      interval: 30s
+      retries: 3
+      start_period: 30s
+      test:
+      - CMD
+      - celery
+      - -A
+      - memory_server.celery_app
+      - inspect
+      - ping
+      - --timeout=10
+      timeout: 15s
+    logging:
+      driver: json-file
+      options:
+        max-file: '3'
+        max-size: 10m
+    restart: unless-stopped
+  celery-beat:
+    image: app-celery-worker:latest
+    command: |
+      celery -A memory_server.celery_app beat -l INFO --schedule=/data/celerybeat-schedule
+    container_name: selti-beat
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      DATABASE_URL: postgresql+asyncpg://svc_athene_ai:${SELTI_DB_PASSWORD}@postgres:5432/memory
+      EMBEDDING_API_URL: http://10.0.0.21:8080/v1
+      EMBEDDING_DIMENSION: '4096'
+      EMBEDDING_MODEL: qwen3-embedding-8b
+      LOG_FORMAT: posix
+      LOG_LEVEL: INFO
+      QDRANT_COLLECTION: memories
+      QDRANT_ENABLED: 'true'
+      QDRANT_URL: http://qdrant:6333
+      REDIS_URL: redis://redis:6379/0
+      SERVICE_NAME: selti-beat
+    healthcheck:
+      interval: 30s
+      retries: 3
+      start_period: 30s
+      test:
+      - CMD-SHELL
+      - grep -lqs beat /proc/[0-9]*/cmdline
+      timeout: 10s
+    logging:
+      driver: json-file
+      options:
+        max-file: '3'
+        max-size: 10m
+    restart: unless-stopped
+    volumes:
+    - beat_schedule:/data
+  flower:
+    command: celery -A memory_server.celery_app flower --port=5555
+    container_name: athena-flower
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+    logging:
+      driver: json-file
+      options:
+        max-file: '3'
+        max-size: 10m
+    ports:
+    - 5555:5555
+    profiles:
+    - dev
+  nginx:
+    container_name: nginx
+    depends_on:
+    - opencode
+    healthcheck:
+      interval: 30s
+      retries: 3
+      test:
+      - CMD
+      - wget
+      - -qO-
+      - http://opencode:3000/api/health
+      timeout: 3s
+    image: nginx:alpine
+    ports:
+    - 80:80
+    - 443:443
+    restart: unless-stopped
+    volumes:
+    - /etc/nginx/:/etc/nginx/
+  opencode:
+    build:
+      context: /home/svc_athene_ai@atom.ui/app/opencode/
+      dockerfile: Dockerfile
+    container_name: opencode
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 1G
+    environment:
+      AKAME_BATCH_ENABLED: 'true'
+      AKAME_BATCH_MAX_AGE_MS: '3600000'
+      AKAME_BATCH_SIZE: '5'
+      AKAME_ENRICH_LINKS: 'true'
+      AKAME_LOG_LEVEL: INFO
+      AKAME_MCP_URL: http://selti:8000/mcp/
+      HOME: /home/opencode
+      INO_LOG_LEVEL: INFO
+      LOG_LEVEL: INFO
+      OPENCODE_ENABLE_PARALLEL: '1'
+      PARALLEL_API_KEY: ttR5gPG7MeWVmuG3y38GR1cntoNH0tRhoy-Ak--R
+      SERVICE_NAME: opencode
+    ports:
+    - 3000:3000
+    logging:
+      driver: json-file
+      options:
+        max-file: '3'
+        max-size: 10m
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    volumes:
+    - /home/svc_athene_ai@atom.ui/opencode:/home/opencode:z
+  postgres:
+    container_name: postgres
+    deploy:
+      resources:
+        limits:
+          memory: 1.5G
+        reservations:
+          memory: 1G
+    environment:
+      PGDATA: /var/lib/postgresql/data/pgdata
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+    healthcheck:
+      interval: 10s
+      retries: 5
+      start_period: 30s
+      test:
+      - CMD-SHELL
+      - pg_isready -U ${POSTGRES_USER:-postgres}
+      timeout: 5s
+    image: postgres:18
+    logging:
+      driver: json-file
+      options:
+        max-file: '3'
+        max-size: 10m
+    ports:
+    - 5432:5432
+    restart: unless-stopped
+    shm_size: 256mb
+    volumes:
+    - /opt/data/postgres:/var/lib/postgresql/data
+  qdrant:
+    container_name: athena-qdrant
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    environment:
+      QDRANT__SERVICE__GRPC_PORT: '6334'
+      RUST_LOG: actix_web=warn,qdrant=warn
+    healthcheck:
+      interval: 10s
+      retries: 5
+      start_period: 10s
+      test:
+      - CMD-SHELL
+      - bash -c 'echo > /dev/tcp/localhost/6333 || exit 1'
+      timeout: 5s
+    image: qdrant/qdrant:latest
+    logging:
+      driver: json-file
+      options:
+        max-file: '3'
+        max-size: 10m
+    networks:
+    - app_default
+    ports:
+    - 6333:6333
+    - 6334:6334
+    restart: unless-stopped
+    volumes:
+    - /opt/data/qdrant/storage:/qdrant/storage
+  redis:
+    command: redis-server --save 60 10000 --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru --tcp-backlog
+      511 --loglevel notice
+    container_name: redis
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 128M
+    healthcheck:
+      interval: 10s
+      retries: 5
+      test:
+      - CMD
+      - redis-cli
+      - ping
+      timeout: 5s
+    image: redis:8-alpine
+    logging:
+      driver: json-file
+      options:
+        max-file: '3'
+        max-size: 10m
+    ports:
+    - 6379:6379
+    restart: unless-stopped
+    volumes:
+    - redisdata:/data
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: openwebui
+    restart: unless-stopped
+    ports:
+    - 3001:8080
+    volumes:
+    - /home/svc_athene_ai@atom.ui/app/openwebui:/app/backend/data
+    environment:
+    - WEBUI_AUTH=false
+    - ENABLE_SIGNUP=true
+    - OPENAI_API_BASE_URL=https://opencode.ai/zen/go/v1
+    - OPENAI_API_KEY=${OPENCODE_GO_API_KEY}
+    healthcheck:
+      test:
+      - CMD
+      - curl
+      - -f
+      - http://localhost:8080
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-file: '3'
+        max-size: 10m
+  selti:
+    container_name: selti
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      DATABASE_URL: postgresql+asyncpg://svc_athene_ai:${SELTI_DB_PASSWORD}@postgres:5432/memory
+      EMBEDDING_API_URL: http://10.0.0.21:8080/v1
+      EMBEDDING_DIMENSION: '4096'
+      EMBEDDING_MODEL: qwen3-embedding-8b
+      LOG_FORMAT: posix
+      LOG_LEVEL: INFO
+      QDRANT_COLLECTION: memories
+      QDRANT_ENABLED: 'true'
+      QDRANT_URL: http://qdrant:6333
+      REDIS_URL: redis://redis:6379/0
+      SERVICE_NAME: selti
+    ports:
+    - '8000:8000'
+    healthcheck:
+      interval: 30s
+      retries: 3
+      start_period: 30s
+      test:
+      - CMD
+      - curl
+      - -sf
+      - http://localhost:8000/health
+      timeout: 10s
+    image: selti:latest
+    logging:
+      driver: json-file
+      options:
+        max-file: '3'
+        max-size: 10m
+    restart: unless-stopped
+volumes:
+  beat_schedule:
+    driver: local
+  redisdata:
+    driver: local

@@ -163,10 +163,13 @@ def orphans_cleanup(self) -> dict[str, Any]:
     routing_key="memory",
 )
 def refresh_clusters(self, namespace: str | None = None) -> dict[str, Any]:
-    """Пересчёт кластеров Level 2 хранимкой assign_clusters (миграция 022).
+    """Пересчёт кластеров Level 2: Qdrant ANN → пары → assign_clusters_from_pairs (022 v2).
 
-    Без аргумента — по всем namespace реестра. До применения 022 каждый
-    вызов деградирует в ok=False (beat не ломается), после — штатно.
+    Кандидатов ищет Qdrant (пачки 256 гранул, batch query_points), группирует
+    хранимка по залитым парам — триграммный SQL-поиск v1 удалён (квадратично
+    деградировал на проде: 620 с на project_meta). Без аргумента — по всем
+    namespace реестра; первый же ok=False (миграция pending или
+    qdrant_unavailable) останавливает обход — retry подхватит целиком.
     """
     service = _get_service()
     if namespace is not None:
@@ -178,6 +181,7 @@ def refresh_clusters(self, namespace: str | None = None) -> dict[str, Any]:
         result = run_async(service.refresh_clusters, namespace=ns.uid)
         summary["namespaces"][ns.uid] = result
         if result.get("ok") is False:
-            # Хранимки нет — миграция 022 ещё не применена: не шумим на каждый ns
+            # 022 не применена или Qdrant недоступен — по одному ns не шумим,
+            # выходим сразу (retry подхватит весь обход)
             return result
     return summary

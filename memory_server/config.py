@@ -66,8 +66,13 @@ class Settings(BaseSettings):
     # GC superseded-версий: hard delete только с наследником и старше retention.
     gc_retention_days: int = 90
     gc_dry_run: bool = True       # dry-run первый месяц (Рэй переключит на проде)
-    # Кластеризация Level 2 (022): порог триграммной близости assign_clusters.
+    # Кластеризация Level 2 (022 v2): кандидаты — Qdrant ANN (HNSW, cosine).
+    # cluster_threshold — порог score в Qdrant (близость эмбеддингов, не
+    # триграммы v1); top_k соседей на гранулу; группы < min_members
+    # кластером не считаются (singleton-вершины отсеивает хранимка).
     cluster_threshold: float = 0.92
+    cluster_top_k: int = 10
+    cluster_min_members: int = 2
 
     dedup_enabled: bool = True
     dedup_threshold: float = 0.95

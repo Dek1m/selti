@@ -5,7 +5,12 @@ from datetime import datetime, timezone
 
 from memory_server.config import Settings
 from memory_server.embedding.provider import EmbeddingProvider
-from memory_server.exceptions import ConflictError, NotFoundError, SchemaPendingError
+from memory_server.exceptions import (
+    ConflictError,
+    NotFoundError,
+    SchemaPendingError,
+    VectorStoreError,
+)
 from memory_server.logger import async_measure_duration, get_logger
 from memory_server.memory.dedup import DedupAction, DedupEngine
 from memory_server.memory.namespace_repository import NamespaceRepository
@@ -560,21 +565,35 @@ class MemoryService:
     # ── Кластеризация Level 2 (Фаза 2.3, миграция 022) ──
 
     async def refresh_clusters(self, namespace: str) -> dict:
-        """Пересчёт кластеров неймспейса хранимкой assign_clusters.
+        """Пересчёт кластеров namespace (v2: кандидаты — Qdrant ANN, 022).
 
-        До применения миграции 022 на проде — graceful: SchemaPendingError
-        превращается в понятный ok=False, beat-расписание не ломается.
+        Graceful-отказы (beat-расписание не ломается, retry поднимет повтор):
+          * миграция 022 не применена → ok=False "migration 022 pending";
+          * Qdrant недоступен → ok=False "qdrant_unavailable": пары собрать
+            нельзя, прежняя разметка кластеров НЕ трогается.
         """
         ns_record = await self.ns_repo.get_by_uid(namespace)
         if ns_record is None:
             raise NotFoundError(namespace, message=f"namespace is not registered: {namespace}")
         try:
             rows = await self.repository.refresh_clusters(
-                ns_record.id, self.config.cluster_threshold
+                ns_record.id,
+                threshold=self.config.cluster_threshold,
+                top_k=self.config.cluster_top_k,
+                min_members=self.config.cluster_min_members,
             )
         except SchemaPendingError:
-            logger.warning("refresh_clusters: assign_clusters not available (migration 022 pending)")
+            logger.warning(
+                "refresh_clusters: assign_clusters_from_pairs not available "
+                "(migration 022 pending)"
+            )
             return {"ok": False, "reason": "migration 022 pending", "clusters": []}
+        except VectorStoreError as exc:
+            logger.warning(
+                "refresh_clusters: qdrant unavailable, clustering skipped",
+                extra={"namespace": namespace, "error": str(exc)},
+            )
+            return {"ok": False, "reason": "qdrant_unavailable", "clusters": []}
         logger.info("refresh_clusters: done", extra={"namespace": namespace, "clusters": len(rows)})
         return {"ok": True, "clusters": rows}
 

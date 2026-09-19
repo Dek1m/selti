@@ -45,3 +45,16 @@ class SchemaPendingError(MemoryError):
     а не в 500.
     """
     pass
+
+
+class VectorStoreError(MemoryError):
+    """Векторный бэкенд (Qdrant) недоступен или ответил ошибкой.
+
+    Фаза 2.3 v2: кластеризация берёт кандидатов из Qdrant ANN. При отказе
+    векторного бэкенда пары собрать нельзя — пересчёт обязан честно
+    отказаться (сервис вернёт ok=False qdrant_unavailable), а не заливать
+    пустые пары и стирать существующую разметку кластеров.
+    """
+
+    def __init__(self, message: str):
+        super().__init__(message)

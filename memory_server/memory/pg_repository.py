@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import uuid as uuid_module
 from datetime import datetime
 
 import asyncpg
@@ -633,12 +634,45 @@ class PostgreSQLRepository:
         if isinstance(exc, (asyncpg.exceptions.UndefinedFunctionError, asyncpg.exceptions.UndefinedTableError)):
             raise SchemaPendingError(str(exc)) from exc
 
-    async def refresh_clusters(self, namespace_id: str, threshold: float) -> list[dict]:
-        """Пересчёт кластеров неймспейса хранимкой assign_clusters (022)."""
+    async def fetch_asserted_ids(self, namespace_id: str) -> list[str]:
+        """ID актуальных гранул namespace — вход ANN-скролла кластеризации v2.
+
+        Канонический фильтр (status='asserted' AND valid_to IS NULL) —
+        те же грани, что у Qdrant-фильтра active_only: пары строятся только
+        по живым гранулам, SQL-нормализация хранимки это перепроверяет.
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(q.SELECT_ASSERTED_CLUSTER_IDS, namespace_id)
+            return [row["id"] for row in rows]
+
+    async def apply_cluster_pairs(
+        self,
+        namespace_id: str,
+        pairs: list[tuple[str, str, float]],
+        min_members: int = 2,
+    ) -> list[dict]:
+        """Пары близости → temp _cluster_pairs → assign_clusters_from_pairs (022).
+
+        Одна транзакция: temp-таблица живёт ровно до COMMIT (ON COMMIT DROP),
+        COPY не ходит через подготовленные планы — десятки тысяч пар
+        льются секундами. Пустой список валиден: хранимка снимет прежнюю
+        разметку и почистит опустевшие кластеры (identity-пересчёт).
+        """
         try:
             async with self.pool.acquire() as conn:
-                rows = await conn.fetch(q.REFRESH_CLUSTERS, namespace_id, threshold)
-                return [dict(row) for row in rows]
+                async with conn.transaction():
+                    await conn.execute(q.CREATE_CLUSTER_PAIRS_TEMP)
+                    if pairs:
+                        await conn.copy_records_to_table(
+                            "_cluster_pairs",
+                            records=[
+                                (uuid_module.UUID(a), uuid_module.UUID(b), s)
+                                for a, b, s in pairs
+                            ],
+                            columns=("a_id", "b_id", "similarity"),
+                        )
+                    rows = await conn.fetch(q.REFRESH_CLUSTERS, namespace_id, min_members)
+                    return [dict(row) for row in rows]
         except (asyncpg.exceptions.UndefinedFunctionError, asyncpg.exceptions.UndefinedTableError) as exc:
             self._raise_if_schema_pending(exc)
 

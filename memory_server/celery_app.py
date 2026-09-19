@@ -58,10 +58,17 @@ app.conf.task_default_routing_key = "default"
 # Batch tasks → batch queue
 # Hash tasks → hash queue
 # Lifecycle tasks (Фаза 2.2: decay/stale/GC/clusters) → memory queue
+# Beat-задачи: beat шлёт send_task() без exec-options декоратора —
+# без явного route падают в default, которую воркер не слушает (-Q memory,batch,hash).
+# Явный queue= в декораторе (apply_async) приоритетнее route (lpmerge: options > route),
+# поэтому ingest_batch (queue='batch') route memory_tasks.* не перебивает.
 app.conf.task_routes = {
     "memory_server.tasks.memory_tasks.*": {"queue": "memory"},
     "memory_server.tasks.hash_tasks.*": {"queue": "hash"},
     "memory_server.tasks.lifecycle_tasks.*": {"queue": "memory"},
+    "memory_server.tasks.context_tasks.*": {"queue": "memory"},
+    "worker_stats.update": {"queue": "memory"},
+    "business_metrics.update": {"queue": "memory"},
 }
 
 # ── Production Worker Settings ──
@@ -161,6 +168,30 @@ try:
     logger.info("Worker lifecycle signals connected (SeltiState)")
 except ImportError:
     logger.warning("Worker lifecycle signals not available")
+
+# ── Beat Logging ──
+# beat-процесс не проходит worker_process_init (нет fork), а перехват
+# setup_logging (state.py) отключает конфигурацию логов Celery — без этого
+# хендлера root logger в beat остаётся без handlers и его логи теряются.
+# beat_init стреляет в celery/beat.py после setup_logging, до главного цикла.
+try:
+    from celery.signals import beat_init
+
+    @beat_init.connect(weak=False)
+    def on_beat_init(**kwargs):
+        from memory_server.tasks.logging_config import setup_worker_logging
+
+        setup_worker_logging()
+        # Отправка задач расписания ('Scheduler: Sending due task') — INFO:
+        # не глушим вместе с остальным celery.* → WARNING
+        logging.getLogger("celery.beat").setLevel(logging.INFO)
+        logger.info(
+            "beat: schedule started",
+            extra={"schedule_entries": len(app.conf.beat_schedule)},
+        )
+
+except ImportError:
+    logger.warning("beat_init signal not available")
 
 logger.info(
     "Celery app created",
