@@ -580,3 +580,6 @@ select.chip option { background: var(--sl-bg-shell); color: var(--sl-text); }
   color: var(--sl-text-3); font: 400 13px var(--sl-font-body);
   font-variant-numeric: tabular-nums;
 }
+
+/* Buttons inside vertical flex contexts (stubs) must not stretch */
+.stub .btn { flex: 0 0 auto; align-self: center; }
