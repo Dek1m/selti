@@ -32,11 +32,11 @@ def _digest(text: str) -> str:
 
 
 @router.get("/context/{slug}")
-async def get_context(slug: str) -> JSONResponse:
-    """Снапшот контекста проекта (read-only: Redis → таблица, без пересчёта)."""
+async def get_context(slug: str, refresh: bool = False) -> JSONResponse:
+    """Снапшот контекста проекта (Redis → таблица; refresh=1 — пересчёт)."""
     service = await get_state().get_memory_service()
     try:
-        context = await service.get_project_context(slug)
+        context = await service.get_project_context(slug, refresh=refresh)
     except NotFoundError:
         return JSONResponse(status_code=404, content={"detail": f"project not found: {slug}"})
     return JSONResponse(content=context.model_dump(mode="json"))
