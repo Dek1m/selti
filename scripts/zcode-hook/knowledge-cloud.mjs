@@ -201,6 +201,18 @@ function changedSections(prev, next) {
   return changed;
 }
 
+/** Базовый URL selti: env SELTI_URL → файл ~/.zcode/selti-url → localhost. */
+function seltiBaseUrl() {
+  if (process.env.SELTI_URL) return process.env.SELTI_URL.replace(/\/+$/, "");
+  try {
+    const fromFile = readFileSync(join(homedir(), ".zcode", "selti-url"), "utf8").trim();
+    if (fromFile) return fromFile.replace(/\/+$/, "");
+  } catch {
+    /* файла нет — дефолт */
+  }
+  return "http://localhost:8000";
+}
+
 async function main() {
   let raw = "";
   try {
@@ -219,7 +231,7 @@ async function main() {
   const projectDir = process.env.ZCODE_PROJECT_DIR;
   if (!projectDir) emitEmpty(eventName);
 
-  const baseUrl = (process.env.SELTI_URL || "http://localhost:8000").replace(/\/+$/, "");
+  const baseUrl = seltiBaseUrl();
 
   // Хук не имеет доступа к БД selti — только HTTP к реестру
   const registry = await getJson(`${baseUrl}/projects`);
