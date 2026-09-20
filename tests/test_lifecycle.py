@@ -420,12 +420,13 @@ class TestPgCreateVersion:
         # V3.1 (дыра 2): cluster_id наследуется INSERT-SELECT'ом
         assert "old.cluster_id" in q.INSERT_MEMORY_VERSION
         # V3.1 (дыра 1): REWIRE рёбер в той же транзакции — обе стороны
-        executes = conn.execute.await_args_list
-        assert [c.args[0] for c in executes] == [
+        # REWIRE через fetch (RETURNING r.id — счётчик RELATIONS_REWIRED_TOTAL)
+        fetches = conn.fetch.await_args_list
+        assert [c.args[0] for c in fetches] == [
             q.REWIRE_RELATIONS_SOURCE, q.REWIRE_RELATIONS_TARGET,
         ]
-        assert executes[0].args[1:] == (OLD_ID, NEW_ID)
-        assert executes[1].args[1:] == (OLD_ID, NEW_ID)
+        assert fetches[0].args[1:] == (OLD_ID, NEW_ID)
+        assert fetches[1].args[1:] == (OLD_ID, NEW_ID)
 
     @pytest.mark.asyncio
     async def test_supersede_conflict_rolls_back(self, mock_pool):

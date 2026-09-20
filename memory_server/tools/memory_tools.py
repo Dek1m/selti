@@ -58,6 +58,7 @@ TASK_GET_HISTORY = "memory_server.tasks.memory_tasks.get_memory_history"
 TASK_FREEZE = "memory_server.tasks.memory_tasks.freeze_memory"
 TASK_STALE_LIST = "memory_server.tasks.memory_tasks.stale_list"
 TASK_CLUSTER_LIST = "memory_server.tasks.memory_tasks.cluster_list"
+TASK_LINKER_STATS = "memory_server.tasks.linker_tasks.linker_stats"
 
 
 def _coerce_metadata(metadata) -> dict | None:
@@ -610,3 +611,17 @@ async def memory_cluster_list(
         namespace=namespace,
         project_id=project_id,
     )
+
+
+@mcp.tool()
+@tool_handler("memory_linker_stats")
+async def memory_linker_stats(
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Статистика Линкера V3 (ADR-019 G). Read-only.
+
+    Рёбра по слоям (l1a synonym ANN / l1c co-occurrence / l2 LLM-вердикт),
+    судьба имён (resolved / pending target_name), размер очереди L2,
+    вердикты по типам и hit-rate verdict-cache.
+    """
+    return await celery_call(TASK_LINKER_STATS)

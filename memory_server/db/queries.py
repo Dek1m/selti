@@ -199,6 +199,7 @@ REWIRE_RELATIONS_SOURCE = """
             AND x.link_type = r.link_type
             AND x.target_id IS NOT DISTINCT FROM r.target_id
       )
+    RETURNING r.id
 """
 
 REWIRE_RELATIONS_TARGET = """
@@ -218,6 +219,7 @@ REWIRE_RELATIONS_TARGET = """
             AND x.source_id = r.source_id
             AND x.link_type = r.link_type
       )
+    RETURNING r.id
 """
 
 # Supersession-цепочка в обе стороны (Фаза 2.1): назад по supersedes
@@ -667,8 +669,29 @@ DELETE_RESOURCE_HASH = """
 
 
 # ── Backfill: metadata.links → relations ──
+#
+# V3.2 (ADR-019 H / ADR-017 A.1, фаза 1): не-UUID цель резолвится
+# lateral-JOIN'ом по entity_name ДО вставки ребра. Приоритет кандидата:
+# (1) свой проект (project_id совпадает с источником), (2) глобальный слой
+# (project_id IS NULL), (3) свежейшая created_at; только актуальные
+# (status='asserted' AND valid_to IS NULL) — ребро не прилипает к трупу.
+# Выражение m2.metadata->>'entity_name' обслуживает idx_memories_entity_name (018).
+# Резолвнутое имя: target_id заполняется, target_name СОХРАНЯЕТСЯ как
+# происхождение (наблюдаемость резолва: target_id+target_name = разрешённое).
+_LATERAL_RESOLVE_TARGET = """
+    LEFT JOIN LATERAL (
+        SELECT m2.id AS resolved_id
+        FROM memories m2
+        WHERE m2.metadata->>'entity_name' = link->>'target'
+          AND m2.status = 'asserted' AND m2.valid_to IS NULL
+          AND (m.project_id IS NOT DISTINCT FROM m2.project_id
+               OR m2.project_id IS NULL)
+        ORDER BY m2.project_id IS NULL, m2.created_at DESC
+        LIMIT 1
+    ) res ON true
+"""
 
-BACKFILL_RELATIONS_FROM_METADATA = """
+BACKFILL_RELATIONS_FROM_METADATA = f"""
     WITH source_links AS (
         SELECT
             m.id AS source_id,
@@ -676,12 +699,14 @@ BACKFILL_RELATIONS_FROM_METADATA = """
             link->>'target' AS target_str,
             link->>'description' AS description,
             CASE
-                WHEN link->>'target' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                WHEN link->>'target' ~ '^[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}$'
                 THEN (link->>'target')::uuid
                 ELSE NULL
-            END AS target_id
+            END AS uuid_target,
+            res.resolved_id
         FROM memories m,
              jsonb_array_elements(m.metadata->'links') AS link
+             {_LATERAL_RESOLVE_TARGET}
         WHERE m.id = $1
           AND m.metadata->'links' IS NOT NULL
           AND jsonb_array_length(m.metadata->'links') > 0
@@ -689,20 +714,21 @@ BACKFILL_RELATIONS_FROM_METADATA = """
     INSERT INTO relations (source_id, target_id, target_name, link_type, description, weight, metadata)
     SELECT
         sl.source_id,
-        sl.target_id,
-        CASE WHEN sl.target_id IS NULL THEN sl.target_str ELSE NULL END,
+        COALESCE(sl.uuid_target, sl.resolved_id),
+        CASE WHEN sl.uuid_target IS NOT NULL THEN NULL ELSE sl.target_str END,
         sl.link_type,
         sl.description,
         1.0,
-        '{"synced_from": "metadata.links"}'::jsonb
+        '{{"synced_from": "metadata.links"}}'::jsonb
     FROM source_links sl
     WHERE sl.link_type IS NOT NULL
-      AND (sl.target_id IS NULL OR EXISTS (SELECT 1 FROM memories WHERE id = sl.target_id))
+      AND (COALESCE(sl.uuid_target, sl.resolved_id) IS NULL
+           OR EXISTS (SELECT 1 FROM memories WHERE id = COALESCE(sl.uuid_target, sl.resolved_id)))
     ON CONFLICT (source_id, target_id, link_type) WHERE target_id IS NOT NULL
     DO UPDATE SET
         description = EXCLUDED.description,
         weight = EXCLUDED.weight
-    RETURNING id
+    RETURNING id, (target_name IS NOT NULL AND target_id IS NOT NULL) AS resolved_by_name
 """
 
 # Удалить metadata-based связи для гранулы (source_id = $1)
@@ -714,7 +740,7 @@ DELETE_SYNCED_RELATIONS = """
       AND metadata->>'synced_from' = 'metadata.links'
 """
 
-SYNC_LINKS_BATCH = """
+SYNC_LINKS_BATCH = f"""
     WITH source_links AS (
         SELECT
             m.id AS source_id,
@@ -722,12 +748,14 @@ SYNC_LINKS_BATCH = """
             link->>'target' AS target_str,
             link->>'description' AS description,
             CASE
-                WHEN link->>'target' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                WHEN link->>'target' ~ '^[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}$'
                 THEN (link->>'target')::uuid
                 ELSE NULL
-            END AS target_id
+            END AS uuid_target,
+            res.resolved_id
         FROM memories m,
              jsonb_array_elements(m.metadata->'links') AS link
+             {_LATERAL_RESOLVE_TARGET}
         WHERE m.id = ANY($1::uuid[])
           AND m.metadata->'links' IS NOT NULL
           AND jsonb_array_length(m.metadata->'links') > 0
@@ -741,21 +769,212 @@ SYNC_LINKS_BATCH = """
     INSERT INTO relations (source_id, target_id, target_name, link_type, description, weight, metadata)
     SELECT
         sl.source_id,
-        sl.target_id,
-        CASE WHEN sl.target_id IS NULL THEN sl.target_str ELSE NULL END,
+        COALESCE(sl.uuid_target, sl.resolved_id),
+        CASE WHEN sl.uuid_target IS NOT NULL THEN NULL ELSE sl.target_str END,
         sl.link_type,
         sl.description,
         1.0,
-        '{"synced_from": "metadata.links"}'::jsonb
+        '{{"synced_from": "metadata.links"}}'::jsonb
     FROM source_links sl
     WHERE sl.link_type IS NOT NULL
-      AND (sl.target_id IS NULL OR EXISTS (SELECT 1 FROM memories WHERE id = sl.target_id))
+      AND (COALESCE(sl.uuid_target, sl.resolved_id) IS NULL
+           OR EXISTS (SELECT 1 FROM memories WHERE id = COALESCE(sl.uuid_target, sl.resolved_id)))
     ON CONFLICT (source_id, target_id, link_type) WHERE target_id IS NOT NULL
     DO UPDATE SET
         description = EXCLUDED.description,
         weight = EXCLUDED.weight,
         metadata = EXCLUDED.metadata
+    RETURNING id, (target_name IS NOT NULL AND target_id IS NOT NULL) AS resolved_by_name
+"""
+
+# ── Линкер V3 (ADR-019 C): name_reconciler / co-occurrence / L1a / L2 ──
+
+# Кампания name_reconciler (V3.2): батчевый резолв висячих target_name тем же
+# приоритетом, что и lateral в sync (свой проект → глобальный → свежейшая).
+# NOT EXISTS-гарда: резолв не создаёт дубль под partial unique
+# (source_id, target_id, link_type) — если каноничное ребро уже есть, висяк
+# остаётся на разбор (виден в отчёте как pending).
+_RESOLVE_PENDING_TARGET_NAMES_CTE = """
+    WITH pending AS (
+        -- candidates-first (баг приёмки В4): резолвимость проверяется ДО
+        -- LIMIT, иначе 500 старейших нерезолвимых навсегда замораживают
+        -- кампанию (head-of-line blocking).
+        SELECT r.id AS relation_id
+        FROM relations r
+        JOIN memories src ON src.id = r.source_id
+        JOIN LATERAL (
+            SELECT m2.id
+            FROM memories m2
+            WHERE m2.metadata->>'entity_name' = r.target_name
+              AND m2.status = 'asserted' AND m2.valid_to IS NULL
+              AND (src.project_id IS NOT DISTINCT FROM m2.project_id
+                   OR m2.project_id IS NULL)
+            ORDER BY m2.project_id IS NULL, m2.created_at DESC
+            LIMIT 1
+        ) resolvable ON true
+        WHERE r.target_id IS NULL
+          AND r.target_name IS NOT NULL
+        ORDER BY r.created_at
+        LIMIT $1
+    ),
+    candidates AS (
+        SELECT p.relation_id, cand.id AS target_id
+        FROM pending p
+        JOIN relations r ON r.id = p.relation_id
+        JOIN memories src ON src.id = r.source_id
+        JOIN LATERAL (
+            SELECT m2.id
+            FROM memories m2
+            WHERE m2.metadata->>'entity_name' = r.target_name
+              AND m2.status = 'asserted' AND m2.valid_to IS NULL
+              AND (src.project_id IS NOT DISTINCT FROM m2.project_id
+                   OR m2.project_id IS NULL)
+            ORDER BY m2.project_id IS NULL, m2.created_at DESC
+            LIMIT 1
+        ) cand ON true
+        WHERE NOT EXISTS (
+            SELECT 1 FROM relations dup
+            WHERE dup.source_id = r.source_id
+              AND dup.target_id = cand.id
+              AND dup.link_type = r.link_type
+              AND dup.id <> r.id
+        )
+    )
+"""
+
+# dry_run: только счёт (WHERE-цепочка идентична боевому UPDATE)
+RESOLVE_PENDING_TARGET_NAMES_DRY = (
+    _RESOLVE_PENDING_TARGET_NAMES_CTE
+    + """
+    SELECT count(*) AS resolved FROM candidates
+    """
+)
+
+RESOLVE_PENDING_TARGET_NAMES = (
+    _RESOLVE_PENDING_TARGET_NAMES_CTE
+    + """
+    UPDATE relations r
+    SET target_id = c.target_id,
+        metadata = r.metadata || jsonb_build_object('resolved_by', 'name_reconciler')
+    FROM candidates c
+    WHERE r.id = c.relation_id
+    RETURNING r.id
+    """
+)
+
+# Счётчик очереди для отчёта кампании и memory_linker_stats.
+COUNT_PENDING_TARGET_NAMES = """
+    SELECT count(*) AS pending
+    FROM relations
+    WHERE target_id IS NULL AND target_name IS NOT NULL
+"""
+
+# Co-occurrence L1c (V3.2): соседи той же сессии (project+namespace+session_id)
+# → related_to 0.5. Однонаправленно от обрабатываемой гранулы к свежим соседям;
+# NOT EXISTS гасит оба направления (не плодим встречные related_to-дубли).
+INSERT_COOCCURRENCE_LINKS = """
+    INSERT INTO relations (source_id, target_id, link_type, weight, metadata)
+    SELECT $1, n.id, 'related_to', 0.5,
+           jsonb_build_object('source', 'linker_v3', 'layer', 'l1c',
+                              'session_id', $4)
+    FROM (
+        SELECT m.id
+        FROM memories m
+        WHERE m.project_id IS NOT DISTINCT FROM $2::uuid
+          AND m.namespace_id = $3::uuid
+          AND m.metadata->>'session_id' = $4
+          AND m.id <> $1::uuid
+          AND m.status = 'asserted' AND m.valid_to IS NULL
+        ORDER BY m.created_at DESC
+        LIMIT $5
+    ) n
+    WHERE NOT EXISTS (
+        SELECT 1 FROM relations r
+        WHERE r.link_type = 'related_to'
+          AND ((r.source_id = $1::uuid AND r.target_id = n.id)
+               OR (r.source_id = n.id AND r.target_id = $1::uuid))
+    )
+    ON CONFLICT (source_id, target_id, link_type) WHERE target_id IS NOT NULL
+    DO NOTHING
     RETURNING id
+"""
+
+# Beat-кампания co-occurrence: гранулы с session_id, БЕЗ l1c-рёбер и с живыми
+# соседями (гранулы без соседей не крутятся в выборке вечно — идемпотентность).
+SELECT_COOCCURRENCE_CANDIDATES = """
+    SELECT m.id::text, m.project_id, m.namespace_id::text,
+           m.metadata->>'session_id' AS session_id
+    FROM memories m
+    WHERE m.metadata->>'session_id' IS NOT NULL
+      AND m.status = 'asserted' AND m.valid_to IS NULL
+      AND NOT EXISTS (
+          -- Любые l1c (в обе стороны): INSERT гасит встречные пары, поэтому
+          -- гранула с полностью покрытыми соседями никогда не получит
+          -- исходящих l1c и без этой Symmetric-гarder крутилась бы в
+          -- выборке вечно (баг приёмки М6).
+          SELECT 1 FROM relations r
+          WHERE r.metadata->>'layer' = 'l1c'
+            AND (r.source_id = m.id OR r.target_id = m.id)
+      )
+      AND EXISTS (
+          SELECT 1 FROM memories m2
+          WHERE m2.project_id IS NOT DISTINCT FROM m.project_id
+            AND m2.namespace_id = m.namespace_id
+            AND m2.metadata->>'session_id' = m.metadata->>'session_id'
+            AND m2.id <> m.id
+            AND m2.status = 'asserted' AND m2.valid_to IS NULL
+      )
+    ORDER BY m.created_at DESC
+    LIMIT $1
+"""
+
+# Источник/кандидаты L2: контент с заголовком (entity_name) и хэшем для
+# verdict-cache — один батч-SELECT на всех участников вердикта.
+SELECT_GRANULES_FOR_LINKER = """
+    SELECT m.id::text, m.content, m.metadata->>'entity_name' AS entity_name,
+           m.content_hash, n.uid AS namespace
+    FROM memories m
+    JOIN namespaces n ON n.id = m.namespace_id
+    WHERE m.id = ANY($1::uuid[])
+      AND m.status = 'asserted' AND m.valid_to IS NULL
+"""
+
+# Карточка новой гранулы для link_new_granule: uid (граница зоны дедупа
+# ключуется uid) + namespace_id (Qdrant-фильтр) + сессия (L1c).
+SELECT_NEW_GRANULE_FOR_LINKER = """
+    SELECT n.uid AS ns_uid, m.namespace_id::text AS ns_id,
+           m.metadata->>'session_id' AS sid, m.project_id
+    FROM memories m
+    JOIN namespaces n ON n.id = m.namespace_id
+    WHERE m.id = $1::uuid
+      AND m.status = 'asserted' AND m.valid_to IS NULL
+"""
+
+# Автосвязь линкера: DO NOTHING — линкер никогда не перезаписывает ручные
+# и Тишины рёбра (владение по metadata.source, ADR-019 C).
+INSERT_LINKER_RELATION = """
+    INSERT INTO relations (source_id, target_id, link_type, description, weight, metadata)
+    VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+    ON CONFLICT (source_id, target_id, link_type) WHERE target_id IS NOT NULL
+    DO NOTHING
+    RETURNING id
+"""
+
+# memory_linker_stats (ADR-019 G): рёбра линкера по слоям.
+SELECT_LINKER_LINK_STATS = """
+    SELECT metadata->>'layer' AS layer, count(*) AS count
+    FROM relations
+    WHERE metadata->>'source' = 'linker_v3'
+    GROUP BY 1
+"""
+
+# memory_linker_stats: судьба имён (resolved = target_id+target_name —
+# резолв сохраняет имя как происхождение; pending = висячие).
+SELECT_LINKER_NAME_STATS = """
+    SELECT count(*) FILTER (WHERE target_id IS NOT NULL) AS resolved,
+           count(*) FILTER (WHERE target_id IS NULL) AS pending
+    FROM relations
+    WHERE target_name IS NOT NULL
 """
 
 # ═══════════════════════════════════════════════════════════════

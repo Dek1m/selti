@@ -17,6 +17,7 @@ import asyncpg
 from memory_server.db import queries as q
 from memory_server.exceptions import ConflictError, DatabaseError, SchemaPendingError
 from memory_server.logger import get_logger
+from memory_server.metrics import RELATIONS_REWIRED_TOTAL
 from memory_server.models import (
     GraphStats,
     MemoryListResult,
@@ -378,9 +379,16 @@ class PostgreSQLRepository:
                 # REWIRE после SUPERSEDE: живость второй стороны оценивается
                 # в финальном состоянии (старая уже superseded — её рёбра с
                 # живыми сторонами уходят наследнику)
-                await conn.execute(q.REWIRE_RELATIONS_SOURCE, old_id, new_id)
-                await conn.execute(q.REWIRE_RELATIONS_TARGET, old_id, new_id)
+                rewired_src = await conn.fetch(q.REWIRE_RELATIONS_SOURCE, old_id, new_id)
+                rewired_tgt = await conn.fetch(q.REWIRE_RELATIONS_TARGET, old_id, new_id)
                 record_row = await conn.fetchrow(q.SELECT_MEMORY_BY_ID, new_id)
+        rewired = len(rewired_src) + len(rewired_tgt)
+        if rewired:
+            # Воркер-край операции V3.1: web-INFO tool_handler'а это не дублирует
+            RELATIONS_REWIRED_TOTAL.inc(rewired)
+            logger.info("create_version: rewired", extra={
+                "old_id": old_id, "new_id": new_id, "rewired": rewired,
+            })
         return self._to_record(record_row), str(inserted["namespace_id"])
 
     async def get_history(self, granule_id: str) -> list[MemoryRecord]:
@@ -588,17 +596,39 @@ class PostgreSQLRepository:
             return {"nodes": row["nodes"] or [], "edges": row["edges"] or []}
 
     async def sync_links_to_relations(self, memory_id: str) -> int:
+        """Sync metadata.links → relations; lateral-резолв имён внутри SQL (V3.2).
+
+        Возвращает число вставленных/обновлённых рёбер; lateral-резолвы имён
+        дополнительно инкрементируют метрику (RETURNING resolved_by_name).
+        """
         async with self.pool.acquire() as conn:
             await conn.execute(q.DELETE_SYNCED_RELATIONS, memory_id)
             rows = await conn.fetch(q.BACKFILL_RELATIONS_FROM_METADATA, memory_id)
-            return len(rows)
+        self._report_names_resolved(rows)
+        return len(rows)
 
     async def sync_links_batch(self, memory_ids: list[str]) -> int:
+        """Batch-sync metadata.links → relations с lateral-резолвом имён (V3.2)."""
         if not memory_ids:
             return 0
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(q.SYNC_LINKS_BATCH, memory_ids)
-            return len(rows)
+        self._report_names_resolved(rows)
+        return len(rows)
+
+    @staticmethod
+    def _report_names_resolved(rows: list) -> None:
+        """Метрика имён, разрешённых lateral-резолвом в sync-пути.
+
+        `in` работает и для asyncpg.Record, и для dict (моки тестов).
+        """
+        resolved = sum(
+            1 for r in rows if "resolved_by_name" in r and r["resolved_by_name"]
+        )
+        if resolved:
+            from memory_server.metrics import LINKER_NAMES_RESOLVED_TOTAL
+
+            LINKER_NAMES_RESOLVED_TOTAL.labels(path="sync").inc(resolved)
 
     async def get_graph_stats(self) -> GraphStats:
         async with self.pool.acquire() as conn:

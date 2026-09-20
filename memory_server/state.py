@@ -47,6 +47,7 @@ class SeltiState:
         self._hash_repository: Optional["HashRepository"] = None
         self._namespace_repository: Optional["NamespaceRepository"] = None
         self._project_repository: Optional["ProjectRepository"] = None
+        self._linker: Optional["Linker"] = None
         # Отдельные lock'и: pool не захватывается под services_lock → дедлока нет
         self._pool_lock = asyncio.Lock()
         self._services_lock = asyncio.Lock()
@@ -225,6 +226,10 @@ class SeltiState:
                 qdrant=qdrant,
                 ns_repo=self._namespace_repository,
             )
+            # Линкер V3 (ADR-019): store диспетчирует link_new_granule без
+            # блокировки записи; импорт внутри функции — tasks тянут state
+            from memory_server.tasks.linker_tasks import enqueue_link
+
             self._memory_service = MemoryService(
                 repository=repository,
                 embedding_provider=self.get_embedding_client(),
@@ -232,8 +237,55 @@ class SeltiState:
                 config=settings,
                 project_repository=self._project_repository,
                 redis_provider=self.get_redis,
+                linker_dispatch=enqueue_link,
             )
         return self._memory_service
+
+    async def get_linker(self) -> "Linker":
+        """Linker V3 (ADR-019 C): pool + Qdrant + Redis + LLM-клиент L2.
+
+        LLM-клиент создаётся только при непустом linker_llm_base_url —
+        пустой URL = L2 отключён (Linker.llm=None, WARN в задачах).
+        """
+        if self._linker is not None:
+            return self._linker
+        pool = await self.get_pool()
+        async with self._services_lock:
+            if self._linker is not None:
+                return self._linker
+            from memory_server.llm_client import LinkerLLMClient
+            from memory_server.memory.linker import Linker
+            from memory_server.memory.qdrant_store import QdrantStore
+
+            qdrant_client = self.get_qdrant()
+            llm = (
+                LinkerLLMClient(
+                    base_url=settings.linker_llm_base_url,
+                    api_key=settings.linker_llm_api_key,
+                    model=settings.linker_llm_model,
+                    timeout=settings.linker_llm_timeout,
+                    max_retries=settings.linker_llm_retries,
+                )
+                if settings.linker_llm_base_url
+                else None
+            )
+            if llm is None:
+                logger.warning(
+                    "linker: L2 verdicts disabled (linker_llm_base_url is empty); "
+                    "L1 layers work, orphans will be picked up by V3.4 orphan_linker"
+                )
+            self._linker = Linker(
+                pool=pool,
+                qdrant=(
+                    QdrantStore(qdrant_client, collection=settings.qdrant_collection)
+                    if qdrant_client
+                    else None
+                ),
+                redis_provider=self.get_redis,
+                config=settings,
+                llm=llm,
+            )
+        return self._linker
 
     # ════════════════════════ Shutdown ═══════════════════════
 
@@ -289,6 +341,17 @@ class SeltiState:
         self._hash_repository = None
         self._namespace_repository = None
         self._project_repository = None
+        # LLM-клиент линкера (httpx) закрываем до Redis — его очередь
+        if self._linker is not None:
+            try:
+                if self._linker.llm is not None:
+                    await self._linker.llm.aclose()
+            except Exception as exc:
+                logger.warning(
+                    "LinkerLLMClient close failed",
+                    extra={"error": str(exc), "error_type": type(exc).__name__},
+                )
+            self._linker = None
         logger.info("SeltiState closed")
 
     # ════════════════════════ Метрики ═══════════════════════

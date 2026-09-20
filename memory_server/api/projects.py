@@ -142,6 +142,10 @@ async def register_project_endpoint(request: Request, req: ProjectRegisterReques
     # compare_digest только по байтам: не-ASCII в заголовке ронял строковое сравнение в 500
     provided = request.headers.get("x-selti-key", "").encode("utf-8")
     if expected and not secrets.compare_digest(provided, expected.encode("utf-8")):
+        # Провал аутентификации без лога — нарушение стандарта (аудит, правка F)
+        logger.warning("project register: auth failed", extra={
+            "ip": request.client.host if request.client else None,
+        })
         return JSONResponse(status_code=401, content={"detail": "invalid or missing X-SELTI-KEY"})
 
     pool = await get_state().get_pool()
@@ -151,4 +155,10 @@ async def register_project_endpoint(request: Request, req: ProjectRegisterReques
     if status == 409:
         # 409 должен быть виден человеку в логах (плагин на него молчит)
         logger.warning("project register slug conflict", extra={"slug": req.slug})
+    elif status == 201 or (status == 200 and body.get("status") == "path_updated"):
+        # Реальные изменения реестра; matched (no-op) не логируем —
+        # каждый SessionStart плагина заспамил бы
+        logger.info("project register", extra={
+            "status": body.get("status"), "slug": req.slug,
+        })
     return JSONResponse(status_code=status, content=body)

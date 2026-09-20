@@ -70,6 +70,7 @@ app.conf.task_routes = {
     "memory_server.tasks.hash_tasks.*": {"queue": "hash"},
     "memory_server.tasks.lifecycle_tasks.*": {"queue": "memory"},
     "memory_server.tasks.context_tasks.*": {"queue": "memory"},
+    "memory_server.tasks.linker_tasks.*": {"queue": "memory"},
     "worker_stats.update": {"queue": "memory"},
     "business_metrics.update": {"queue": "memory"},
 }
@@ -145,6 +146,22 @@ app.conf.beat_schedule = {
     "orphans-cleanup": {
         "task": "memory_server.tasks.lifecycle_tasks.orphans_cleanup",
         "schedule": crontab(day_of_week="sun", hour=5, minute=30),  # воскр. 05:30 UTC
+    },
+    # Линкер V3 (ADR-019 C, V3.2/V3.3): резолв имён и co-occurrence — раз в
+    # час (не чаще, ADR C L3); воркер L2-вердиктов — чаще, очередь маленькая.
+    # name_reconciler без аргументов: dry_run берётся из конфига
+    # (linker_reconciler_dry_run=True до ручной первой кампании).
+    "linker-name-reconciler": {
+        "task": "memory_server.tasks.linker_tasks.name_reconciler",
+        "schedule": 3600.0,  # раз в час
+    },
+    "linker-co-occurrence": {
+        "task": "memory_server.tasks.linker_tasks.co_occurrence",
+        "schedule": 3600.0,  # раз в час
+    },
+    "linker-l2-verdicts": {
+        "task": "memory_server.tasks.linker_tasks.l2_verdicts",
+        "schedule": 300.0,  # каждые 5 минут
     },
 }
 

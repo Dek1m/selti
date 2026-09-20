@@ -102,6 +102,33 @@ class Settings(BaseSettings):
     # гранула теряет половину веса — свежие решения всплывают над древними.
     cloud_recency_half_life_days: int = 30
 
+    # ── Линкер V3 (ADR-019 C, фазы V3.2/V3.3) ──
+    # Зоны cosine НЕ пересекаются с dedup: верхняя граница линкера для
+    # namespace = dedup_thresholds[ns] (default 0.95), ниже — фиксированные
+    # слои: [linker_synonym_threshold, linker_verdict_threshold) — L1a auto
+    # related_to; [linker_verdict_threshold, dedup) — L2 LLM-вердикт;
+    # < linker_synonym_threshold — тишина (HippoRAG 2: ниже 0.8 шум).
+    linker_enabled: bool = True        # мастер-выключатель автолинкинга новых гранул
+    linker_l1a_enabled: bool = True    # L1 synonym-слой (риск шума ADR-019.1 — флаг без миграции)
+    linker_l1c_enabled: bool = True    # L1 co-occurrence
+    linker_synonym_threshold: float = 0.80
+    linker_verdict_threshold: float = 0.85
+    linker_ann_limit: int = 10         # соседей из ANN на новую гранулу (верхний кап L1a)
+    linker_top_k: int = 5              # кандидатов в одном L2-промпте
+    linker_cooccurrence_cap: int = 10  # max co-occurrence рёбер на гранулу (свежие соседи)
+    linker_reconciler_batch: int = 500 # батч name_reconciler (ADR: 500)
+    linker_reconciler_dry_run: bool = True  # первая кампания — только отчёт; бой после ручного прогона
+    linker_l2_batch: int = 20          # элементов L2-очереди за прогон воркера
+    linker_l2_max_attempts: int = 3    # попыток LLM-вердикта на элемент очереди
+    # LLM-провайдер L2: пустой base_url = L2 отключён (WARN при старте,
+    # L1 работает; очередь не наполняется — сирот подберёт V3.4 orphan_linker).
+    linker_llm_base_url: str = ""
+    linker_llm_api_key: str = ""
+    linker_llm_model: str = "glm-4.7-flash"
+    linker_llm_timeout: float = 10.0
+    linker_llm_retries: int = 1
+    linker_verdict_cache_ttl: int = 30 * 24 * 3600  # 30 дней (ADR-019 C)
+
     api_key: str = ""
 
     # ── Фаза 5: веб-морда ──

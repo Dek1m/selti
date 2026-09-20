@@ -27,7 +27,13 @@ from memory_server.memory.search_fusion import (
     recency_decay,
     rrf_fuse,
 )
-from memory_server.metrics import ZERO_RESULT_SEARCHES_TOTAL
+from memory_server.metrics import (
+    DEDUP_CONFIRMED_TOTAL,
+    GC_PURGE_BLOCKED_TOTAL,
+    MEMORIES_VERSIONED_TOTAL,
+    RELATIONS_REWIRED_TOTAL,
+    ZERO_RESULT_SEARCHES_TOTAL,
+)
 from memory_server.models import (
     ClusterRecord,
     GraphStats,
@@ -112,6 +118,7 @@ class MemoryService:
         config: Settings | None = None,
         project_repository: ProjectRepository | None = None,
         redis_provider: Callable[[], Awaitable["Redis"]] | None = None,
+        linker_dispatch: Callable[[str], None] | None = None,
     ):
         self.repository = repository
         self.embedding = embedding_provider
@@ -122,6 +129,9 @@ class MemoryService:
         # Ленивая фабрика Redis-клиента (SeltiState.get_redis): кеш облачка
         # не обязателен для корректности — None = деградация в таблицу
         self.redis_provider = redis_provider
+        # Диспетчер Линкера V3 (SeltiState → enqueue_link): None = автолинк
+        # выключен (юнит-тесты без Celery); вызов best-effort после INSERT
+        self.linker_dispatch = linker_dispatch
 
     async def resolve_project(self, project_id: str | None) -> str | None:
         """Ключ тула (slug | UUID | None) → project_id UUID. Неизвестный slug → NotFoundError."""
@@ -136,6 +146,7 @@ class MemoryService:
         record: MemoryRecord,
         metadata: dict | None,
         reason: str,
+        action: str,
     ) -> MemoryRecord:
         """Confirm-семантика дубля (V3.0, E.3/E.4 ADR-019).
 
@@ -168,6 +179,7 @@ class MemoryService:
                     "store: confirm sync_links FAILED (non-fatal)",
                     extra={"id": record.id},
                 )
+        DEDUP_CONFIRMED_TOTAL.labels(action=action).inc()
         logger.info("store: confirmed existing memory", extra={
             "id": record.id, "reason": reason,
         })
@@ -207,7 +219,9 @@ class MemoryService:
                     # же факт другими словами, повтор подтверждает его так же,
                     # как exact-hash (UPDATE-ветка ниже).
                     confirmed = await self._confirm_existing(
-                        record, metadata, reason=str(decision.existing_score or "exact")
+                        record, metadata,
+                        reason=f"semantic:{decision.existing_score}",
+                        action="skip",
                     )
                     return confirmed, DedupAction.SKIP
 
@@ -218,7 +232,9 @@ class MemoryService:
                     # Confirm-семантика (V3.0, E.3 ADR-019): exact-hash дубль —
                     # контент байт-в-байт совпал, перезаписывать нечего и нельзя
                     # (история). Повтор факта = подтверждение.
-                    confirmed = await self._confirm_existing(record, metadata, reason="exact")
+                    confirmed = await self._confirm_existing(
+                        record, metadata, reason="exact", action="update"
+                    )
                     await self._mark_context_dirty(confirmed.project_id)
                     return confirmed, DedupAction.UPDATE
 
@@ -245,6 +261,14 @@ class MemoryService:
                     logger.debug("store: sync_links", extra={"synced": synced, "id": memory_id})
                 except Exception:
                     logger.exception("store: sync_links FAILED (non-fatal)", extra={"id": memory_id})
+
+            # Линкер V3: автолинк новой гранулы асинхронно (ADR-019 C —
+            # store p95 не меняется; сбой диспетчеризации не роняет запись)
+            if self.linker_dispatch is not None:
+                try:
+                    self.linker_dispatch(memory_id)
+                except Exception:
+                    logger.exception("store: linker enqueue FAILED (non-fatal)", extra={"id": memory_id})
 
             return record, DedupAction.INSERT
 
@@ -516,10 +540,14 @@ class MemoryService:
                 raise NotFoundError(granule_id)
             # Версия наследует project старой гранулы — снапшот устарел
             await self._mark_context_dirty(old.project_id)
-            logger.debug("create_version: done", extra={
+            logger.info("create_version: versioned", extra={
                 "old_id": granule_id, "new_id": record.id,
-                "confidence": confidence,
+                "confidence": round(confidence, 3),
+                "reason": (metadata_merge or {}).get("supersede_reason", "explicit"),
             })
+            MEMORIES_VERSIONED_TOTAL.labels(
+                reason=(metadata_merge or {}).get("supersede_reason", "explicit")
+            ).inc()
             return record
 
     async def get_history(self, granule_id: str) -> MemoryHistory:
@@ -710,6 +738,10 @@ class MemoryService:
         if not ids:
             return result
         if not purge_allowed:
+            GC_PURGE_BLOCKED_TOTAL.labels(
+                reason="purge_disabled" if not self.config.gc_purge_enabled
+                else "mode_disabled"
+            ).inc()
             logger.warning("gc_superseded: purge disabled, candidates only", extra={
                 "selected": len(ids),
                 "mode": self.config.gc_mode,

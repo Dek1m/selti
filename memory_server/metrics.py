@@ -266,6 +266,33 @@ DEDUP_RATIO = Gauge(
     ["namespace"],
 )
 
+# ============================================================
+# Memory V3 (ADR-019): версионирование / confirm / REWIRE / GC
+# ============================================================
+
+MEMORIES_VERSIONED_TOTAL = Counter(
+    f"{PREFIX}_memories_versioned_total",
+    "New granule versions created via supersede (V3.0)",
+    ["reason"],  # reason: edit / explicit (supersede tool)
+)
+
+DEDUP_CONFIRMED_TOTAL = Counter(
+    f"{PREFIX}_dedup_confirmed_total",
+    "Duplicate facts confirmed instead of stored (V3.0 confirm semantics)",
+    ["action"],  # action: update (exact hash) / skip (semantic score)
+)
+
+RELATIONS_REWIRED_TOTAL = Counter(
+    f"{PREFIX}_relations_rewired_total",
+    "Relations rewired to the new version on supersede (V3.1)",
+)
+
+GC_PURGE_BLOCKED_TOTAL = Counter(
+    f"{PREFIX}_gc_purge_blocked_total",
+    "GC purge runs blocked by the stop-crank (V3.1 F)",
+    ["reason"],  # reason: purge_disabled / mode_disabled
+)
+
 # Memory growth rate: новые записи в hour per namespace.
 # Обновляется periodic task раз в час.
 MEMORY_GROWTH_RATE = Gauge(
@@ -279,4 +306,43 @@ MEMORY_GROWTH_RATE = Gauge(
 EMBEDDING_CACHE_HIT_RATIO = Gauge(
     f"{PREFIX}_embedding_cache_hit_ratio",
     "Embedding cache hit ratio (0.0 – 1.0)",
+)
+
+# ============================================================
+# Linker V3 (ADR-019 C, фазы V3.2/V3.3) — резолв имён + автосвязи
+# ============================================================
+
+# Созданные автосвязи по слою пирамиды: l1a (synonym ANN), l1c (co-occurrence),
+# l2 (LLM-вердикт).
+LINKER_LINKS_CREATED_TOTAL = Counter(
+    f"{PREFIX}_linker_links_created_total",
+    "Total auto-links created by linker layer",
+    ["layer"],
+)
+
+# Разрешённые имена: lateral-резолв в sync + кампания name_reconciler.
+LINKER_NAMES_RESOLVED_TOTAL = Counter(
+    f"{PREFIX}_linker_names_resolved_total",
+    "Total dangling target_name edges resolved to target_id",
+    ["path"],  # path: sync / reconciler
+)
+
+# Вердикты L2 по типу: link / duplicate / contradiction / none / error.
+LINKER_LLM_VERDICTS_TOTAL = Counter(
+    f"{PREFIX}_linker_llm_verdicts_total",
+    "Total L2 LLM verdicts by type",
+    ["verdict"],
+)
+
+# Latency LLM-вызова вердикта (один вызов на гранулу, ≤5 кандидатов).
+LINKER_LLM_LATENCY_SECONDS = Histogram(
+    f"{PREFIX}_linker_llm_latency_seconds",
+    "Linker LLM verdict call latency in seconds",
+    buckets=(0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 30.0),
+)
+
+# Размер Redis-очереди L2 (кандидаты серой зоны, ждут вердикта).
+LINKER_L2_QUEUE_SIZE = Gauge(
+    f"{PREFIX}_linker_l2_queue_size",
+    "Pending L2 verdict queue size (granules waiting for LLM)",
 )

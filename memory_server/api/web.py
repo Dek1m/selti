@@ -46,6 +46,7 @@ TASK_GET_HISTORY = "memory_server.tasks.memory_tasks.get_memory_history"
 TASK_GET_RELATIONS = "memory_server.tasks.memory_tasks.get_relations"
 TASK_FIND_SIMILAR = "memory_server.tasks.memory_tasks.find_similar"
 TASK_NAMESPACES = "memory_server.tasks.memory_tasks.get_namespaces"
+TASK_LINKER_STATS = "memory_server.tasks.linker_tasks.linker_stats"
 TASK_PROJECT_LIST = "memory_server.tasks.project_tasks.list_projects"
 TASK_PROJECT_GET = "memory_server.tasks.project_tasks.get_project"
 TASK_PROJECT_CREATE = "memory_server.tasks.project_tasks.create_project"
@@ -198,6 +199,12 @@ async def stats(
 async def namespaces() -> list[dict[str, Any]]:
     """Реестр namespace (контракт memory_namespaces) — спектр цветов UI (§11 дизайна)."""
     return await _call(TASK_NAMESPACES)
+
+
+@router.get("/linker/stats")
+async def linker_stats() -> dict[str, Any]:
+    """Статистика Линкера V3 (контракт memory_linker_stats). Read-only."""
+    return await _call(TASK_LINKER_STATS)
 
 
 # ═══════════════════════════════════════════════════════════════
