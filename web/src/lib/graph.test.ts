@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { RelationsPayload, SearchHit } from "../api/types";
-import { buildGraphModel, edgeThickness, nodeLabel, nodeSize } from "./graph";
-import { resolveCssColor } from "./colors";
+import { buildGraphModel, edgeKind, edgeThickness, nodeLabel, nodeSize, starGlow } from "./graph";
+import { resolveCssColor, toRgba } from "./colors";
 
 const hit = (id: string, score = 0.5, importance = 3, ns = "code_knowledge"): SearchHit =>
   ({
@@ -62,6 +62,7 @@ describe("buildGraphModel", () => {
     expect(neighbor?.seed).toBe(false);
     expect(neighbor?.importance).toBeNull();
     expect(neighbor?.namespace).toBeNull();
+    expect(neighbor?.status).toBeNull();
   });
 
   it("dedups identical (source, target, linkType) triples", () => {
@@ -133,9 +134,17 @@ describe("nodeLabel", () => {
 
 describe("sigma attribute mapping", () => {
   it("maps importance 1–5 onto a 4–13px radius", () => {
-    expect(nodeSize({ id: "x", label: "x", namespace: null, importance: 1, seed: true })).toBe(4);
-    expect(nodeSize({ id: "x", label: "x", namespace: null, importance: 5, seed: true })).toBeCloseTo(13);
-    expect(nodeSize({ id: "x", label: "x", namespace: null, importance: null, seed: false })).toBe(4);
+    const node = (importance: number | null) => ({
+      id: "x",
+      label: "x",
+      namespace: null,
+      importance,
+      seed: true,
+      status: null,
+    });
+    expect(nodeSize(node(1))).toBe(4);
+    expect(nodeSize(node(5))).toBeCloseTo(13);
+    expect(nodeSize({ ...node(null), seed: false })).toBe(4);
   });
 
   it("clamps edge weight onto a 1–3px thickness", () => {
@@ -143,6 +152,44 @@ describe("sigma attribute mapping", () => {
     expect(edgeThickness(2.5)).toBe(2.5);
     expect(edgeThickness(9)).toBe(3);
     expect(edgeThickness(0)).toBe(1);
+  });
+});
+
+describe("star map mapping (EVE art direction)", () => {
+  it("classifies link types into visual families", () => {
+    expect(edgeKind("supersedes")).toBe("supersedes");
+    expect(edgeKind("superseded_by")).toBe("supersedes");
+    expect(edgeKind("contradicts")).toBe("contradicts");
+    expect(edgeKind("related_to")).toBe("route");
+  });
+
+  it("scales halo intensity with importance", () => {
+    expect(starGlow({ id: "x", label: "x", namespace: null, importance: 5, seed: true, status: "asserted" })).toBe(1);
+    expect(starGlow({ id: "x", label: "x", namespace: null, importance: 1, seed: true, status: "asserted" })).toBeCloseTo(0.2);
+    expect(starGlow({ id: "x", label: "x", namespace: null, importance: null, seed: false, status: null })).toBeCloseTo(0.3);
+  });
+
+  it("marks superseded and retracted granules as extinguished", () => {
+    expect(
+      starGlow({ id: "x", label: "x", namespace: null, importance: 5, seed: true, status: "superseded" }),
+    ).toBeLessThan(0);
+    expect(
+      starGlow({ id: "x", label: "x", namespace: null, importance: 5, seed: true, status: "retracted" }),
+    ).toBeLessThan(0);
+  });
+});
+
+describe("toRgba", () => {
+  it("re-emits hex colors with the given alpha", () => {
+    expect(toRgba("#4DC9FF", 0.25)).toBe("rgba(77, 201, 255, 0.25)");
+  });
+
+  it("converts ladder hsl() colors so WebGL can parse them", () => {
+    expect(toRgba("hsl(120 70% 70%)", 0.5)).toMatch(/^rgba\(\d+, \d+, \d+, 0\.5\)$/);
+  });
+
+  it("clamps alpha into 0..1", () => {
+    expect(toRgba("#4DC9FF", 5)).toBe("rgba(77, 201, 255, 1)");
   });
 });
 

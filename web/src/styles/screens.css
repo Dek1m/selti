@@ -177,40 +177,104 @@
 .panel .ctx-meta { font-size: 12px; color: var(--sl-text-3); margin-bottom: 12px; }
 .panel .ctx-section + .ctx-section { margin-top: 10px; }
 
-/* ═══════════ Graph (§6) ═══════════ */
+/* ═══════════ Graph (§6) — EVE star map ═══════════ */
+/* Layer stack: .graph-stars (0, backdrop) → .graph-canvas (1, sigma WebGL)
+   → .graph-pings (2, hover pulse overlay) → .graph-vignette (3)
+   → .graph-float / .panel (10+, HUD chrome). */
 
 .graph-root {
   position: relative;
   height: calc(100vh - 56px);
-  background: var(--sl-bg-deep);
+  background: var(--sl-bg-abyss);
   overflow: hidden;
 }
 
-.graph-canvas { width: 100%; height: 100%; }
-/* react-sigma defaults to a white canvas — the abyss has no white */
-.graph-canvas div.react-sigma { --sigma-background-color: var(--sl-bg-deep); }
+.graph-stars {
+  position: absolute; inset: 0; z-index: 0;
+  width: 100%; height: 100%;
+  pointer-events: none;
+}
+
+.graph-canvas { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; }
+/* The abyss shows through: sigma's CSS background steps aside for the star
+   field; WebGL clears to transparent above it. */
+.graph-canvas div.react-sigma { --sigma-background-color: transparent; background: transparent; }
 .graph-canvas .sigma-mouse,
 .graph-canvas canvas { outline: none; }
+
+.graph-pings {
+  position: absolute; inset: 0; z-index: 2;
+  width: 100%; height: 100%;
+  pointer-events: none;
+}
+
+.graph-vignette {
+  position: absolute; inset: 0; z-index: 3;
+  pointer-events: none;
+  background:
+    radial-gradient(120% 90% at 50% 42%, transparent 55%, rgba(3, 5, 10, 0.55) 100%);
+}
 
 .graph-empty {
   position: absolute; inset: 0; z-index: 5;
   justify-content: center;
   background:
-    radial-gradient(900px 420px at 50% 30%, rgba(95, 232, 200, 0.06), transparent 70%),
-    var(--sl-bg-deep);
+    radial-gradient(900px 420px at 50% 30%, rgba(56, 189, 248, 0.05), transparent 70%),
+    rgba(5, 8, 14, 0.42);
 }
 .pulse-dot.big { width: 14px; height: 14px; }
 
+/* ── HUD console ── */
+
 .graph-float {
   position: absolute; top: var(--sl-s-4); left: var(--sl-s-4); z-index: 10;
-  width: 280px;
+  width: 300px;
   display: flex; flex-direction: column; gap: var(--sl-s-3);
   padding: var(--sl-s-4);
-  background: rgba(14, 21, 36, 0.88);
+  background: var(--sl-hud-panel);
   backdrop-filter: blur(14px);
-  border: 1px solid var(--sl-border-strong);
-  border-radius: var(--sl-r-lg);
+  border: 1px solid var(--sl-hud-frame-soft);
   box-shadow: var(--sl-shadow-2);
+}
+
+/* frame corner ticks — the quiet EVE touch */
+.graph-float::before,
+.graph-float::after {
+  content: ""; position: absolute; width: 12px; height: 12px;
+  border: 0 solid var(--sl-hud-cyan); pointer-events: none;
+}
+.graph-float::before { top: -1px; left: -1px; border-top-width: 1px; border-left-width: 1px; }
+.graph-float::after { bottom: -1px; right: -1px; border-bottom-width: 1px; border-right-width: 1px; }
+
+.graph-hud-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  padding-bottom: var(--sl-s-2);
+  border-bottom: 1px solid var(--sl-hud-frame-soft);
+}
+.graph-hud-title {
+  font: 600 10.5px/1 var(--sl-font-mono);
+  letter-spacing: 0.22em; text-transform: uppercase;
+  color: var(--sl-hud-cyan);
+  text-shadow: 0 0 12px rgba(56, 189, 248, 0.4);
+}
+.graph-hud-live {
+  display: inline-flex; align-items: center; gap: 6px;
+  font: 500 9.5px/1 var(--sl-font-mono);
+  letter-spacing: 0.18em; text-transform: uppercase;
+  color: var(--sl-text-3);
+}
+.graph-hud-live .live-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--sl-success);
+  box-shadow: 0 0 8px rgba(95, 232, 200, 0.8);
+  animation: hud-live 2.4s ease-in-out infinite;
+}
+@keyframes hud-live {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .graph-hud-live .live-dot { animation: none; }
 }
 
 .graph-searchbox {
@@ -221,40 +285,109 @@
   border-radius: var(--sl-r-md);
   transition: border-color var(--sl-dur) var(--sl-ease);
 }
-.graph-searchbox:focus-within { border-color: var(--sl-accent); }
-.graph-searchbox .icon { color: var(--sl-accent); font-size: 15px; }
+.graph-searchbox:focus-within { border-color: var(--sl-hud-cyan); box-shadow: 0 0 0 1px var(--sl-hud-frame-soft); }
+.graph-searchbox .icon { color: var(--sl-hud-cyan); font-size: 15px; }
 .graph-searchbox input {
   flex: 1; background: none; border: none; outline: none;
   color: var(--sl-text);
   font: 500 14px/1 var(--sl-font-display);
-  caret-color: var(--sl-accent);
+  caret-color: var(--sl-hud-cyan);
 }
-.graph-searchbox input::placeholder { color: var(--sl-text-3); font-weight: 400; font-size: 13px; }
+.graph-searchbox input::placeholder {
+  color: var(--sl-text-3); font-weight: 400; font-size: 13px;
+  text-overflow: ellipsis; overflow: hidden;
+}
 
 .graph-controls { display: flex; gap: 8px; }
 .graph-controls .btn { flex: 1; min-width: 0; height: 34px; font-size: 12.5px; }
 .graph-controls .btn:disabled { opacity: 0.4; cursor: default; }
 
 .graph-count {
-  font-family: var(--sl-font-mono); font-size: 11px; color: var(--sl-text-3);
+  margin: 0;
+  font-family: var(--sl-font-mono); font-size: 10.5px;
+  letter-spacing: 0.05em;
+  color: var(--sl-text-3);
+  font-variant-numeric: tabular-nums;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .graph-hover { color: var(--sl-text-2); }
 
+/* ── Region map (legend) ── */
+
 .graph-legend-toggle {
   display: flex; align-items: center; gap: 6px;
-  font: 600 10.5px/1 var(--sl-font-display);
-  letter-spacing: 0.08em; text-transform: uppercase;
+  font: 600 10.5px/1 var(--sl-font-mono);
+  letter-spacing: 0.18em; text-transform: uppercase;
   color: var(--sl-text-3);
   padding: 0;
 }
-.graph-legend-toggle:hover { color: var(--sl-text-2); }
-.graph-legend ul { list-style: none; margin-top: 8px; display: grid; gap: 5px; }
-.graph-legend li {
+.graph-legend-toggle:hover { color: var(--sl-hud-cyan); }
+
+.legend-regions { list-style: none; margin: 10px 0 0; display: grid; gap: 2px; }
+.legend-region {
   display: flex; align-items: center; gap: 8px;
+  width: 100%; padding: 4px 6px;
+  background: none; border: none; border-radius: var(--sl-r-sm);
   font-family: var(--sl-font-mono); font-size: 11px; color: var(--sl-text-2);
+  cursor: pointer;
+  transition: background var(--sl-dur-fast) var(--sl-ease), opacity var(--sl-dur-fast) var(--sl-ease);
 }
-.graph-legend .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.legend-region:hover { background: var(--sl-bg-raised); color: var(--sl-text); }
+.legend-region.off { opacity: 0.38; }
+.legend-region.off .dot {
+  background: transparent !important;
+  box-shadow: inset 0 0 0 1px var(--sl-border-strong);
+}
+.legend-region .dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+}
+.legend-region-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.legend-region-count { margin-left: auto; color: var(--sl-text-3); font-size: 10px; }
+
+.legend-block { margin-top: var(--sl-s-3); padding-top: var(--sl-s-3); border-top: 1px dashed var(--sl-border); }
+.legend-label {
+  margin: 0 0 8px;
+  font: 600 9.5px/1 var(--sl-font-mono);
+  letter-spacing: 0.18em; text-transform: uppercase;
+  color: var(--sl-text-3);
+}
+.legend-stars { display: flex; align-items: center; gap: 14px; }
+.legend-star { display: inline-block; border-radius: 50%; }
+.legend-star.star-1 { width: 4px; height: 4px; background: var(--sl-text-3); }
+.legend-star.star-2 { width: 6px; height: 6px; background: var(--sl-text-2); }
+.legend-star.star-3 { width: 8px; height: 8px; background: var(--sl-text); }
+.legend-star.star-4 {
+  width: 10px; height: 10px; background: var(--sl-hud-cyan);
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.65);
+}
+.legend-star.star-5 {
+  width: 13px; height: 13px; background: var(--sl-hud-cyan-bright);
+  box-shadow: 0 0 16px rgba(34, 211, 238, 0.8);
+}
+.legend-star.extinct {
+  width: 8px; height: 8px;
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--sl-ns-superseded);
+}
+.legend-hint { margin-left: auto; font: 400 9.5px/1 var(--sl-font-mono); color: var(--sl-text-3); }
+
+.legend-gates { list-style: none; display: grid; gap: 6px; margin: 0; }
+.legend-gates li {
+  display: flex; align-items: center; gap: 8px;
+  font-family: var(--sl-font-mono); font-size: 10.5px; color: var(--sl-text-2);
+}
+.gate-sample { width: 26px; height: 0; flex-shrink: 0; }
+.gate-sample.route {
+  border-top: 2px solid color-mix(in srgb, var(--sl-ns-code-knowledge) 55%, transparent);
+}
+.gate-sample.supersedes {
+  border-top: 2px dashed var(--sl-warn);
+  filter: drop-shadow(0 0 4px rgba(255, 193, 94, 0.45));
+}
+.gate-sample.contradicts {
+  border-top: 2px solid var(--sl-danger);
+  opacity: 0.75;
+}
 
 /* Granule panel floats over the canvas on this screen */
 .graph-root .panel {

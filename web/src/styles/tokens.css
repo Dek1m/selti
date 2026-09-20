@@ -31,6 +31,14 @@
   --sl-warn:    #FFC15E;
   --sl-success: #5FE8C8;
 
+  /* Graph HUD — star map chrome (EVE art direction).
+     Panel/frame literals used by canvas painters too (hover tags, pings). */
+  --sl-hud-cyan:        #38BDF8;
+  --sl-hud-cyan-bright: #22D3EE;
+  --sl-hud-panel:       rgba(10, 14, 22, 0.85);
+  --sl-hud-frame:       rgba(56, 189, 248, 0.30);
+  --sl-hud-frame-soft:  rgba(56, 189, 248, 0.14);
+
   /* Namespace spectrum (§2.2) */
   --sl-ns-user-facts:        #FF8E7A;  /* coral      */
   --sl-ns-project-meta:      #A78BFF;  /* iris       */

@@ -12,6 +12,8 @@ export interface GraphNode {
   /** 1–5 for seeds; neighbors carry no importance — fixed satellite size */
   importance: number | null;
   seed: boolean;
+  /** granule status for seeds; unknown satellites are null */
+  status: string | null;
 }
 
 export interface GraphEdge {
@@ -20,6 +22,26 @@ export interface GraphEdge {
   target: string;
   linkType: string;
   weight: number;
+}
+
+/** Visual family of a link on the star map. */
+export type EdgeKind = "route" | "supersedes" | "contradicts";
+
+/** supersedes chains read as dashed jump routes, contradictions glow red. */
+export function edgeKind(linkType: string): EdgeKind {
+  if (linkType === "supersedes" || linkType === "superseded_by") return "supersedes";
+  if (linkType === "contradicts") return "contradicts";
+  return "route";
+}
+
+/**
+ * Halo intensity for a star, 0..1. Extinguished granules (superseded /
+ * retracted) return -1 — the shader paints them as hollow outlines.
+ */
+export function starGlow(node: GraphNode): number {
+  if (node.status === "superseded" || node.status === "retracted") return -1;
+  if (node.importance === null) return 0.3;
+  return 0.2 + ((node.importance - 1) / 4) * 0.8;
 }
 
 export interface GraphModel {
@@ -67,6 +89,7 @@ export function buildGraphModel(
       namespace: hit.namespace,
       importance: hit.importance,
       seed: true,
+      status: hit.status,
     });
   }
 
@@ -95,7 +118,7 @@ export function buildGraphModel(
     const ensureNode = (id: string) => {
       if (!nodes.has(id) && nodes.size < maxNodes) {
         // Neighbor granule: metadata unknown — a slate satellite node
-        nodes.set(id, { id, label: id.slice(0, 8), namespace: null, importance: null, seed: false });
+        nodes.set(id, { id, label: id.slice(0, 8), namespace: null, importance: null, seed: false, status: null });
       }
     };
     for (const [source, target, linkType, weight] of pairs) {
