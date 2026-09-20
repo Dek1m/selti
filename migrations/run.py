@@ -13,6 +13,7 @@ import asyncio
 import logging
 import os
 import sys
+import zlib
 
 import asyncpg
 
@@ -20,6 +21,12 @@ logger = logging.getLogger(__name__)
 
 MIGRATIONS_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DSN = "postgresql://svc_athene_ai:changeme@localhost:5432/memory"
+
+# Ключ advisory-lock для сериализации применения миграций между
+# конкурентными воркерами (4 uvicorn-воркера стартуют параллельно и каждый
+# зовёт run_migrations из lifespan). zlib.crc32 стабилен между процессами
+# и запусками — в отличие от builtin hash() (PYTHONHASHSEED).
+MIGRATIONS_LOCK_KEY = zlib.crc32(b"selti:migrations:runner")
 
 
 async def ensure_migrations_table(conn: asyncpg.Connection) -> None:
@@ -95,8 +102,25 @@ async def run_migrations() -> None:
             logger.info("No pending migrations")
             return
 
-        for file in files:
-            await apply_migration(conn, file)
+        # Сериализация конкурентных воркеров: лок держит первый,
+        # остальные блокируются на pg_advisory_lock и после захвата
+        # видят актуальный _migrations (re-check ниже) и выходят.
+        # Лок сессионный: при разрыве соединения PG отпускает его сам.
+        await conn.execute("SELECT pg_advisory_lock($1)", MIGRATIONS_LOCK_KEY)
+        try:
+            # Re-check после захвата: пока мы ждали лок, миграции
+            # мог применить другой воркер — пропускаем дублирующий прогон.
+            applied = await get_applied_migrations(conn)
+            files = [f for f in files if f not in applied]
+
+            if not files:
+                logger.info("Migrations already applied by another worker, skipping")
+                return
+
+            for file in files:
+                await apply_migration(conn, file)
+        finally:
+            await conn.execute("SELECT pg_advisory_unlock($1)", MIGRATIONS_LOCK_KEY)
     finally:
         await conn.close()
 
