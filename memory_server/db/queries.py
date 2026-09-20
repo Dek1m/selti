@@ -795,7 +795,7 @@ SYNC_LINKS_BATCH = f"""
 # (source_id, target_id, link_type) — если каноничное ребро уже есть, висяк
 # остаётся на разбор (виден в отчёте как pending).
 _RESOLVE_PENDING_TARGET_NAMES_CTE = """
-    WITH pending AS (
+    WITH pending AS MATERIALIZED (
         -- candidates-first (баг приёмки В4): резолвимость проверяется ДО
         -- LIMIT, иначе 500 старейших нерезолвимых навсегда замораживают
         -- кампанию (head-of-line blocking).
