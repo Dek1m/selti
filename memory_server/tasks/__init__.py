@@ -8,3 +8,4 @@ from memory_server.tasks import project_tasks  # noqa: F401
 from memory_server.tasks import worker_stats  # noqa: F401
 from memory_server.tasks import business_metrics  # noqa: F401
 from memory_server.tasks import lifecycle_tasks  # noqa: F401
+from memory_server.tasks import linker_tasks  # noqa: F401

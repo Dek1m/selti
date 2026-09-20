@@ -48,6 +48,23 @@ jobs:
           sleep 5
           docker compose ps selti celery-worker celery-beat
 
+      # Вебморда: nginx раздаёт статику из /etc/nginx/landing/ui/ на хосте —
+      # docker-образы её не содержат, собираем и доставляем отдельно.
+      # Сборка в контейнере (node:20-alpine), чтобы runner не зависел от
+      # локального node; --user не нужен, chown в конце под ssh-пользователя.
+      - name: Build web UI
+        run: |
+          docker run --rm \
+            -v "$HOME/app/src/selti/web":/app -w /app \
+            node:20-alpine sh -c "npm ci --no-audit --no-fund && npm run build"
+          test -f ~/app/src/selti/web/dist/index.html || { echo "web build failed: no dist/index.html"; exit 1; }
+
+      - name: Deploy web UI
+        run: |
+          mkdir -p /etc/nginx/landing/ui
+          rsync -av --delete ~/app/src/selti/web/dist/ /etc/nginx/landing/ui/
+          ls -la /etc/nginx/landing/ui/ | head -5
+
       - name: Verify health
         run: curl -sf http://localhost:8000/health && echo " OK" || echo " FAILED"
 
