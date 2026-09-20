@@ -30,7 +30,9 @@ import asyncpg
 
 from memory_server.config import Settings
 from memory_server.db import queries as q
+from memory_server.exceptions import NotFoundError
 from memory_server.llm_client import (
+    VERDICT_KINDS,
     GranuleText,
     LinkerLLMClient,
     Verdict,
@@ -132,6 +134,12 @@ class Linker:
     def l2_enabled(self) -> bool:
         """L2 включён ⇔ LLM-провайдер настроен (непустой base_url)."""
         return self.llm is not None
+
+    def l2_mode(self) -> str:
+        """Режим L2: "llm" (воркер beat), "manual" (разбор Тишью), "off"."""
+        if self.llm is not None:
+            return "llm"
+        return "manual" if self.config.linker_l2_manual else "off"
 
     def _upper_bound(self, namespace: str) -> float:
         """Верхняя граница зоны линкера = порог дедупа namespace.
@@ -252,7 +260,10 @@ class Linker:
                 elif len(l2_candidates) < self.config.linker_top_k:
                     l2_candidates.append({"id": cand_id, "score": round(score, 6)})
 
-            if l2_candidates and self.l2_enabled():
+            # Очередь L2 наполняется при живом LLM ИЛИ в manual mode
+            # (приказ Мастера 20.09: без продового ключа очередь копится
+            # для разбора memory_linker_review/memory_linker_verdict)
+            if l2_candidates and (self.l2_enabled() or self.config.linker_l2_manual):
                 redis = await self._get_redis()
                 if redis is not None:
                     try:
@@ -564,6 +575,178 @@ class Linker:
         except Exception:
             pass
 
+    # ── Manual mode L2 (приказ Мастера 20.09): разбор очереди Тишью ──
+
+    @staticmethod
+    def _granule_payload(granule: GranuleText, score: float | None = None) -> dict[str, Any]:
+        """GranuleText → карточка для memory_linker_review (текст с заголовком)."""
+        payload: dict[str, Any] = {
+            "id": granule.granule_id,
+            "title": granule.title,
+            "content": granule.content,
+            "namespace": granule.namespace,
+        }
+        if score is not None:
+            payload["score"] = score
+        return payload
+
+    async def peek_l2(self) -> dict[str, Any]:
+        """Старейший элемент очереди L2 БЕЗ извлечения (peek, lindex -1).
+
+        Протухшие элементы (источник закрылся / все кандидаты мертвы) чистятся
+        по ходу — review не должен вечно показывать труп. Живой элемент
+        остаётся в очереди: следующий review вернёт то же, пока пара не
+        разобрана memory_linker_verdict.
+        """
+        redis = await self._get_redis()
+        if redis is None:
+            return {"empty": True, "reason": "redis_unavailable"}
+        while True:
+            try:
+                raw = await redis.lindex(_L2_QUEUE_KEY, -1)
+            except Exception:
+                return {"empty": True, "reason": "redis_error"}
+            if raw is None:
+                return {"empty": True}
+            item = _load_json(raw)
+            if not isinstance(item, dict) or not item.get("granule_id"):
+                await redis.lrem(_L2_QUEUE_KEY, 1, raw)  # мусор — чистим
+                continue
+            granule_id = str(item["granule_id"])
+            specs = item.get("candidates", [])
+            async with self.pool.acquire() as conn:
+                granules = await self._fetch_granules(
+                    conn, [granule_id] + [str(c.get("id")) for c in specs]
+                )
+            source = granules.get(granule_id)
+            if source is None:
+                # источник закрылся, пока элемент ждал — протух, чистим
+                await redis.lrem(_L2_QUEUE_KEY, 1, raw)
+                continue
+            candidates = [
+                self._granule_payload(granules[str(c["id"])], c.get("score"))
+                for c in specs
+                if str(c.get("id")) in granules
+            ]
+            if not candidates:
+                await redis.lrem(_L2_QUEUE_KEY, 1, raw)  # все кандидаты мертвы
+                continue
+            await self._bump_l2_queue_metric(redis)
+            return {
+                "empty": False,
+                "granule_id": granule_id,
+                "source": self._granule_payload(source),
+                "candidates": candidates,
+            }
+
+    async def apply_manual_verdict(
+        self,
+        source_id: str,
+        candidate_id: str,
+        verdict: str,
+        link_type: str | None = None,
+        confidence: float = 0.9,
+    ) -> dict[str, Any]:
+        """Ручной вердикт Тиши по паре из очереди L2 (manual mode).
+
+        Те же правила, что у LLM-пути: duplicate → WARN без supersede,
+        CNLM-невалидный тип → related_to, weight = confidence. Вердикт
+        пишется в verdict-cache (симметричный ключ с хэшами — будущий
+        LLM-воркер не перекроет решение человека), метрика с префиксом
+        manual:, разобранная пара извлекается из очереди.
+        """
+        if verdict not in VERDICT_KINDS:
+            raise ValueError(
+                f"verdict must be one of link|duplicate|contradiction|none, got: {verdict!r}"
+            )
+        manual = Verdict(
+            verdict=verdict,
+            link_type=link_type,
+            confidence=min(max(float(confidence), 0.0), 1.0),
+            rationale="manual (memory-granulator)",
+        )
+        async with self.pool.acquire() as conn:
+            granules = await self._fetch_granules(conn, [source_id, candidate_id])
+            source = granules.get(source_id)
+            candidate = granules.get(candidate_id)
+            if source is None:
+                raise NotFoundError(source_id, message=f"source granule not found or not asserted: {source_id}")
+            if candidate is None:
+                raise NotFoundError(candidate_id, message=f"candidate granule not found or not asserted: {candidate_id}")
+            created = await self._apply_verdict(conn, source, candidate, manual)
+            if created:
+                LINKER_LINKS_CREATED_TOTAL.labels(layer="l2").inc()
+
+        LINKER_LLM_VERDICTS_TOTAL.labels(verdict=f"manual:{verdict}").inc()
+        consumed = 0
+        redis = await self._get_redis()
+        if redis is not None:
+            await self._incr(redis, f"{_COUNTER_VERDICT_PREFIX}:manual:{verdict}")
+            try:
+                await redis.setex(
+                    verdict_cache_key(
+                        source.granule_id, candidate.granule_id,
+                        source.content_hash, candidate.content_hash,
+                    ),
+                    self.config.linker_verdict_cache_ttl,
+                    json.dumps(manual.to_json()),
+                )
+            except Exception:
+                pass  # кеш опционален
+            consumed = await self._consume_l2_pair(redis, source_id, candidate_id)
+
+        result: dict[str, Any] = {
+            "verdict": verdict,
+            "link_created": created,
+            "queue_items_updated": consumed,
+        }
+        if verdict == "duplicate":
+            result["note"] = "duplicate noted; auto-supersede NOT started (manual merge required)"
+        logger.info("linker: manual verdict applied", extra={
+            "source": source_id, "candidate": candidate_id, **result,
+        })
+        return result
+
+    async def _consume_l2_pair(self, redis: Any, source_id: str, candidate_id: str) -> int:
+        """Извлечь разобранную пару из очереди L2.
+
+        Пара (source, candidate) встречается в элементе granule_id=source
+        (кандидат в списке) и симметрично в элементе granule_id=candidate.
+        Контрагент удаляется из списка кандидатов; опустевший элемент
+        исчезает целиком, непустые братья сохраняются. Возврат — число
+        изменённых элементов.
+        """
+        try:
+            items = await redis.lrange(_L2_QUEUE_KEY, 0, -1)
+        except Exception:
+            return 0
+        updated = 0
+        for raw in items:
+            item = _load_json(raw)
+            if not isinstance(item, dict):
+                continue
+            gid = str(item.get("granule_id", ""))
+            if gid not in (source_id, candidate_id):
+                continue
+            other = candidate_id if gid == source_id else source_id
+            specs = item.get("candidates", [])
+            kept = [c for c in specs if str(c.get("id")) != other]
+            if len(kept) == len(specs):
+                continue  # этой пары в элементе нет
+            try:
+                await redis.lrem(_L2_QUEUE_KEY, 1, raw)
+                if kept:
+                    item["candidates"] = kept
+                    # rpush: элемент остаётся среди старейших (не выпрыгивает
+                    # вперёд свежих)
+                    await redis.rpush(_L2_QUEUE_KEY, json.dumps(item))
+                updated += 1
+            except Exception:
+                logger.warning("linker: l2 pair consume failed (non-fatal)")
+        if updated:
+            await self._bump_l2_queue_metric(redis)
+        return updated
+
     # ── Статистика (ADR-019 G, memory_linker_stats) ──
 
     async def stats(self) -> dict[str, Any]:
@@ -579,6 +762,9 @@ class Linker:
             "names_resolved": name_row["resolved"] if name_row else 0,
             "names_pending": name_row["pending"] if name_row else 0,
             "l2_enabled": self.l2_enabled(),
+            # Manual mode (приказ Мастера 20.09): llm — beat-воркер,
+            # manual — разбор очереди Тишью, off — серая зона игнорируется
+            "l2_mode": self.l2_mode(),
             "zones": {
                 "l1a": [self.config.linker_synonym_threshold, self.config.linker_verdict_threshold],
                 # Верхняя граница per-namespace = dedup_thresholds[ns]; для
@@ -597,17 +783,25 @@ class Linker:
             try:
                 verdict_names = ("link", "duplicate", "contradiction", "none", "error")
                 verdict_keys = [f"{_COUNTER_VERDICT_PREFIX}:{v}" for v in verdict_names]
-                values = await redis.mget(verdict_keys + [_COUNTER_CACHE_HIT, _COUNTER_CACHE_MISS])
+                manual_keys = [f"{_COUNTER_VERDICT_PREFIX}:manual:{v}" for v in verdict_names[:4]]
+                values = await redis.mget(
+                    verdict_keys + manual_keys + [_COUNTER_CACHE_HIT, _COUNTER_CACHE_MISS]
+                )
                 result["verdicts"] = {
                     v: int(n or 0) for v, n in zip(verdict_names, values[:5])
                 }
+                result["verdicts_manual"] = {
+                    v: int(n or 0)
+                    for v, n in zip(verdict_names[:4], values[5:9])
+                }
                 result["verdict_cache"] = {
-                    "hits": int(values[5] or 0),
-                    "misses": int(values[6] or 0),
+                    "hits": int(values[9] or 0),
+                    "misses": int(values[10] or 0),
                 }
                 result["l2_queue_size"] = await redis.llen(_L2_QUEUE_KEY)
             except Exception:
                 result["verdicts"] = {}
+                result["verdicts_manual"] = {}
                 result["verdict_cache"] = {"hits": 0, "misses": 0}
                 result["l2_queue_size"] = None
         return result

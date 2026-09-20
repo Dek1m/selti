@@ -30,7 +30,7 @@ logger = get_logger(__name__)
 # contradiction — ребро contradicts; none — не связано.
 VerdictKind = Literal["link", "duplicate", "contradiction", "none"]
 
-_VERDICT_KINDS = frozenset(get_args(VerdictKind))
+VERDICT_KINDS = frozenset(get_args(VerdictKind))
 _LINK_TYPES = frozenset(get_args(LinkType))
 
 # Вырезка первого сбалансированного {...}-блока: модели любят оборачивать
@@ -88,7 +88,7 @@ class Verdict:
     @classmethod
     def from_json(cls, raw: Any) -> "Verdict | None":
         """Десериализация из кеша; битая запись = промах (None)."""
-        if not isinstance(raw, dict) or raw.get("verdict") not in _VERDICT_KINDS:
+        if not isinstance(raw, dict) or raw.get("verdict") not in VERDICT_KINDS:
             return None
         link_type = raw.get("link_type")
         if link_type is not None and link_type not in _LINK_TYPES:
@@ -189,7 +189,7 @@ class LinkerLLMClient:
                 continue
             cand_id = str(item.get("id") or "")
             kind = item.get("verdict")
-            if not cand_id or kind not in _VERDICT_KINDS:
+            if not cand_id or kind not in VERDICT_KINDS:
                 continue
             link_type = item.get("link_type")
             if link_type is not None and link_type not in _LINK_TYPES:

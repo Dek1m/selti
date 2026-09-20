@@ -58,6 +58,8 @@ TASK_FREEZE = "memory_server.tasks.memory_tasks.freeze_memory"
 TASK_STALE_LIST = "memory_server.tasks.memory_tasks.stale_list"
 TASK_CLUSTER_LIST = "memory_server.tasks.memory_tasks.cluster_list"
 TASK_LINKER_STATS = "memory_server.tasks.linker_tasks.linker_stats"
+TASK_LINKER_REVIEW = "memory_server.tasks.linker_tasks.linker_review"
+TASK_LINKER_MANUAL_VERDICT = "memory_server.tasks.linker_tasks.linker_manual_verdict"
 
 
 def _coerce_metadata(metadata) -> dict | None:
@@ -594,3 +596,51 @@ async def memory_linker_stats(
     вердикты по типам и hit-rate verdict-cache.
     """
     return await celery_call(TASK_LINKER_STATS)
+
+
+@mcp.tool()
+@tool_handler("memory_linker_review")
+async def memory_linker_review(
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Только memory-granulator. Ручной вердикт очереди L2 (manual mode, приказ Мастера 20.09).
+
+    Peek старейшего элемента очереди серой зоны (0.85–dedup): source-гранула
+    и до 5 кандидатов с текстами. Очередь НЕ извлекается — повторный review
+    вернёт то же, пока каждая пара не закрыта memory_linker_verdict.
+    Пустая очередь → {empty: true}. Протухшие элементы чистятся автоматически.
+    """
+    return await celery_call(TASK_LINKER_REVIEW)
+
+
+@mcp.tool()
+@tool_handler("memory_linker_verdict")
+async def memory_linker_verdict(
+    source_id: str,
+    candidate_id: str,
+    verdict: str,
+    link_type: str | None = None,
+    confidence: float = 0.9,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Только memory-granulator. Ручной вердикт очереди L2 (manual mode, приказ Мастера 20.09).
+
+    Закрыть пару из memory_linker_review: verdict = link | duplicate |
+    contradiction | none. link: link_type из списка memory_link (CNLM-
+    невалидный для пары namespace → related_to), weight = confidence.
+    duplicate: фиксируется меткой, авто-supersede НЕ запускается (merge —
+    только явное решение). Пара извлекается из очереди, вердикт пишется
+    в verdict-cache — будущий LLM-воркер его не перекроет.
+    """
+    if verdict not in ("link", "duplicate", "contradiction", "none"):
+        raise ValueError(
+            f"verdict must be one of link|duplicate|contradiction|none, got: {verdict!r}"
+        )
+    return await celery_call(
+        TASK_LINKER_MANUAL_VERDICT,
+        source_id=source_id,
+        candidate_id=candidate_id,
+        verdict=verdict,
+        link_type=link_type,
+        confidence=confidence,
+    )

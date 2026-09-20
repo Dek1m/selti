@@ -5,7 +5,10 @@ link_new_granule — асинхронный автолинкинг новой г
 name_reconciler — beat-кампания резолва висячих target_name (сухой прогон
 по умолчанию: бой включается конфигом после ручной проверки отчёта).
 co_occurrence — beat-кампания L1c для исторического корпуса.
-l2_verdicts — beat-воркер очереди LLM-вердиктов.
+l2_verdicts — beat-воркер очереди LLM-вердиктов (в manual-режиме очередь
+не трогает — её разбирает человек-агент тулами review/verdict).
+linker_review / linker_manual_verdict — ручной разбор очереди L2
+(manual mode, приказ Мастера 20.09).
 linker_stats — данные memory_linker_stats (read-only).
 
 Все кампании идемпотентны: повтор по обработанному состоянию — no-op.
@@ -23,9 +26,9 @@ from memory_server.tasks.base import SeltiTask
 
 logger = get_logger(__name__)
 
-# Один WARN на процесс: L2 выключен (пустой linker_llm_base_url) — это
-# сконфигурированная деградация, а не ошибка каждого прогона.
-_llm_disabled_warned = False
+# Один WARN на процесс: режим L2 без LLM — это сконфигурированная
+# деградация (manual или off), а не ошибка каждого прогона.
+_l2_mode_warned = False
 
 
 def _get_linker():
@@ -33,13 +36,22 @@ def _get_linker():
     return run_async(get_state().get_linker)
 
 
-def _warn_l2_disabled_once() -> None:
-    global _llm_disabled_warned
-    if not _llm_disabled_warned:
-        _llm_disabled_warned = True
+def _warn_l2_no_llm_once() -> None:
+    global _l2_mode_warned
+    if _l2_mode_warned:
+        return
+    _l2_mode_warned = True
+    if settings.linker_l2_manual:
         logger.warning(
-            "linker: L2 verdicts disabled (linker_llm_base_url is empty); "
-            "L1 layers work, orphans will be picked up by V3.4 orphan_linker"
+            "linker: L2 in MANUAL mode (linker_llm_base_url is empty) — "
+            "queue fills for memory_linker_review/memory_linker_verdict "
+            "(memory-granulator)"
+        )
+    else:
+        logger.warning(
+            "linker: L2 verdicts disabled (linker_llm_base_url is empty, "
+            "linker_l2_manual=false); L1 layers work, orphans will be "
+            "picked up by V3.4 orphan_linker"
         )
 
 
@@ -53,7 +65,7 @@ def enqueue_link(granule_id: str) -> None:
     if not settings.linker_enabled:
         return
     if not settings.linker_llm_base_url:
-        _warn_l2_disabled_once()
+        _warn_l2_no_llm_once()
     try:
         from memory_server.celery_app import app
 
@@ -158,12 +170,65 @@ def co_occurrence(self, batch: int | None = None) -> dict[str, Any]:
 def l2_verdicts(self) -> dict[str, Any]:
     """Воркер L2: батч из Redis-очереди → LLM-вердикты → рёбра + кеш.
 
-    LLM выключен ⇒ очередь НЕ разбирается (кандидаты не теряются в никуда:
-    ждут включения / V3.4 orphan_linker)."""
+    Без живого LLM очередь НЕ разбирается: manual-режим — её разбирает
+    человек-агент (memory_linker_review/verdict); выключенный L2 —
+    кандидаты ждут включения / V3.4 orphan_linker."""
     linker = _get_linker()
     if not linker.l2_enabled():
-        _warn_l2_disabled_once()
+        _warn_l2_no_llm_once()
     return run_async(linker.run_l2_verdicts)
+
+
+@shared_task(
+    bind=True,
+    base=SeltiTask,
+    name="memory_server.tasks.linker_tasks.linker_review",
+    soft_time_limit=60,
+    time_limit=90,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    queue="memory",
+    routing_key="memory",
+)
+def linker_review(self) -> dict[str, Any]:
+    """Peek старейшего элемента очереди L2 (manual mode). Read-only по очереди."""
+    linker = _get_linker()
+    return run_async(linker.peek_l2)
+
+
+@shared_task(
+    bind=True,
+    base=SeltiTask,
+    name="memory_server.tasks.linker_tasks.linker_manual_verdict",
+    soft_time_limit=60,
+    time_limit=90,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    queue="memory",
+    routing_key="memory",
+)
+def linker_manual_verdict(
+    self,
+    source_id: str,
+    candidate_id: str,
+    verdict: str,
+    link_type: str | None = None,
+    confidence: float = 0.9,
+) -> dict[str, Any]:
+    """Ручной вердикт Тиши по паре из очереди L2 (manual mode).
+
+    Те же правила, что у LLM-пути: duplicate → WARN без supersede,
+    CNLM-невалидный link_type → related_to. Разобранная пара извлекается
+    из очереди, вердикт фиксируется в verdict-cache."""
+    linker = _get_linker()
+    return run_async(
+        linker.apply_manual_verdict,
+        source_id=source_id,
+        candidate_id=candidate_id,
+        verdict=verdict,
+        link_type=link_type,
+        confidence=confidence,
+    )
 
 
 @shared_task(

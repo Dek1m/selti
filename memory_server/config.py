@@ -111,6 +111,12 @@ class Settings(BaseSettings):
     linker_enabled: bool = True        # мастер-выключатель автолинкинга новых гранул
     linker_l1a_enabled: bool = True    # L1 synonym-слой (риск шума ADR-019.1 — флаг без миграции)
     linker_l1c_enabled: bool = True    # L1 co-occurrence
+    # Manual mode L2 (приказ Мастера 20.09): без продового LLM-ключа очередь
+    # серой зоны КОПИТСЯ, а разбирает её человек-агент (Тишь) тулами
+    # memory_linker_review / memory_linker_verdict. True + пустой
+    # linker_llm_base_url = l2_mode "manual"; beat-воркер l2_verdicts в
+    # manual-режиме очередь не трогает.
+    linker_l2_manual: bool = True
     linker_synonym_threshold: float = 0.80
     linker_verdict_threshold: float = 0.85
     linker_ann_limit: int = 10         # соседей из ANN на новую гранулу (верхний кап L1a)

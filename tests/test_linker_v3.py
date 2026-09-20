@@ -81,7 +81,10 @@ def mock_qdrant(scores: dict[str, float]) -> MagicMock:
 
 
 def mock_redis(queue: list[str] | None = None, store: dict | None = None) -> AsyncMock:
-    """Redis-мок с list-очередью L2 и dict-хранилищем кеша/счётчиков."""
+    """Redis-мок с list-очередью L2 и dict-хранилищем кеша/счётчиков.
+
+    Конвенция очереди как в проде: lpush — в начало, rpop/rpush — с конца
+    (конец списка = старейшие элементы, lindex(-1) — peek старейшего)."""
     queue = queue if queue is not None else []
     store = store if store is not None else {}
 
@@ -90,6 +93,28 @@ def mock_redis(queue: list[str] | None = None, store: dict | None = None) -> Asy
 
     async def lpush(_key, value):
         queue.insert(0, value)
+
+    async def rpush(_key, value):
+        queue.append(value)
+
+    async def lindex(_key, index):
+        try:
+            return queue[index]
+        except IndexError:
+            return None
+
+    async def lrange(_key, start, stop):
+        return queue[start : stop + 1 if stop != -1 else None]
+
+    async def lrem(_key, count, value):
+        removed = 0
+        for _ in range(count if count > 0 else queue.count(value)):
+            try:
+                queue.remove(value)
+                removed += 1
+            except ValueError:
+                break
+        return removed
 
     async def mget(keys):
         return [store.get(k) for k in keys]
@@ -109,6 +134,10 @@ def mock_redis(queue: list[str] | None = None, store: dict | None = None) -> Asy
     redis._store = store
     redis.rpop = rpop
     redis.lpush = lpush
+    redis.rpush = rpush
+    redis.lindex = lindex
+    redis.lrange = lrange
+    redis.lrem = lrem
     redis.mget = mget
     redis.setex = setex
     redis.llen = llen
@@ -451,11 +480,26 @@ class TestL1aZones:
         assert report["l1a_created"] == 0 and report["l2_enqueued"] == 0
 
     @pytest.mark.asyncio
-    async def test_l2_queue_not_filled_when_llm_disabled(self, mock_pool):
-        """L2 выключен (пустой base_url) → очередь НЕ наполняется."""
+    async def test_l2_queue_filled_in_manual_mode_without_llm(self, mock_pool):
+        """Manual mode (дефолт, приказ Мастера 20.09): LLM нет, а очередь
+        серой зоны КОПИТСЯ — разбирать будет Тишь тулами review/verdict."""
         conn, qdrant = self._prepared(mock_pool, {CAND_A: 0.90})
         redis = mock_redis()
         linker = make_linker(mock_pool, qdrant=qdrant, llm=None)  # LLM выключен
+        linker._get_redis = AsyncMock(return_value=redis)
+
+        report = await linker.link_new_granule(GID)
+
+        assert report["l2_enqueued"] == 1
+        assert len(redis_l2_queue(redis)) == 1
+
+    @pytest.mark.asyncio
+    async def test_l2_queue_not_filled_when_fully_off(self, mock_pool):
+        """linker_l2_manual=False + нет LLM → серая зона игнорируется
+        (l2_mode "off"): очередь не наполняется."""
+        conn, qdrant = self._prepared(mock_pool, {CAND_A: 0.90})
+        redis = mock_redis()
+        linker = make_linker(mock_pool, qdrant=qdrant, llm=None, linker_l2_manual=False)
         linker._get_redis = AsyncMock(return_value=redis)
 
         report = await linker.link_new_granule(GID)
@@ -911,7 +955,8 @@ class TestLinkerStats:
         )
         conn.fetchrow = AsyncMock(return_value={"resolved": 2666, "pending": 9116})
         redis = mock_redis(queue=["item-1", "item-2"])
-        redis.mget = AsyncMock(return_value=[3, 1, 0, 5, 2, 10, 4])
+        # mget: 5 LLM-вердиктов + 4 manual + cache hit/miss
+        redis.mget = AsyncMock(return_value=[3, 1, 0, 5, 2, 7, 0, 0, 1, 10, 4])
         linker = make_linker(mock_pool, redis_provider=lambda: None, llm=object())
         linker._get_redis = AsyncMock(return_value=redis)
 
@@ -923,5 +968,178 @@ class TestLinkerStats:
         assert stats["names_pending"] == 9116
         assert stats["l2_queue_size"] == 2
         assert stats["verdicts"]["link"] == 3
+        assert stats["verdicts_manual"]["link"] == 7
         assert stats["verdict_cache"] == {"hits": 10, "misses": 4}
         assert stats["l2_enabled"] is True
+
+
+# ══════════════════════════════════════════════════════════════════
+# Manual mode L2 (приказ Мастера 20.09): разбор очереди Тишью
+# ══════════════════════════════════════════════════════════════════
+
+
+def queue_item(granule_id: str, candidate_ids: list[str]) -> str:
+    return json.dumps(
+        {
+            "granule_id": granule_id,
+            "candidates": [{"id": cid, "score": 0.9} for cid in candidate_ids],
+            "attempts": 0,
+        }
+    )
+
+
+class TestManualMode:
+    def _linker(self, mock_pool, redis, llm=None, **cfg) -> Linker:
+        conn = mock_pool.acquire.return_value.__aenter__.return_value
+        conn.fetch = AsyncMock(return_value=granule_rows_for_verdict())
+        conn.fetchrow = AsyncMock(return_value={"id": "rel-manual"})
+        linker = make_linker(mock_pool, redis_provider=lambda: None, llm=llm, **cfg)
+        linker._get_redis = AsyncMock(return_value=redis)
+        return linker
+
+    @pytest.mark.asyncio
+    async def test_peek_empty_queue(self, mock_pool):
+        linker = self._linker(mock_pool, mock_redis())
+        assert await linker.peek_l2() == {"empty": True}
+
+    @pytest.mark.asyncio
+    async def test_peek_returns_oldest_without_removing(self, mock_pool):
+        """Peek показывает старейший (конец очереди) и НЕ извлекает его:
+        повторный review вернёт то же, пока пара не закрыта verdict-ом."""
+        newer = queue_item(CAND_A, [GID])
+        older = queue_item(GID, [CAND_A])
+        redis = mock_redis(queue=[newer, older])  # конец списка = старейший
+        linker = self._linker(mock_pool, redis)
+
+        result = await linker.peek_l2()
+
+        assert result["empty"] is False
+        assert result["granule_id"] == GID
+        assert result["source"]["id"] == GID
+        assert result["source"]["title"] == "src-title"
+        assert result["source"]["content"] == "source content"
+        assert result["source"]["namespace"] == "project_meta"
+        assert result["candidates"] == [
+            {
+                "id": CAND_A,
+                "title": "cand-title",
+                "content": "candidate content",
+                "namespace": "code_knowledge",
+                "score": 0.9,
+            }
+        ]
+        # очередь не тронута: тот же размер, тот же старейший
+        assert redis_l2_queue(redis) == [newer, older]
+        assert (await linker.peek_l2())["granule_id"] == GID
+
+    @pytest.mark.asyncio
+    async def test_peek_cleans_stale_source(self, mock_pool):
+        """Источник элемента закрылся (superseded/retracted) — элемент протух:
+        peek чистит его и показывает следующий живой."""
+        stale = queue_item("99999999-9999-9999-9999-999999999999", [GID])
+        fresh = queue_item(GID, [CAND_A])
+        redis = mock_redis(queue=[fresh, stale])
+        linker = self._linker(mock_pool, redis)
+
+        result = await linker.peek_l2()
+
+        assert result["granule_id"] == GID
+        assert redis_l2_queue(redis) == [fresh]  # труп убран
+
+    @pytest.mark.asyncio
+    async def test_manual_verdict_link_creates_edge_and_cache(self, mock_pool):
+        """link: ребро с weight=confidence + verdict-cache тем же симметричным
+        ключом, что у LLM-пути — будущий воркер решение человека не перекроет."""
+        redis = mock_redis(queue=[queue_item(GID, [CAND_A])])
+        linker = self._linker(mock_pool, redis)
+        conn = mock_pool.acquire.return_value.__aenter__.return_value
+
+        result = await linker.apply_manual_verdict(
+            GID, CAND_A, "link", link_type="implements_adr", confidence=0.95
+        )
+
+        assert result["verdict"] == "link"
+        assert result["link_created"] is True
+        args = conn.fetchrow.await_args_list[0].args
+        assert args[0] == q.INSERT_LINKER_RELATION
+        assert args[3] == "implements_adr"
+        assert args[5] == 0.95
+        assert args[6]["layer"] == "l2"
+        assert args[6]["rationale"] == "manual (memory-granulator)"
+        cache_key = verdict_cache_key(GID, CAND_A, "hash-a", "hash-b")
+        assert cache_key in redis._store
+        cached = json.loads(redis._store[cache_key])
+        assert cached["verdict"] == "link" and cached["link_type"] == "implements_adr"
+        assert redis._store.get("linker:c:verdict:manual:link") == 1
+
+    @pytest.mark.asyncio
+    async def test_manual_verdict_duplicate_never_supersedes(self, mock_pool):
+        """duplicate → WARN + метка, ребра и supersede нет (merge без человека)."""
+        redis = mock_redis(queue=[queue_item(GID, [CAND_A])])
+        linker = self._linker(mock_pool, redis)
+        conn = mock_pool.acquire.return_value.__aenter__.return_value
+
+        result = await linker.apply_manual_verdict(GID, CAND_A, "duplicate")
+
+        assert result["link_created"] is False
+        assert "auto-supersede NOT started" in result["note"]
+        conn.fetchrow.assert_not_called()  # INSERT не выполнялся вовсе
+
+    @pytest.mark.asyncio
+    async def test_manual_verdict_cnlm_fallback(self, mock_pool):
+        """CNLM-невалидный тип для пары → нейтральный related_to."""
+        redis = mock_redis(queue=[queue_item(GID, [CAND_A])])
+        linker = self._linker(mock_pool, redis)
+        conn = mock_pool.acquire.return_value.__aenter__.return_value
+
+        await linker.apply_manual_verdict(
+            GID, CAND_A, "link", link_type="informs"  # вне пары pm→ck
+        )
+
+        assert conn.fetchrow.await_args_list[0].args[3] == "related_to"
+
+    @pytest.mark.asyncio
+    async def test_manual_verdict_invalid_kind_rejected(self, mock_pool):
+        linker = self._linker(mock_pool, mock_redis())
+        with pytest.raises(ValueError, match="link\|duplicate\|contradiction\|none"):
+            await linker.apply_manual_verdict(GID, CAND_A, "maybe")
+
+    @pytest.mark.asyncio
+    async def test_manual_verdict_consumes_pair_both_sides(self, mock_pool):
+        """Разобранная пара извлекается из ОБИХ элементов очереди: из элемента
+        source удаляется кандидат, опустевший встречный элемент исчезает,
+        непустые братья сохраняются."""
+        item_source = queue_item(GID, [CAND_A, CAND_B])
+        item_mirror = queue_item(CAND_A, [GID])
+        item_foreign = queue_item(CAND_B, [GID])
+        redis = mock_redis(queue=[item_foreign, item_mirror, item_source])
+        linker = self._linker(mock_pool, redis)
+
+        result = await linker.apply_manual_verdict(GID, CAND_A, "link")
+
+        assert result["queue_items_updated"] == 2
+        remaining = redis_l2_queue(redis)
+        assert len(remaining) == 2
+        # источник: остался только CAND_B
+        kept_source = next(json.loads(r) for r in remaining if json.loads(r)["granule_id"] == GID)
+        assert [c["id"] for c in kept_source["candidates"]] == [CAND_B]
+        # встречный элемент CAND_A исчез целиком (была единственная пара)
+        assert all(json.loads(r)["granule_id"] != CAND_A for r in remaining)
+
+    def test_l2_mode_matrix(self, mock_pool):
+        """llm → "llm"; без llm + manual (дефолт) → "manual"; manual=False → "off"."""
+        assert self._linker(mock_pool, mock_redis(), llm=object()).l2_mode() == "llm"
+        assert self._linker(mock_pool, mock_redis()).l2_mode() == "manual"
+        assert (
+            self._linker(mock_pool, mock_redis(), linker_l2_manual=False).l2_mode() == "off"
+        )
+
+    @pytest.mark.asyncio
+    async def test_stats_reports_l2_mode(self, mock_pool):
+        linker = self._linker(mock_pool, mock_redis())  # без llm → manual
+        conn = mock_pool.acquire.return_value.__aenter__.return_value
+        conn.fetch = AsyncMock(return_value=[])
+        conn.fetchrow = AsyncMock(return_value={"resolved": 0, "pending": 0})
+        stats = await linker.stats()
+        assert stats["l2_mode"] == "manual"
+        assert stats["l2_enabled"] is False

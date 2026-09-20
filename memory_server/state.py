@@ -270,10 +270,18 @@ class SeltiState:
                 else None
             )
             if llm is None:
-                logger.warning(
-                    "linker: L2 verdicts disabled (linker_llm_base_url is empty); "
-                    "L1 layers work, orphans will be picked up by V3.4 orphan_linker"
-                )
+                if settings.linker_l2_manual:
+                    logger.warning(
+                        "linker: L2 in MANUAL mode (linker_llm_base_url is empty) — "
+                        "queue fills for memory_linker_review/memory_linker_verdict "
+                        "(memory-granulator); L1 layers work automatically"
+                    )
+                else:
+                    logger.warning(
+                        "linker: L2 verdicts disabled (linker_llm_base_url is empty, "
+                        "linker_l2_manual=false); L1 layers work, orphans will be "
+                        "picked up by V3.4 orphan_linker"
+                    )
             self._linker = Linker(
                 pool=pool,
                 qdrant=(
