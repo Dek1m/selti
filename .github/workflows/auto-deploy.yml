@@ -16,6 +16,7 @@ jobs:
             --exclude .git \
             --exclude node_modules \
             --exclude .venv \
+            --exclude web/dist \
             $GITHUB_WORKSPACE/ \
             $HOME/app/src/selti/
 
@@ -54,7 +55,9 @@ jobs:
       # локального node; --user не нужен, chown в конце под ssh-пользователя.
       - name: Build web UI
         run: |
-          docker run --rm \
+          # --user: dist принадлежит runner'у, не root — иначе следующий
+          # rsync --delete не сможет его удалить (инцидент 20.09)
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
             -v "$HOME/app/src/selti/web":/app -w /app \
             node:20-alpine sh -c "npm ci --no-audit --no-fund && npm run build"
           test -f ~/app/src/selti/web/dist/index.html || { echo "web build failed: no dist/index.html"; exit 1; }

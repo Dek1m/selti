@@ -51,7 +51,6 @@ TASK_TRAVERSE = "memory_server.tasks.memory_tasks.traverse_graph"
 TASK_INGEST_BATCH = "memory_server.tasks.memory_tasks.ingest_batch"
 TASK_FORGET = "memory_server.tasks.memory_tasks.forget_memories"
 TASK_ARCHIVE = "memory_server.tasks.memory_tasks.archive_memory"
-TASK_ADD_RELATION = "memory_server.tasks.memory_tasks.add_relation"
 TASK_DELETE_RELATION = "memory_server.tasks.memory_tasks.delete_relation"
 TASK_SUPERSEDE = "memory_server.tasks.memory_tasks.supersede_memory"
 TASK_GET_HISTORY = "memory_server.tasks.memory_tasks.get_memory_history"
@@ -359,39 +358,9 @@ async def memory_archive(
 # ── Graph tools ──
 
 
-@mcp.tool()
-@tool_handler("memory_link")
-async def memory_link(
-    source_id: str,
-    target_id: str,
-    link_type: str = "related_to",
-    description: str | None = None,
-    weight: float = 1.0,
-    project_id: str | None = None,
-    ctx: Context | None = None,
-) -> dict[str, Any]:
-    """Создать связь между двумя гранулами.
-
-    link_type: depends_on | used_by | extends | implements | contains | contained_by |
-               calls | called_by | related_to | contradicts | solves | tested_by |
-               implements_adr | references | follows | precedes | alternative_to |
-               causes | prevents | runs_on | exposes | mounts | derived_from |
-               motivates | informs | informed_by | connected_to | supersedes |
-               supports | member_of | part_of | describes_cluster
-    project_id: опционально — валидация проекта (slug/UUID) ранней понятной ошибкой.
-    """
-    _validate_link_type(link_type)
-    return await celery_call(
-        TASK_ADD_RELATION,
-        source_id=source_id,
-        target_id=target_id,
-        link_type=link_type,
-        description=description,
-        weight=weight,
-        project_id=project_id,
-    )
-
-
+# memory_link УДАЛЁН (приказ Мастера 20.09): рёбра графа ставит Линкер V3
+# автоматически (L1a/L1c/L2 + reconciler); ручное линкование отключено.
+# unlink оставлен — снятие ошибочного ребра остаётся легитимной правкой.
 @mcp.tool()
 @tool_handler("memory_unlink")
 async def memory_unlink(
