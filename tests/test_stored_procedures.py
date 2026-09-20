@@ -235,7 +235,10 @@ class TestGetRelationsUnified:
         assert len(result.incoming) == 1
         assert result.outgoing[0].link_type == "depends_on"
         assert result.incoming[0].link_type == "related_to"
-        conn.fetch.assert_awaited_once_with(q.GET_RELATIONS_UNIFIED, "m1", None)
+        # Фаза 5.2: второй батч-SELECT — обогащение соседей одним запросом
+        assert conn.fetch.await_count == 2
+        assert conn.fetch.await_args_list[0].args == (q.GET_RELATIONS_UNIFIED, "m1", None)
+        assert conn.fetch.await_args_list[1].args[0] == q.GET_NEIGHBORS_INFO
 
     @pytest.mark.asyncio
     async def test_get_relations_with_link_type_filter(self, pg, conn):

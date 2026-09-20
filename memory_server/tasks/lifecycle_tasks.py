@@ -104,10 +104,12 @@ def mark_stale(self) -> dict[str, Any]:
     routing_key="memory",
 )
 def gc_superseded(self) -> dict[str, Any]:
-    """Hard delete закрытых версий старше gc_retention_days (dry-run по конфигу).
+    """GC закрытых версий старше gc_retention_days — под стоп-краном V3.1.
 
-    Только superseded С наследником: окно валидности живёт в цепочке
-    (valid_to унаследованной записи), история не теряется.
+    Дефолт (gc_purge_enabled=False / gc_mode='disabled') — только счётчик
+    кандидатов: полная история версий сохраняется всегда (ADR-019 F).
+    Удаление возможна лишь в gc_mode='hard' при gc_purge_enabled=True;
+    только superseded С наследником — окно валидности живёт в цепочке.
     """
     service = _get_service()
     result = run_async(service.gc_superseded)

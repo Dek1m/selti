@@ -147,7 +147,10 @@ def update_memory(
 ) -> dict[str, Any]:
     """Update an existing memory record.
 
-    supersedes: ID замещаемой версии — старая закрывается (status='superseded').
+    V3.0 (E.1 ADR-019): content → новая версия гранулы (внутренний
+    supersede reason='edit') — ответ несёт id новой версии, versioned=true
+    и previous_id; supersedes в record = старый id. Без content — правка
+    обвязки на месте.
     """
     if not memory_id or not memory_id.strip():
         raise ValidationError("memory_id cannot be empty")
@@ -163,7 +166,13 @@ def update_memory(
         supersedes=supersedes,
         clear_project_id=clear_project_id,
     )
-    return record.model_dump(mode="json")
+    result = record.model_dump(mode="json")
+    if content is not None:
+        # Честный контракт (V3.0): создана версия, не правка на месте.
+        # record.id/supersedes уже несут новый/старый id — это явные маркеры.
+        result["versioned"] = True
+        result["previous_id"] = memory_id
+    return result
 
 
 # ── Delete ──────────────────────────────────────────────────────

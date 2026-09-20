@@ -71,11 +71,21 @@ SELECT_MEMORY_BY_CONTENT_HASHES = f"""
     WHERE m.status = 'asserted' AND m.valid_to IS NULL
 """
 
+# V3.0 (дыра 5 ADR-019): фильтр актуальности + детерминированный ORDER BY.
+# Без него LIMIT 1 без сортировки мог вернуть superseded/retracted версию —
+# ребро прилипало к трупу. Приоритет: вечный факт → важнее → свежее по
+# доступу → свежее по созданию. Вызыватель один — _resolve_granule
+# (add_relation), ему нужна именно актуальная гранула.
 SELECT_MEMORY_BY_ENTITY_NAME = f"""
     SELECT {_MEMORY_COLUMNS}
     FROM memories m
     JOIN namespaces n ON n.id = m.namespace_id
     WHERE m.metadata->>'entity_name' = $1
+      AND m.status = 'asserted' AND m.valid_to IS NULL
+    ORDER BY m.frozen DESC,
+             m.importance DESC,
+             m.last_accessed_at DESC NULLS LAST,
+             m.created_at DESC
     LIMIT 1
 """
 
@@ -83,6 +93,8 @@ SELECT_MEMORY_BY_ENTITY_NAME = f"""
 # Конфиг 'russian' — стемминг для основного корпуса памяти (кириллица);
 # TODO(migration 021): GIN-индекс to_tsvector('russian', content) — сейчас
 # выражение вычисляется на лету; заготовка migrations/021_phase1_search_fixes.sql.
+# $10 = entity_type (Фаза 5.2): фильтр по metadata->>'entity_type', применяется
+# до LIMIT — профильный канал не тратит бюджет пулла на чужие типы.
 SEARCH_MEMORIES = f"""
     SELECT
         {_MEMORY_COLUMNS},
@@ -97,6 +109,7 @@ SEARCH_MEMORIES = f"""
       AND ($7::timestamptz IS NULL OR m.created_at >= $7::timestamptz)
       AND ($8::timestamptz IS NULL OR m.created_at <= $8::timestamptz)
       AND ($9::text IS NULL OR m.status = $9::text)
+      AND ($10::text IS NULL OR m.metadata->>'entity_type' = $10::text)
     ORDER BY score DESC
     LIMIT $5
 """
@@ -104,19 +117,18 @@ SEARCH_MEMORIES = f"""
 # metadata — dict-merge (|| — shallow merge, новые ключи затирают старые),
 # а не COALESCE-затирание всего JSONB. version инкрементит триггер
 # trg_memories_version_bump (миграция 018) при изменении content.
-# $9 content_hash: при обновлении content вызывающий слой ОБЯЗАН передать
-# свежий sha256 — иначе рассинхрон поймает unique-индекс
-# idx_memories_content_hash_active (020) на следующем UPDATE.
+# V3.0 (E.2 ADR-019): ветки content/content_hash УДАЛЕНЫ — контент
+# неизменяем на месте, путь перезаписи отсутствует в слое данных; правка
+# факта = новая версия (service.update → create_version). Правки обвязки
+# (metadata/importance/confidence/frozen/project_id/supersedes) остаются.
 UPDATE_MEMORY = f"""
     UPDATE memories m
-    SET content      = COALESCE($2, content),
-        metadata     = CASE WHEN $3::jsonb IS NULL THEN metadata ELSE metadata || $3::jsonb END,
-        importance   = COALESCE($4, importance),
-        project_id   = CASE WHEN $10::bool THEN NULL ELSE COALESCE($5::uuid, project_id) END,
-        confidence   = COALESCE($6, confidence),
-        frozen       = COALESCE($7, frozen),
+    SET metadata     = CASE WHEN $2::jsonb IS NULL THEN metadata ELSE metadata || $2::jsonb END,
+        importance   = COALESCE($3, importance),
+        project_id   = CASE WHEN $7::bool THEN NULL ELSE COALESCE($4::uuid, project_id) END,
+        confidence   = COALESCE($5, confidence),
+        frozen       = COALESCE($6, frozen),
         supersedes   = COALESCE($8::uuid, supersedes),
-        content_hash = COALESCE($9, content_hash),
         updated_at   = now()
     FROM namespaces n
     WHERE m.id = $1 AND n.id = m.namespace_id
@@ -142,18 +154,70 @@ SUPERSEDE_MEMORY = """
 # инкрементит триггер 018. INSERT до SUPERSEDE: unique-индекс
 # idx_memories_content_hash_active видит обе asserted-строки только при
 # идентичном content_hash — этот случай отсекает service (ConflictError).
+# V3.1 (дыра 2 ADR-019): cluster_id наследуется — версия не выпадает из
+# кластера Level 2 до следующего refresh_clusters.
 INSERT_MEMORY_VERSION = """
     INSERT INTO memories (
         user_id, content, metadata, namespace_id,
-        content_hash, importance, project_id, confidence, frozen, supersedes, version
+        content_hash, importance, project_id, confidence, frozen, supersedes, version, cluster_id
     )
     SELECT
         old.user_id, $2::text, $3::jsonb, old.namespace_id,
         $4::text, COALESCE($5::int, old.importance), old.project_id,
-        $6::float4, false, old.id, old.version + 1
+        $6::float4, false, old.id, old.version + 1, old.cluster_id
     FROM memories old
     WHERE old.id = $1::uuid
     RETURNING id, namespace_id
+"""
+
+# REWIRE — наследование рёбер при supersede (V3.1, дыра 1 ADR-019):
+# рёбра старой версии переезжают на наследника той же транзакцией.
+# Правила:
+#   * link_type='supersedes' не переносится — структурная связь версий;
+#   * рёбра с мёртвой второй стороной остаются на старой (история:
+#     труп-трупу ребро ещё что-то значит, наследнику — нет);
+#   * висячий конец (target_id IS NULL, soft-resolve по имени) переносится —
+#     его вторая сторона не мёртвая, а неизвестная;
+#   * дубликат (та же пара + тип уже на новой) не создаётся — UPDATE не
+#     может нарушить unique-тройку (source_id, target_id, link_type);
+#   * inherited_from = old.id — колонка происхождения (миграция 023):
+#     исторический граф восстанавливает физическое место ребра проекцией.
+REWIRE_RELATIONS_SOURCE = """
+    UPDATE relations r
+    SET source_id = $2::uuid,
+        inherited_from = $1::uuid
+    WHERE r.source_id = $1::uuid
+      AND r.link_type <> 'supersedes'
+      AND (r.target_id IS NULL OR EXISTS (
+          SELECT 1 FROM memories m
+          WHERE m.id = r.target_id
+            AND m.status = 'asserted' AND m.valid_to IS NULL
+      ))
+      AND NOT EXISTS (
+          SELECT 1 FROM relations x
+          WHERE x.source_id = $2::uuid
+            AND x.link_type = r.link_type
+            AND x.target_id IS NOT DISTINCT FROM r.target_id
+      )
+"""
+
+REWIRE_RELATIONS_TARGET = """
+    UPDATE relations r
+    SET target_id = $2::uuid,
+        inherited_from = $1::uuid
+    WHERE r.target_id = $1::uuid
+      AND r.link_type <> 'supersedes'
+      AND EXISTS (
+          SELECT 1 FROM memories m
+          WHERE m.id = r.source_id
+            AND m.status = 'asserted' AND m.valid_to IS NULL
+      )
+      AND NOT EXISTS (
+          SELECT 1 FROM relations x
+          WHERE x.target_id = $2::uuid
+            AND x.source_id = r.source_id
+            AND x.link_type = r.link_type
+      )
 """
 
 # Supersession-цепочка в обе стороны (Фаза 2.1): назад по supersedes
@@ -263,6 +327,7 @@ MEMORY_STATS = """
 # $3/$4/$5 = REST-фильтры /api/search (Фаза 5.1): created_at window и
 # точный статус, применяются к кандидатам ДО RRF-fusion. NULL = выключен;
 # explicit casts обязательны — PG не выводит тип NULL-параметра.
+# $6 = entity_type (Фаза 5.2): точный тип сущности из metadata.
 FETCH_MEMORIES_BY_IDS = f"""
     SELECT {_MEMORY_COLUMNS}
     FROM memories m
@@ -272,6 +337,7 @@ FETCH_MEMORIES_BY_IDS = f"""
       AND ($3::timestamptz IS NULL OR m.created_at >= $3::timestamptz)
       AND ($4::timestamptz IS NULL OR m.created_at <= $4::timestamptz)
       AND ($5::text IS NULL OR m.status = $5::text)
+      AND ($6::text IS NULL OR m.metadata->>'entity_type' = $6::text)
 """
 
 # Инкремент access-полей при выдаче (Фаза 1.2, D4): батч-UPDATE,
@@ -448,7 +514,7 @@ INSERT_RELATION = """
 """
 
 SELECT_RELATIONS_BY_SOURCE = """
-    SELECT id, source_id, target_id, target_name, link_type, description, weight, metadata, created_at
+    SELECT id, source_id, target_id, target_name, link_type, description, weight, metadata, inherited_from, created_at
     FROM relations
     WHERE source_id = $1
       AND ($2::text IS NULL OR link_type = $2)
@@ -456,11 +522,23 @@ SELECT_RELATIONS_BY_SOURCE = """
 """
 
 SELECT_RELATIONS_BY_TARGET = """
-    SELECT id, source_id, target_id, target_name, link_type, description, weight, metadata, created_at
+    SELECT id, source_id, target_id, target_name, link_type, description, weight, metadata, inherited_from, created_at
     FROM relations
     WHERE target_id = $1
       AND ($2::text IS NULL OR link_type = $2)
     ORDER BY created_at DESC
+"""
+
+# Обогащение соседей связей (Фаза 5.2 веб-морды): один батч-SELECT на все
+# концы рёбер — цвет слоя, подпись (entity_name → голова content) и размер
+# (importance) без точечных чтений на каждого соседа.
+GET_NEIGHBORS_INFO = """
+    SELECT m.id, n.uid AS namespace, m.importance,
+           m.metadata->>'entity_name' AS entity_name,
+           left(m.content, 140) AS content
+    FROM memories m
+    JOIN namespaces n ON n.id = m.namespace_id
+    WHERE m.id = ANY($1::uuid[])
 """
 
 DELETE_RELATION = """
@@ -512,7 +590,7 @@ TRAVERSE_CTE = """
 """
 
 FIND_RELATIONS_BETWEEN = """
-    SELECT id, source_id, target_id, target_name, link_type, description, weight, metadata, created_at
+    SELECT id, source_id, target_id, target_name, link_type, description, weight, metadata, inherited_from, created_at
     FROM relations
     WHERE source_id = $1 AND target_id = $2
 """

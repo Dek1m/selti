@@ -133,12 +133,14 @@ class PostgreSQLRepository:
         created_after: datetime | None = None,
         created_before: datetime | None = None,
         status: str | None = None,
+        entity_type: str | None = None,
     ) -> list[dict]:
         """Full-text search (russian): канал B гибрида + fallback без Qdrant.
 
         Возвращает полные строки проекции + score — гибридной сборке нужны
         ранжирующие поля (created_at/last_accessed_at/frozen/importance).
-        created_after/created_before/status — REST-фильтры /api/search (5.1).
+        created_after/created_before/status/entity_type — REST-фильтры
+        /api/search (5.1/5.2).
         """
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
@@ -152,6 +154,7 @@ class PostgreSQLRepository:
                 created_after,
                 created_before,
                 status,
+                entity_type,
             )
             return [{**dict(row), "score": float(row["score"])} for row in rows]
 
@@ -217,6 +220,7 @@ class PostgreSQLRepository:
         created_after: datetime | None = None,
         created_before: datetime | None = None,
         status: str | None = None,
+        entity_type: str | None = None,
     ) -> list[dict]:
         """Batch fetch метаданных по IDs (для Qdrant-выдачи).
 
@@ -224,8 +228,8 @@ class PostgreSQLRepository:
         limit — ретрактнутые гранулы не съедают лимит выдачи (Фаза 1.3);
         include_historical=True — time-travel, фильтр отключается.
         Семантика $2 зеркалит SEARCH_MEMORIES.$6: True → без фильтра.
-        created_after/created_before/status — REST-фильтры /api/search (5.1),
-        применяются к кандидатам до RRF-fusion.
+        created_after/created_before/status/entity_type — REST-фильтры
+        /api/search (5.1/5.2), применяются к кандидатам до RRF-fusion.
         """
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
@@ -235,6 +239,7 @@ class PostgreSQLRepository:
                 created_after,
                 created_before,
                 status,
+                entity_type,
             )
             return [dict(row) for row in rows]
 
@@ -288,20 +293,18 @@ class PostgreSQLRepository:
     async def update(
         self,
         memory_id: str,
-        content: str | None = None,
         metadata: dict | None = None,
         importance: int | None = None,
         project_id: str | None = None,
         confidence: float | None = None,
         frozen: bool | None = None,
         supersedes: str | None = None,
-        content_hash: str | None = None,
         clear_project_id: bool = False,
     ) -> MemoryRecord | None:
-        """Обновление гранулы: metadata merge-ится (dict-merge), version бампит триггер БД.
+        """Правка обвязки гранулы: metadata merge-ится (dict-merge), version
+        бампит триггер БД. Контент НЕ меняется — V3.0 (E.2 ADR-019): путь
+        перезаписи отсутствует в слое данных, правка факта = create_version.
 
-        При передаче content вызывающий слой обязан передать content_hash
-        свежего контента — иначе unique-индекс дедупа словит рассинхрон.
         При supersedes закрывает старую гранулу атомарно (одна транзакция):
         status='superseded', valid_to=valid_from новой, superseded_by=memory_id.
         """
@@ -310,15 +313,13 @@ class PostgreSQLRepository:
                 row = await conn.fetchrow(
                     q.UPDATE_MEMORY,
                     memory_id,
-                    content,
                     metadata,
                     importance,
                     project_id,
                     confidence,
                     frozen,
-                    supersedes,
-                    content_hash,
                     clear_project_id,
+                    supersedes,
                 )
                 if row is None:
                     return None
@@ -336,13 +337,15 @@ class PostgreSQLRepository:
         confidence: float | None = None,
     ) -> tuple[MemoryRecord, str] | None:
         """Новая версия гранулы (Фаза 2.1, D3): INSERT-SELECT наследует
-        user_id/namespace_id/project_id/version+1 из старой строки, затем
-        старая закрывается валидным окном (valid_to=valid_from новой).
+        user_id/namespace_id/project_id/version+1/cluster_id из старой строки,
+        затем старая закрывается валидным окном (valid_to=valid_from новой),
+        затем рёбра старой REWIRE-ом переезжают на наследника (V3.1, дыра 1).
 
         Одна транзакция: гонка «старая перестала быть asserted между чтением
-        и записью» откатывает вставку новой (DatabaseError наружу).
-        Возвращает (новая запись, namespace_id) — id нужен фасаду для
-        Qdrant-payload.
+        и записью» откатывает вставку новой (DatabaseError наружу); REWIRE в
+        той же транзакции — рассинхрона «версия есть, рёбра не переехали»
+        не существует. Возвращает (новая запись, namespace_id) — id нужен
+        фасаду для Qdrant-payload.
         """
         async with self.pool.acquire() as conn:
             async with conn.transaction():
@@ -372,6 +375,11 @@ class PostgreSQLRepository:
                     raise DatabaseError(
                         f"supersession conflict: granule {old_id} is not asserted"
                     )
+                # REWIRE после SUPERSEDE: живость второй стороны оценивается
+                # в финальном состоянии (старая уже superseded — её рёбра с
+                # живыми сторонами уходят наследнику)
+                await conn.execute(q.REWIRE_RELATIONS_SOURCE, old_id, new_id)
+                await conn.execute(q.REWIRE_RELATIONS_TARGET, old_id, new_id)
                 record_row = await conn.fetchrow(q.SELECT_MEMORY_BY_ID, new_id)
         return self._to_record(record_row), str(inserted["namespace_id"])
 
@@ -488,18 +496,41 @@ class PostgreSQLRepository:
     async def get_relations(
         self, memory_id: str, link_type: str | None = None
     ) -> RelationListResult:
+        """Связи + обогащение соседей (Фаза 5.2): для outgoing сосед —
+        target, для incoming — source; один батч-SELECT на все концы."""
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(q.GET_RELATIONS_UNIFIED, memory_id, link_type)
 
-        outgoing: list[Relation] = []
-        incoming: list[Relation] = []
-        for row in rows:
-            rel = self._to_relation(row)
-            if row["direction"] == "outgoing":
-                outgoing.append(rel)
-            else:
-                incoming.append(rel)
+            outgoing: list[Relation] = []
+            incoming: list[Relation] = []
+            for row in rows:
+                rel = self._to_relation(row)
+                if row["direction"] == "outgoing":
+                    outgoing.append(rel)
+                else:
+                    incoming.append(rel)
+
+            neighbor_ids = {rel.target_id for rel in outgoing if rel.target_id} | {
+                rel.source_id for rel in incoming
+            }
+            if neighbor_ids:
+                info_rows = await conn.fetch(q.GET_NEIGHBORS_INFO, sorted(neighbor_ids))
+                info = {str(row["id"]): row for row in info_rows}
+                for rel in outgoing:
+                    self._fill_neighbor(rel, info.get(rel.target_id))
+                for rel in incoming:
+                    self._fill_neighbor(rel, info.get(rel.source_id))
         return RelationListResult(incoming=incoming, outgoing=outgoing)
+
+    @staticmethod
+    def _fill_neighbor(rel: Relation, row: asyncpg.Record | None) -> None:
+        """Строка GET_NEIGHBORS_INFO → neighbor_* поля связи (нет строки — висячий конец)."""
+        if row is None:
+            return
+        rel.neighbor_namespace = row["namespace"]
+        rel.neighbor_entity_name = row["entity_name"]
+        rel.neighbor_content = row["content"]
+        rel.neighbor_importance = row["importance"]
 
     async def delete_relation(
         self, source_id: str, target_id: str, link_type: str
@@ -533,6 +564,13 @@ class PostgreSQLRepository:
             description=row["description"],
             weight=float(row["weight"]),
             metadata=row["metadata"] or {},
+            # Guard: старые моки/проекции (GET_RELATIONS_UNIFIED из 020) без
+            # колонки происхождения
+            inherited_from=(
+                str(row["inherited_from"])
+                if "inherited_from" in row and row["inherited_from"] is not None
+                else None
+            ),
             created_at=row["created_at"],
         )
 

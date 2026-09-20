@@ -131,6 +131,48 @@ class MemoryService:
             raise RuntimeError("project_repository is not configured")
         return await self.project_repo.resolve_id(project_id)
 
+    async def _confirm_existing(
+        self,
+        record: MemoryRecord,
+        metadata: dict | None,
+        reason: str,
+    ) -> MemoryRecord:
+        """Confirm-семантика дубля (V3.0, E.3/E.4 ADR-019).
+
+        Повтор факта = подтверждение: metadata merge + confidence recovery
+        c' = c + (1−c)×0.1 (cap 1.0, каждое повторение приближает к 1, никогда
+        не перескакивая) + bump_access (повтор виден) + sync links (Г3
+        ADR-017/019 — раньше не вызывался вовсе). Дешевле старой перезаписи:
+        без embedding-записи и Qdrant-синков. Контент никогда не трогается —
+        историю потерять невозможно.
+        """
+        confirmed = await self.repository.update(
+            memory_id=record.id,
+            metadata={**record.metadata, **(metadata or {})},
+            confidence=min(record.confidence + (1.0 - record.confidence) * 0.1, 1.0),
+        )
+        if confirmed is None:
+            raise RuntimeError(f"Failed to confirm memory: {record.id}")
+        try:
+            await self.repository.bump_access([record.id])
+        except Exception:
+            logger.exception("store: confirm bump_access FAILED (non-fatal)")
+        if metadata and "links" in metadata:
+            try:
+                synced = await self.repository.sync_links_to_relations(record.id)
+                logger.debug("store: confirm sync_links", extra={
+                    "synced": synced, "id": record.id,
+                })
+            except Exception:
+                logger.exception(
+                    "store: confirm sync_links FAILED (non-fatal)",
+                    extra={"id": record.id},
+                )
+        logger.info("store: confirmed existing memory", extra={
+            "id": record.id, "reason": reason,
+        })
+        return confirmed
+
     async def store(
         self,
         content: str,
@@ -161,26 +203,24 @@ class MemoryService:
                     record = await self.repository.get_by_id(decision.existing_id)
                     if record is None:
                         raise RuntimeError(f"Failed to retrieve existing memory: {decision.existing_id}")
-                    return record, DedupAction.SKIP
+                    # Confirm на SKIP (V3.0, E.4 ADR-019): semantic-дубль — тот
+                    # же факт другими словами, повтор подтверждает его так же,
+                    # как exact-hash (UPDATE-ветка ниже).
+                    confirmed = await self._confirm_existing(
+                        record, metadata, reason=str(decision.existing_score or "exact")
+                    )
+                    return confirmed, DedupAction.SKIP
 
                 if decision.action == DedupAction.UPDATE:
                     record = await self.repository.get_by_id(decision.existing_id)
                     if record is None:
                         raise RuntimeError(f"Failed to retrieve memory for update: {decision.existing_id}")
-                    # Обновляем и content, и пересчитанный content_hash (Фаза 1.4):
-                    # иначе unique-индекс (namespace_id, content_hash) поймает
-                    # рассинхрон при изменившемся контенте.
-                    updated = await self.repository.update(
-                        memory_id=decision.existing_id,
-                        content=content,
-                        content_hash=content_hash,
-                        embedding=embedding,
-                        metadata={**record.metadata, **(metadata or {})},
-                    )
-                    if updated is None:
-                        raise RuntimeError(f"Failed to update memory: {decision.existing_id}")
-                    await self._mark_context_dirty(updated.project_id)
-                    return updated, DedupAction.UPDATE
+                    # Confirm-семантика (V3.0, E.3 ADR-019): exact-hash дубль —
+                    # контент байт-в-байт совпал, перезаписывать нечего и нельзя
+                    # (история). Повтор факта = подтверждение.
+                    confirmed = await self._confirm_existing(record, metadata, reason="exact")
+                    await self._mark_context_dirty(confirmed.project_id)
+                    return confirmed, DedupAction.UPDATE
 
             if embedding is None:
                 embedding = await self.embedding.embed(content)
@@ -374,29 +414,31 @@ class MemoryService:
         supersedes: str | None = None,
         clear_project_id: bool = False,
     ) -> MemoryRecord:
-        """Обновить гранулу: metadata merge-ится, version бампит триггер БД.
+        """Обновить гранулу (V3.0, E.1 ADR-019 — честный контракт записи).
 
-        При content пересчитывается content_hash (sha256) — иначе unique-индекс
-        дедупа словит рассинхрон на следующем UPDATE (Фаза 1.4).
-        supersedes — ID замещаемой версии: старая закрывается атомарно
-        (status='superseded', valid_to=valid_from этой, superseded_by=id этой).
+        content: НОВАЯ ВЕРСИЯ гранулы — внутренне create_version(reason=
+        'edit'): старая строка цела (superseded, окно закрыто), id ответа —
+        новая версия, record.supersedes — старый id. Сигнатура сохранена для
+        совместимости MCP; история физически не может быть потеряна.
+        metadata/importance при content-пути применяются к НОВОЙ версии.
+        Без content — правка обвязки на месте: metadata merge, importance,
+        project_id, supersedes (легаси-режим закрытия старой).
         """
         async with async_measure_duration(logger, "update"):
-            resolved_project = None if clear_project_id else await self.resolve_project(project_id)
-            embedding = None
-            content_hash = None
             if content is not None:
-                embedding = await self.embedding.embed(content)
-                content_hash = hashlib.sha256(content.encode()).hexdigest()
+                return await self.create_version(
+                    granule_id=memory_id,
+                    new_content=content,
+                    metadata_merge={**(metadata or {}), "supersede_reason": "edit"},
+                    importance=importance,
+                )
+            resolved_project = None if clear_project_id else await self.resolve_project(project_id)
             record = await self.repository.update(
                 memory_id=memory_id,
-                content=content,
-                embedding=embedding,
                 metadata=metadata,
                 importance=importance,
                 project_id=resolved_project,
                 supersedes=supersedes,
-                content_hash=content_hash,
                 clear_project_id=clear_project_id,
             )
             if record is None:
@@ -646,23 +688,39 @@ class MemoryService:
             limit=limit,
         )
 
-    async def gc_superseded(self) -> dict[str, int | bool]:
-        """GC закрытых версий (еженедельно): только superseded с наследником
-        и старше gc_retention_days. dry-run (gc_dry_run=True) — только счётчик;
-        окно валидности живёт в цепочке, история не теряется.
+    async def gc_superseded(self) -> dict[str, int | str | bool]:
+        """GC закрытых версий (еженедельно): superseded с наследником и старше
+        gc_retention_days.
+
+        Стоп-кран V3.1 (F ADR-019, дыра 7): полная история = purge выключен.
+          * gc_purge_enabled=False (мастер-кран, дефолт) — НИКОГДА не удаляем,
+            какие бы mode ни стояли;
+          * gc_mode='disabled' (дефолт) — то же: только счётчик кандидатов;
+          * gc_mode='hard' + gc_purge_enabled=True — hard delete как раньше.
+        Beat продолжает отчитывать selected — наблюдаемость без действия.
         """
+        purge_allowed = self.config.gc_purge_enabled and self.config.gc_mode == "hard"
         ids = await self.repository.select_gc_superseded(self.config.gc_retention_days)
-        dry_run = self.config.gc_dry_run
+        result: dict[str, int | str | bool] = {
+            "mode": self.config.gc_mode,
+            "purge_enabled": self.config.gc_purge_enabled,
+            "selected": len(ids),
+            "deleted": 0,
+        }
         if not ids:
-            return {"dry_run": dry_run, "selected": 0, "deleted": 0}
-        if dry_run:
-            logger.warning("gc_superseded: DRY-RUN, candidates only", extra={
-                "selected": len(ids), "retention_days": self.config.gc_retention_days,
+            return result
+        if not purge_allowed:
+            logger.warning("gc_superseded: purge disabled, candidates only", extra={
+                "selected": len(ids),
+                "mode": self.config.gc_mode,
+                "purge_enabled": self.config.gc_purge_enabled,
+                "retention_days": self.config.gc_retention_days,
             })
-            return {"dry_run": True, "selected": len(ids), "deleted": 0}
+            return result
         deleted = await self.repository.purge_memories(ids)
         logger.info("gc_superseded: deleted", extra={"selected": len(ids), "deleted": deleted})
-        return {"dry_run": False, "selected": len(ids), "deleted": deleted}
+        result["deleted"] = deleted
+        return result
 
     async def orphans_cleanup(self) -> int:
         """Связи без адреса целиком (после SET NULL от GC). Идемпотентно."""

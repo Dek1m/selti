@@ -266,19 +266,40 @@ class TestServiceLifecycle:
         )
 
     @pytest.mark.asyncio
-    async def test_gc_dry_run_reports_without_delete(self, mock_service):
-        mock_service.config.gc_dry_run = True
+    async def test_gc_disabled_by_default_never_deletes(self, mock_service):
+        """V3.1 стоп-кран (F ADR-019, дыра 7): дефолт — purge выключен,
+        только счётчик кандидатов; мина FK обезврежена."""
+        assert mock_service.config.gc_purge_enabled is False
+        assert mock_service.config.gc_mode == "disabled"
         mock_service.repository.select_gc_superseded = AsyncMock(return_value=[OLD_ID])
         mock_service.repository.purge_memories = AsyncMock()
 
         result = await mock_service.gc_superseded()
 
-        assert result == {"dry_run": True, "selected": 1, "deleted": 0}
+        assert result["deleted"] == 0
+        assert result["selected"] == 1
+        assert result["mode"] == "disabled"
         mock_service.repository.purge_memories.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_gc_real_run_deletes(self, mock_service):
-        mock_service.config.gc_dry_run = False
+    async def test_gc_master_switch_blocks_even_hard_mode(self, mock_service):
+        """gc_mode='hard', но gc_purge_enabled=False — мастер-кран выше
+        режимов: удаление невозможно в принципе."""
+        mock_service.config.gc_mode = "hard"
+        mock_service.config.gc_purge_enabled = False
+        mock_service.repository.select_gc_superseded = AsyncMock(return_value=[OLD_ID])
+        mock_service.repository.purge_memories = AsyncMock()
+
+        result = await mock_service.gc_superseded()
+
+        assert result["deleted"] == 0
+        mock_service.repository.purge_memories.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_gc_hard_mode_with_enabled_purge_deletes(self, mock_service):
+        """hard + gc_purge_enabled=True — как раньше: hard delete кандидатов."""
+        mock_service.config.gc_mode = "hard"
+        mock_service.config.gc_purge_enabled = True
         mock_service.repository.select_gc_superseded = AsyncMock(
             return_value=[OLD_ID, NEW_ID]
         )
@@ -286,7 +307,8 @@ class TestServiceLifecycle:
 
         result = await mock_service.gc_superseded()
 
-        assert result == {"dry_run": False, "selected": 2, "deleted": 2}
+        assert result["selected"] == 2
+        assert result["deleted"] == 2
         mock_service.repository.purge_memories.assert_awaited_once_with([OLD_ID, NEW_ID])
 
     @pytest.mark.asyncio
@@ -368,7 +390,7 @@ class TestServiceLifecycle:
 
 class TestPgCreateVersion:
     @pytest.mark.asyncio
-    async def test_atomic_insert_and_supersede(self, mock_pool):
+    async def test_atomic_insert_supersede_and_rewire(self, mock_pool):
         from memory_server.db import queries as q
 
         pg = PostgreSQLRepository(pool=mock_pool)
@@ -392,9 +414,18 @@ class TestPgCreateVersion:
         # SUPERSEDE(old, new): окно старой закрывается valid_from новой — одним SQL
         assert calls[1].args == (q.SUPERSEDE_MEMORY, OLD_ID, NEW_ID)
         assert calls[2].args == (q.SELECT_MEMORY_BY_ID, NEW_ID)
-        # Инварианты правилы Graphiti и версионирования — на уровне SQL
+        # Инварианты правила Graphiti и версионирования — на уровне SQL
         assert "valid_to     = new.valid_from" in q.SUPERSEDE_MEMORY
         assert "old.version + 1" in q.INSERT_MEMORY_VERSION
+        # V3.1 (дыра 2): cluster_id наследуется INSERT-SELECT'ом
+        assert "old.cluster_id" in q.INSERT_MEMORY_VERSION
+        # V3.1 (дыра 1): REWIRE рёбер в той же транзакции — обе стороны
+        executes = conn.execute.await_args_list
+        assert [c.args[0] for c in executes] == [
+            q.REWIRE_RELATIONS_SOURCE, q.REWIRE_RELATIONS_TARGET,
+        ]
+        assert executes[0].args[1:] == (OLD_ID, NEW_ID)
+        assert executes[1].args[1:] == (OLD_ID, NEW_ID)
 
     @pytest.mark.asyncio
     async def test_supersede_conflict_rolls_back(self, mock_pool):
@@ -409,6 +440,9 @@ class TestPgCreateVersion:
                 old_id=OLD_ID, content="v2", metadata=None,
                 content_hash="h2", importance=None, confidence=0.9,
             )
+
+        # REWIRE не выполнялся: откат до переноса рёбер
+        conn.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_old_missing_returns_none(self, mock_pool):
@@ -928,7 +962,7 @@ def _task_service():
     svc.decay_confidence = AsyncMock(return_value={"default": 5})
     svc.mark_stale = AsyncMock(return_value=3)
     svc.gc_superseded = AsyncMock(
-        return_value={"dry_run": True, "selected": 2, "deleted": 0}
+        return_value={"mode": "disabled", "purge_enabled": False, "selected": 2, "deleted": 0}
     )
     svc.orphans_cleanup = AsyncMock(return_value=1)
     svc.refresh_clusters = AsyncMock(return_value={"ok": True, "clusters": []})
@@ -1013,7 +1047,9 @@ class TestLifecycleTasks:
     def test_gc_superseded(self, patch_lifecycle_service):
         from memory_server.tasks.lifecycle_tasks import gc_superseded
 
-        assert gc_superseded() == {"dry_run": True, "selected": 2, "deleted": 0}
+        assert gc_superseded() == {
+            "mode": "disabled", "purge_enabled": False, "selected": 2, "deleted": 0,
+        }
 
     def test_orphans_cleanup(self, patch_lifecycle_service):
         from memory_server.tasks.lifecycle_tasks import orphans_cleanup

@@ -126,7 +126,17 @@ class MemoryStatsItem(BaseModel):
 # ── Relation models ──
 
 class Relation(BaseModel):
-    """Связь между двумя гранулами (ребро графа)."""
+    """Связь между двумя гранулами (ребро графа).
+
+    neighbor_* — обогащение соседа (Фаза 5.2 веб-морды): граф строит
+    цвет слоя, подпись и размер узла одним ответом /relations, без
+    повторных GET /memories/{id} на каждый конец ребра. Для outgoing
+    сосед — target, для incoming — source.
+    inherited_from — происхождение ребра (V3.1 ADR-019): id версии, с
+    которой ребро перенесено REWIRE-ом при supersede; NULL — ребро
+    создано на этой грани вручную/линкером. Проекция по нему
+    восстанавливает исторический граф (graph_traverse_full v3).
+    """
     id: str
     source_id: str
     target_id: str | None = None
@@ -135,7 +145,12 @@ class Relation(BaseModel):
     description: str | None = None
     weight: float = 1.0
     metadata: dict = Field(default_factory=dict)
+    inherited_from: str | None = None
     created_at: datetime | None = None
+    neighbor_namespace: str | None = None
+    neighbor_entity_name: str | None = None
+    neighbor_content: str | None = None
+    neighbor_importance: float | None = None
 
 
 class RelationCreate(BaseModel):

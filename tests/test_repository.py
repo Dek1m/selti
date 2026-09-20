@@ -143,7 +143,7 @@ class TestSearch:
             None,
             10,
             False,  # include_historical
-            None, None, None,  # REST-фильтры 5.1: created_after/before, status
+            None, None, None, None,  # REST-фильтры 5.1/5.2: after/before, status, entity_type
         )
 
     @pytest.mark.asyncio
@@ -167,7 +167,7 @@ class TestSearch:
             None,
             5,
             False,  # include_historical
-            None, None, None,  # REST-фильтры 5.1: created_after/before, status
+            None, None, None, None,  # REST-фильтры 5.1/5.2: after/before, status, entity_type
         )
 
     @pytest.mark.asyncio
@@ -198,32 +198,38 @@ class TestSearch:
 
 class TestUpdate:
     @pytest.mark.asyncio
-    async def test_update_full(self, repo, conn):
+    async def test_update_wrapper_fields(self, repo, conn):
+        """V3.0: UPDATE_MEMORY правит только обвязку — metadata merge,
+        importance, project_id, confidence, frozen, supersedes."""
         conn.fetchrow = AsyncMock(
-            return_value=memory_row(id="mem-1", content="new content", metadata={"k": "v"})
+            return_value=memory_row(id="mem-1", metadata={"k": "v"}, importance=5)
         )
 
         record = await repo.update(
             memory_id="mem-1",
-            content="new content",
             metadata={"k": "v"},
+            importance=5,
+            confidence=0.9,
         )
 
         assert isinstance(record, MemoryRecord)
-        assert record.content == "new content"
+        assert record.importance == 5
         conn.fetchrow.assert_awaited_once_with(
             q.UPDATE_MEMORY,
             "mem-1",
-            "new content",
             {"k": "v"},
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,  # content_hash
+            5,
+            None,   # project_id
+            0.9,    # confidence
+            None,   # frozen
             False,  # clear_project_id
+            None,   # supersedes
         )
+        # Регрессия immutable-content (E.2 ADR-019): в SET-части нет ни
+        # content, ни content_hash (RETURNING-проекция содержит m.content —
+        # это чтение, не запись)
+        sql_set = q.UPDATE_MEMORY.split("RETURNING")[0]
+        assert "content" not in sql_set
 
     @pytest.mark.asyncio
     async def test_update_with_supersedes_closes_old(self, repo, conn):
@@ -240,14 +246,14 @@ class TestUpdate:
     async def test_update_partial(self, repo, conn):
         conn.fetchrow = AsyncMock(return_value=None)
 
-        record = await repo.update(memory_id="mem-1", content=None, embedding=None, metadata=None)
+        record = await repo.update(memory_id="mem-1", metadata=None)
         assert record is None
 
     @pytest.mark.asyncio
     async def test_update_not_found(self, repo, conn):
         conn.fetchrow = AsyncMock(return_value=None)
 
-        record = await repo.update(memory_id="missing", content="x")
+        record = await repo.update(memory_id="missing", frozen=True)
         assert record is None
 
 
@@ -429,7 +435,9 @@ class TestSearchHybrid:
         assert build_kwargs["query_filter"] == QdrantStore.build_filter(active_only=False)
         # канал B: SEARCH_MEMORIES с include_historical=True
         fts_call = hybrid_conn.fetch.await_args_list[0]
-        assert fts_call.args == (q.SEARCH_MEMORIES, "x", None, None, None, 100, True, None, None, None)
+        assert fts_call.args == (
+            q.SEARCH_MEMORIES, "x", None, None, None, 100, True, None, None, None, None,
+        )
         # догрузка: FETCH_MEMORIES_BY_IDS с include_historical=True
         # (args = (SQL, ids, include_historical)) — без инверсии
         fetch_call = hybrid_conn.fetch.await_args_list[1]
@@ -503,9 +511,9 @@ class TestFetchByIdsSemantics:
 
         await repo.pg.fetch_by_ids(["mem-1"], include_historical=True)
 
-        # 5.1: +created_after/created_before/status (NULL = фильтр выключен)
+        # 5.1/5.2: +created_after/created_before/status/entity_type (NULL = фильтр выключен)
         conn.fetch.assert_awaited_once_with(
-            q.FETCH_MEMORIES_BY_IDS, ["mem-1"], True, None, None, None
+            q.FETCH_MEMORIES_BY_IDS, ["mem-1"], True, None, None, None, None
         )
 
     @pytest.mark.asyncio
@@ -516,7 +524,7 @@ class TestFetchByIdsSemantics:
         await repo.pg.fetch_by_ids(["mem-1"])
 
         conn.fetch.assert_awaited_once_with(
-            q.FETCH_MEMORIES_BY_IDS, ["mem-1"], False, None, None, None
+            q.FETCH_MEMORIES_BY_IDS, ["mem-1"], False, None, None, None, None
         )
 
     @pytest.mark.asyncio

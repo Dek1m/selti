@@ -252,11 +252,13 @@ class MemoryRepository:
         created_after: datetime | None = None,
         created_before: datetime | None = None,
         status: str | None = None,
+        entity_type: str | None = None,
     ) -> list[SearchResult]:
         """Плотный Qdrant-путь (Фаза 0). Гибридный — search_hybrid (Фаза 1.1).
 
-        created_after/created_before/status — REST-фильтры /api/search (5.1);
-        фильтруются в SQL (fetch_by_ids) после выборки векторного канала,
+        created_after/created_before/status/entity_type — REST-фильтры
+        /api/search (5.1/5.2); фильтруются в SQL (fetch_by_ids/search_fts)
+        после выборки векторного канала (payload Qdrant без metadata, D6),
         поэтому при плотном фильтре выдача может быть меньше limit.
         """
         namespace_id = await self._ns_id(namespace)
@@ -467,35 +469,30 @@ class MemoryRepository:
     async def update(
         self,
         memory_id: str,
-        content: str | None = None,
-        embedding: list[float] | None = None,
         metadata: dict | None = None,
         importance: int | None = None,
         project_id: str | None = None,
         confidence: float | None = None,
         frozen: bool | None = None,
         supersedes: str | None = None,
-        content_hash: str | None = None,
         clear_project_id: bool = False,
     ) -> MemoryRecord | None:
+        """Правка обвязки гранулы (V3.0: контент неизменяем — путь перезаписи
+        удалён; вектор/контент здесь синхронизировать нечем и не нужно)."""
         record = await self.pg.update(
             memory_id=memory_id,
-            content=content,
             metadata=metadata,
             importance=importance,
             project_id=project_id,
             confidence=confidence,
             frozen=frozen,
             supersedes=supersedes,
-            content_hash=content_hash,
             clear_project_id=clear_project_id,
         )
         if record is None:
             return None
 
         if self._has_qdrant():
-            if embedding is not None:
-                self.qdrant.update_vector(point_id=memory_id, vector=embedding)
             # content в payload нет (D6) — синхронизируем фильтруемые поля
             payload: dict = {}
             if importance is not None:
@@ -505,8 +502,6 @@ class MemoryRepository:
             if clear_project_id:
                 # Пустая строка не матчится ни с одним UUID-фильтром
                 payload["project_id"] = ""
-            if content_hash is not None:
-                payload["content_hash"] = content_hash
             if payload:
                 self.qdrant.set_payload(point_id=memory_id, payload=payload)
             if supersedes is not None:

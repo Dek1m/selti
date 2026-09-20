@@ -236,9 +236,12 @@ async def memory_update(
     clear_project_id: bool = False,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
-    """Update an existing memory record.
+    """Update an existing memory record — обвязка факта (V3.0, ADR-019).
 
-    If content is provided, a new embedding is generated. Metadata is merged
+    content: правка факта НЕ на месте — создаёт новую версию гранулы
+    (внутренне supersede с reason='edit'): ответ содержит id НОВОЙ версии
+    и поле versioned=true, старая остаётся в истории (memory_get_history).
+    Изменить факт «на месте» невозможно в принципе. Metadata is merged
     (existing keys are kept, new ones overwrite matching keys).
 
     project_id: optional project slug or UUID to (re)bind the granule.
@@ -512,14 +515,16 @@ async def memory_supersede(
     importance: int | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
-    """Создать новую версию гранулы — разрешение конфликта фактов.
+    """Создать новую версию гранулы — ЕДИНСТВЕННЫЙ путь изменения факта
+    (V3.0, ADR-019: контент неизменяем, update правит только обвязку).
 
     Старая закрывается по правилу Graphiti: status='superseded',
     valid_to = valid_from новой (окно старой заканчивается моментом
     появления новой). Новая наследует user/namespace/project_id/metadata
     (dict-merge), version = старая+1, confidence = старая ×0.9 (cap 0..1),
-    frozen=false. Используй для ФАКТОВ-КОНФЛИКТОВ (утверждение заменило
-    опровергнутое); для быстрой правки на месте — memory_update.
+    frozen=false, cluster_id и рёбра графа (REWIRE). Используй для
+    ФАКТОВ-КОНФЛИКТОВ (утверждение заменило опровергнутое) и любых правок
+    контента; для metadata/importance/проекта — memory_update.
 
     granule_id: ID замещаемой гранулы (должна быть asserted).
     """

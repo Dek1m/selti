@@ -102,40 +102,150 @@ class TestStore:
             await service.store(content="x", user_id="u1")
 
     @pytest.mark.asyncio
-    async def test_store_update_branch_passes_content_and_hash(self, service):
-        """user_facts UPDATE-ветка (Фаза 1.4): content + пересчитанный
-        content_hash + embedding — иначе unique-индекс дедупа словит рассинхрон."""
+    async def test_store_exact_dup_confirms_without_content_rewrite(self, service):
+        """user_facts exact-dup (V3.0, E.3 ADR-019): confirm-семантика.
+
+        Контент не переписывается (история цела) — вместо этого metadata
+        merge, confidence recovery c' = c + (1−c)×0.1 (cap 1.0), bump_access
+        и sync links (Г3 ADR-017/019). Дубль по hash = контент совпал
+        байт-в-байт, вектору и content_hash обновляться нечему.
+        """
         now = datetime.now(timezone.utc)
         existing = MemoryRecord(
             id="mem-existing", user_id="u1", content="old", metadata={"a": 1},
             namespace="user_facts", created_at=now, updated_at=now,
+            confidence=0.5,
         )
         decision = DedupDecision(
             action=DedupAction.UPDATE,
             existing_id="mem-existing",
-            content_hash=hashlib.sha256(b"new fact").hexdigest(),
+            content_hash=hashlib.sha256(b"old").hexdigest(),
             embedding=[0.9, 0.9, 0.9],
         )
-        updated_record = existing.model_copy(update={"content": "new fact"})
-        # dedup on: UPDATE-ветка достижима только через dedup.check
+        confirmed = existing.model_copy(update={"confidence": 0.55})
         service.config = Settings(dedup_enabled=True, hybrid_search_enabled=False)
         service.dedup.check = AsyncMock(return_value=decision)
         service.repository.get_by_id = AsyncMock(return_value=existing)
-        service.repository.update = AsyncMock(return_value=updated_record)
+        service.repository.update = AsyncMock(return_value=confirmed)
+        service.repository.bump_access = AsyncMock(return_value=1)
+        service.repository.sync_links_to_relations = AsyncMock(return_value=0)
 
         record, action = await service.store(
-            content="new fact", user_id="u1", namespace="user_facts",
-            metadata={"b": 2},
+            content="old", user_id="u1", namespace="user_facts",
+            metadata={"b": 2, "links": [{"type": "related_to", "target": "x"}]},
         )
 
         assert action == DedupAction.UPDATE
-        assert record.content == "new fact"
+        assert record.confidence == pytest.approx(0.55)
+        # confirm: metadata merge + confidence recovery, БЕЗ content/embedding
         service.repository.update.assert_awaited_once_with(
             memory_id="mem-existing",
-            content="new fact",
-            content_hash=hashlib.sha256(b"new fact").hexdigest(),
-            embedding=[0.9, 0.9, 0.9],
-            metadata={"a": 1, "b": 2},  # dict-merge со старыми ключами
+            metadata={"a": 1, "b": 2,
+                      "links": [{"type": "related_to", "target": "x"}]},
+            confidence=pytest.approx(0.5 + 0.5 * 0.1),
+        )
+        service.repository.bump_access.assert_awaited_once_with(["mem-existing"])
+        # Г3: links синкаются и на confirm-пути
+        service.repository.sync_links_to_relations.assert_awaited_once_with(
+            "mem-existing"
+        )
+
+    @pytest.mark.asyncio
+    async def test_store_confirm_confidence_caps_at_one(self, service):
+        """confidence = 1.0 → recovery не превышает 1.0."""
+        now = datetime.now(timezone.utc)
+        existing = MemoryRecord(
+            id="mem-existing", user_id="u1", content="c", metadata={},
+            namespace="user_facts", created_at=now, updated_at=now,
+            confidence=1.0,
+        )
+        decision = DedupDecision(
+            action=DedupAction.UPDATE, existing_id="mem-existing",
+            content_hash="h",
+        )
+        service.config = Settings(dedup_enabled=True, hybrid_search_enabled=False)
+        service.dedup.check = AsyncMock(return_value=decision)
+        service.repository.get_by_id = AsyncMock(return_value=existing)
+        service.repository.update = AsyncMock(
+            return_value=existing.model_copy(update={"confidence": 1.0})
+        )
+        service.repository.bump_access = AsyncMock(return_value=1)
+
+        await service.store(content="c", user_id="u1", namespace="user_facts")
+
+        kwargs = service.repository.update.await_args.kwargs
+        assert kwargs["confidence"] == 1.0
+
+    @pytest.mark.asyncio
+    async def test_store_confirm_sync_links_failure_non_fatal(self, service):
+        """Сбой sync_links на confirm не роняет store (паттерн INSERT-пути)."""
+        now = datetime.now(timezone.utc)
+        existing = MemoryRecord(
+            id="mem-existing", user_id="u1", content="c", metadata={},
+            namespace="user_facts", created_at=now, updated_at=now,
+            confidence=0.2,
+        )
+        decision = DedupDecision(
+            action=DedupAction.UPDATE, existing_id="mem-existing", content_hash="h",
+        )
+        service.config = Settings(dedup_enabled=True, hybrid_search_enabled=False)
+        service.dedup.check = AsyncMock(return_value=decision)
+        service.repository.get_by_id = AsyncMock(return_value=existing)
+        service.repository.update = AsyncMock(return_value=existing)
+        service.repository.bump_access = AsyncMock(return_value=1)
+        service.repository.sync_links_to_relations = AsyncMock(
+            side_effect=RuntimeError("db down")
+        )
+
+        record, action = await service.store(
+            content="c", user_id="u1", namespace="user_facts",
+            metadata={"links": [{"type": "related_to", "target": "x"}]},
+        )
+
+        assert action == DedupAction.UPDATE
+        assert record.id == "mem-existing"
+
+    @pytest.mark.asyncio
+    async def test_store_semantic_skip_confirms_too(self, service):
+        """SKIP-дубль (V3.0, E.4 ADR-019): semantic-совпадение — тот же
+        confirm, что и exact-hash (В1 приёмки). Повтор факта другими
+        словами тоже подтверждает его: confidence recovery + bump_access
+        + sync links; контент и вектор не трогаются."""
+        now = datetime.now(timezone.utc)
+        existing = MemoryRecord(
+            id="mem-existing", user_id="u1", content="сервер на 10.0.0.51",
+            metadata={"a": 1}, namespace="code_knowledge",
+            created_at=now, updated_at=now, confidence=0.4,
+        )
+        decision = DedupDecision(
+            action=DedupAction.SKIP, existing_id="mem-existing",
+            content_hash=hashlib.sha256("другая формулировка".encode()).hexdigest(),
+            existing_score=0.91,
+        )
+        confirmed = existing.model_copy(update={"confidence": 0.46})
+        service.config = Settings(dedup_enabled=True, hybrid_search_enabled=False)
+        service.dedup.check = AsyncMock(return_value=decision)
+        service.repository.get_by_id = AsyncMock(return_value=existing)
+        service.repository.update = AsyncMock(return_value=confirmed)
+        service.repository.bump_access = AsyncMock(return_value=1)
+        service.repository.sync_links_to_relations = AsyncMock(return_value=0)
+
+        record, action = await service.store(
+            content="ai-t-01: 10.0.0.51", user_id="u1", namespace="code_knowledge",
+            metadata={"b": 2, "links": [{"type": "related_to", "target": "x"}]},
+        )
+
+        assert action == DedupAction.SKIP
+        assert record.confidence == pytest.approx(0.46)
+        service.repository.update.assert_awaited_once_with(
+            memory_id="mem-existing",
+            metadata={"a": 1, "b": 2,
+                      "links": [{"type": "related_to", "target": "x"}]},
+            confidence=pytest.approx(0.4 + 0.6 * 0.1),
+        )
+        service.repository.bump_access.assert_awaited_once_with(["mem-existing"])
+        service.repository.sync_links_to_relations.assert_awaited_once_with(
+            "mem-existing"
         )
 
 
@@ -244,43 +354,75 @@ class TestGet:
 
 class TestUpdate:
     @pytest.mark.asyncio
-    async def test_update_with_content_regenerates_embedding(self, service):
+    async def test_update_with_content_creates_version(self, service):
+        """V3.0 (E.1 ADR-019): content = новая версия, не правка на месте.
+
+        Сервис уходит в create_version: embedding, конфликт-чеки и закрытие
+        старой — готовый путь Фазы 2; metadata/importance применяются к
+        НОВОЙ версии; provenance supersede_reason='edit'.
+        """
         now = datetime.now(timezone.utc)
-        record = MemoryRecord(
-            id="mem-1",
-            user_id="u1",
-            content="updated",
-            created_at=now,
-            updated_at=now,
+        old = MemoryRecord(
+            id="00000000-0000-0000-0000-000000000001", user_id="u1",
+            content="old", metadata={"k": "v"}, namespace="default",
+            created_at=now, updated_at=now,
         )
-        service.embedding.embed = AsyncMock(return_value=[0.9, 0.8, 0.7])
-        service.repository.update = AsyncMock(return_value=record)
+        new = MemoryRecord(
+            id="00000000-0000-0000-0000-000000000002", user_id="u1",
+            content="updated", supersedes="00000000-0000-0000-0000-000000000001",
+            namespace="default", created_at=now, updated_at=now,
+        )
+        service.repository.get_by_id = AsyncMock(return_value=old)
+        service.repository.find_by_content_hash = AsyncMock(return_value=None)
+        service.repository.create_version = AsyncMock(return_value=new)
+        # индикатор: правка на месте не должна происходить
+        service.repository.update = AsyncMock(return_value=None)
 
-        result = await service.update(memory_id="mem-1", content="updated", metadata={"k": "v"})
+        result = await service.update(
+            memory_id="00000000-0000-0000-0000-000000000001",
+            content="updated", importance=5,
+        )
 
+        assert result.id == "00000000-0000-0000-0000-000000000002"
+        assert str(result.supersedes) == "00000000-0000-0000-0000-000000000001"
         service.embedding.embed.assert_awaited_once_with("updated")
-        service.repository.update.assert_awaited_once_with(
-            memory_id="mem-1",
-            content="updated",
-            embedding=[0.9, 0.8, 0.7],
-            metadata={"k": "v"},
-            importance=None,
-            project_id=None,
-            supersedes=None,
-            content_hash=hashlib.sha256(b"updated").hexdigest(),
-            clear_project_id=False,
-        )
-        assert result == record
+        kwargs = service.repository.create_version.await_args.kwargs
+        assert kwargs["old_id"] == "00000000-0000-0000-0000-000000000001"
+        assert kwargs["content"] == "updated"
+        assert kwargs["content_hash"] == hashlib.sha256(b"updated").hexdigest()
+        assert kwargs["importance"] == 5
+        # provenance правки + metadata тула применяются к новой версии
+        # (поверх унаследованных старых ключей — dict-merge)
+        assert kwargs["metadata"] == {"k": "v", "supersede_reason": "edit"}
+        # правка на месте не происходила
+        service.repository.update.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_update_without_content_skips_embedding(self, service):
+    async def test_update_with_content_identical_conflict(self, service):
+        """content байт-в-байт равен текущему — create_version честно
+        отказывает (переписывать нечего, подтверждение — store-путь)."""
+        now = datetime.now(timezone.utc)
+        old = MemoryRecord(
+            id="00000000-0000-0000-0000-000000000001", user_id="u1",
+            content="same", content_hash=hashlib.sha256(b"same").hexdigest(),
+            namespace="default", created_at=now, updated_at=now,
+        )
+        service.repository.get_by_id = AsyncMock(return_value=old)
+
+        from memory_server.exceptions import ConflictError
+
+        with pytest.raises(ConflictError, match="identical"):
+            await service.update(
+                memory_id="00000000-0000-0000-0000-000000000001", content="same"
+            )
+
+    @pytest.mark.asyncio
+    async def test_update_without_content_patches_wrapper(self, service):
+        """Без content — правка обвязки на месте: metadata merge и т.д."""
         now = datetime.now(timezone.utc)
         record = MemoryRecord(
-            id="mem-1",
-            user_id="u1",
-            content="old",
-            created_at=now,
-            updated_at=now,
+            id="mem-1", user_id="u1", content="old",
+            created_at=now, updated_at=now,
         )
         service.repository.update = AsyncMock(return_value=record)
 
@@ -289,13 +431,11 @@ class TestUpdate:
         service.embedding.embed.assert_not_awaited()
         service.repository.update.assert_awaited_once_with(
             memory_id="mem-1",
-            content=None,
-            embedding=None,
             metadata={"k": "v"},
             importance=None,
             project_id=None,
             supersedes=None,
-            content_hash=None, clear_project_id=False,
+            clear_project_id=False,
         )
         assert result == record
 
@@ -304,7 +444,7 @@ class TestUpdate:
         service.repository.update = AsyncMock(return_value=None)
 
         with pytest.raises(NotFoundError) as exc_info:
-            await service.update(memory_id="missing", content="x")
+            await service.update(memory_id="missing", metadata={"x": 1})
         assert exc_info.value.id == "missing"
 
 

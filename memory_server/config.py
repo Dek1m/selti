@@ -63,9 +63,18 @@ class Settings(BaseSettings):
     confidence_decay_floor: float = 0.1
     stale_threshold: float = 0.3  # confidence ниже порога + нет доступа N дней
     stale_days: int = 30          # «нет доступа» = COALESCE(last_accessed_at, created_at) старше
-    # GC superseded-версий: hard delete только с наследником и старше retention.
+    # GC superseded-версий (V3.1, F ADR-019 — стоп-кран полной истории):
+    #   gc_purge_enabled — мастер-кран ВЫШЕ режимов: False = физическое
+    #     удаление невозможно в принципе (полная история сохраняется всегда);
+    #   gc_mode — 'disabled' (дефолт: candidates-only, ничего не удаляем) |
+    #     'hard' (hard delete superseded с наследником старше retention;
+    #     работает только при gc_purge_enabled=True). 'soft' — зарезервирован
+    #     будущими фазами.
+    # Заменяет gc_dry_run: прод-эффект дефолтов тот же (ничего не удаляем),
+    # мина FK (дыра 7) обезврежена явно, а не сухим прогоном.
+    gc_purge_enabled: bool = False
+    gc_mode: str = "disabled"
     gc_retention_days: int = 90
-    gc_dry_run: bool = True       # dry-run первый месяц (Рэй переключит на проде)
     # Кластеризация Level 2 (022 v2): кандидаты — Qdrant ANN (HNSW, cosine).
     # cluster_threshold — порог score в Qdrant (близость эмбеддингов, не
     # триграммы v1); top_k соседей на гранулу; группы < min_members
