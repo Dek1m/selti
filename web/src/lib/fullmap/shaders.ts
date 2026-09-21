@@ -129,66 +129,31 @@ void main() {
 }
 `;
 
+// ═══ БИСЕКТ (итерация мастера): все ленты — маленькие квадраты в центре
+// экрана. Валидирует: draw → вершины → фрустум. Старое тело — в
+// scripts/edge-vertex-backup.glsl (вернуть после диагностики).
 export const EDGE_VERTEX = /* glsl */ `
-attribute vec3 aOther;   // позиция противоположного конца ребра
-attribute vec3 aColor;   // per-vertex: gradient across the segment
+attribute vec3 aOther;
+attribute vec3 aColor;
 attribute float aWeight;
-attribute float aKind;   // 0 route, 1 supersedes, 2 contradicts
-attribute float aEnd;    // 0 → source vertex, 1 → target vertex
-attribute float aSide;   // -1 / +1 — сторона ленты
-attribute float aHighlight; // both endpoints in a lit cluster
+attribute float aKind;
+attribute float aEnd;
+attribute float aSide;
+attribute float aHighlight;
 
-uniform vec2 uViewport;   // px
-uniform float uEdgeWidth; // полная толщина в px
+uniform vec2 uViewport;
+uniform float uEdgeWidth;
 
 varying vec3 vColor;
 varying float vAlpha;
 varying float vKind;
 varying float vEnd;
-varying float vPhase;     // pulse phase for contradicts glow waves
-
-const float FADE_START = 1100.0;
-// узлы выбираются до 2200 — лента с видимым концом обязана доживать
-// до дальнего конца и таять там плавно, а не исчезать целиком
-const float FADE_END = 2400.0;
+varying float vPhase;
 
 void main() {
-  vec4 clipA = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-  vec4 clipB = projectionMatrix * modelViewMatrix * vec4(aOther, 1.0);
-  vec4 clipSelf = mix(clipA, clipB, aEnd);
-  float dist = -mix(modelViewMatrix * vec4(position, 1.0), modelViewMatrix * vec4(aOther, 1.0), aEnd).z;
-
-  // screen-space perpendicular: ndc → px → сдвиг обратно в ndc
-  vec2 ndcA = clipA.xy / max(clipA.w, 0.0001);
-  vec2 ndcB = clipB.xy / max(clipB.w, 0.0001);
-  vec2 screenDir = ndcB - ndcA;
-  screenDir.x *= uViewport.x * 0.5;
-  screenDir.y *= uViewport.y * 0.5;
-  float len = length(screenDir);
-  vec2 perpPx = (len > 0.0001) ? vec2(-screenDir.y, screenDir.x) / len : vec2(1.0, 0.0);
-  vec2 ndcPerp = perpPx / vec2(uViewport.x * 0.5, uViewport.y * 0.5);
-  float halfWidth = uEdgeWidth * 0.5;
-
-  // ndc-смещение добавляем до перспективного деления → умножаем на w
-  vec4 clip = clipSelf + vec4(ndcPerp * aSide * halfWidth * 2.0 * clipSelf.w, 0.0, 0.0);
-
-  // per-vertex fade: an edge is as strong as its fainter endpoint (§4.4)
-  float fade = 1.0 - smoothstep(FADE_START, FADE_END, dist);
-
-  // калибровка финала: база 0.75-1.0, fade линейный → итог 0.55-0.9 ближние,
-  // ≥0.35 дальние (по замерам Мастера с прода)
-  float base = mix(0.75, 1.0, clamp((aWeight - 1.0) / 2.0, 0.0, 1.0));
-  // contradicts burns red regardless of endpoint layers (сияние — в пульсе)
-  if (aKind > 1.5) base = 1.0;
-
-  vAlpha = base * fade * (1.0 + aHighlight * 1.6);
-  // phase from position → per-edge desynced pulse waves
-  vPhase = dot(position, vec3(0.0137, 0.0171, 0.0113));
-  vEnd = aEnd;
-  vKind = aKind;
+  gl_Position = vec4(position.xy * 0.001, 0.0, 1.0);
   vColor = aColor;
-
-  gl_Position = clip;
+  vAlpha = 1.0;
 }
 `;
 
