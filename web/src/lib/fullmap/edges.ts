@@ -39,13 +39,17 @@ export function selectVisibleEdges(
   for (let e = 0; e < m; e++) {
     const src = edgeData[e * 3];
     const tgt = edgeData[e * 3 + 1];
-    if (!nodeVisible[src] && !nodeVisible[tgt]) continue;
+    const srcVisible = !!nodeVisible[src];
+    const tgtVisible = !!nodeVisible[tgt];
+    if (!srcVisible && !tgtVisible) continue;
     const weight = edgeWeights[e];
     const typeName = edgeTypeNames[edgeData[e * 3 + 2]] ?? "";
     if (!options.showAuxiliary && isAuxiliaryEdge(typeName, weight)) continue;
 
     // спец-рёбра всегда пробивают кап; остальное — weight × важность концов
     let score = weight * (nodeImportance[src] + nodeImportance[tgt]);
+    // нити МЕЖДУ двумя видимыми звёздами приоритетнее «хвостов» за кадром
+    if (srcVisible && tgtVisible) score *= 3;
     if (typeName === "contradicts" || typeName === "supersedes") score += 1e6;
 
     candIdx.push(e);

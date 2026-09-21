@@ -112,11 +112,13 @@ void main() {
   float hot = 1.0 - smoothstep(0.0, coreR * 0.55, dist);
   vec3 coreColor = mix(color, vec3(1.0), 0.28 * hot);
 
-  // мягкий квадратичный ореол ровно за ядром: спад до нуля к краю спрайта
+  // мягкий СВЕТЯЩИЙСЯ ореол (итерация 3): от кромки ядра до края спрайта
+  // с плавным квадратичным спадом — сила 0.75, аддитивные перекрытия
+  // соседних ореолов читаются туманностью
   float haloT = clamp((dist - coreR) / (1.0 - coreR), 0.0, 1.0);
-  float halo = (1.0 - haloT) * (1.0 - haloT) * min(vGlow, 1.0);
+  float halo = pow(1.0 - haloT, 2.0) * min(vGlow, 1.0);
 
-  float alpha = max(core, halo * 0.42);
+  float alpha = max(core, halo * 0.75);
   // search hits get a warm rim so they read above their cluster
   float rim = (vHighlight >= 2.0) ? (1.0 - smoothstep(0.55, 1.0, dist)) * 0.35 : 0.0;
   alpha = max(alpha, rim);
@@ -129,14 +131,21 @@ void main() {
 }
 `;
 
+// Ribbon edges (итерация 3): glLineWidth в WebGL мёртв (1px), поэтому каждое
+// ребро — экранный квад: 4 вершины (концы A/B × сторона ±1), 6 индексов.
+// Vertex строит прямоугольник шириной uEdgeWidth*2 в ЭКРАННЫХ пикселях —
+// связи читаются как тонкие цветные нити постоянной толщины.
 export const EDGE_VERTEX = /* glsl */ `
-attribute vec3 aColor;    // per-vertex: gradient across the segment
+attribute vec3 aOther;   // позиция противоположного конца ребра
+attribute vec3 aColor;   // per-vertex: gradient across the segment
 attribute float aWeight;
-attribute float aKind;    // 0 route, 1 supersedes, 2 contradicts
-attribute float aEnd;     // 0 → source vertex, 1 → target vertex
+attribute float aKind;   // 0 route, 1 supersedes, 2 contradicts
+attribute float aEnd;    // 0 → source vertex, 1 → target vertex
+attribute float aSide;   // -1 / +1 — сторона ленты
 attribute float aHighlight; // both endpoints in a lit cluster
 
-uniform float uTime;
+uniform vec2 uViewport;   // px
+uniform float uEdgeWidth; // полная толщина в px
 
 varying vec3 vColor;
 varying float vAlpha;
@@ -148,16 +157,32 @@ const float FADE_START = 1000.0;
 const float FADE_END = 2100.0;
 
 void main() {
-  vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-  float dist = -mvPosition.z;
+  vec4 clipA = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  vec4 clipB = projectionMatrix * modelViewMatrix * vec4(aOther, 1.0);
+  vec4 clipSelf = mix(clipA, clipB, aEnd);
+  float dist = -mix(modelViewMatrix * vec4(position, 1.0), modelViewMatrix * vec4(aOther, 1.0), aEnd).z;
+
+  // screen-space perpendicular: ndc → px → сдвиг обратно в ndc
+  vec2 ndcA = clipA.xy / max(clipA.w, 0.0001);
+  vec2 ndcB = clipB.xy / max(clipB.w, 0.0001);
+  vec2 screenDir = ndcB - ndcA;
+  screenDir.x *= uViewport.x * 0.5;
+  screenDir.y *= uViewport.y * 0.5;
+  float len = length(screenDir);
+  vec2 perpPx = (len > 0.0001) ? vec2(-screenDir.y, screenDir.x) / len : vec2(1.0, 0.0);
+  vec2 ndcPerp = perpPx / vec2(uViewport.x * 0.5, uViewport.y * 0.5);
+  float halfWidth = uEdgeWidth * 0.5;
+
+  // ndc-смещение добавляем до перспективного деления → умножаем на w
+  vec4 clip = clipSelf + vec4(ndcPerp * aSide * halfWidth * 2.0 * clipSelf.w, 0.0, 0.0);
 
   // per-vertex fade: an edge is as strong as its fainter endpoint (§4.4)
   float fade = 1.0 - smoothstep(FADE_START, FADE_END, dist);
 
   // читаемость без паутины (итерация 2): с капом рёбер хватает скромной базы
-  float base = mix(0.06, 0.2, clamp((aWeight - 1.0) / 2.0, 0.0, 1.0));
+  float base = mix(0.15, 0.45, clamp((aWeight - 1.0) / 2.0, 0.0, 1.0));
   // contradicts burns red regardless of endpoint layers (сияние — в пульсе)
-  if (aKind > 1.5) base = 0.3;
+  if (aKind > 1.5) base = 0.5;
 
   vAlpha = base * fade * (1.0 + aHighlight * 1.6);
   // phase from position → per-edge desynced pulse waves
@@ -166,7 +191,7 @@ void main() {
   vKind = aKind;
   vColor = aColor;
 
-  gl_Position = projectionMatrix * mvPosition;
+  gl_Position = clip;
 }
 `;
 

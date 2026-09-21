@@ -71,9 +71,9 @@ export class FullMapScene {
   private coarsePointer = false;
 
   private fullPoints: THREE.Points | null = null;
-  private fullEdges: THREE.LineSegments | null = null;
+  private fullEdges: THREE.Mesh | null = null;
   private clusterPoints: THREE.Points | null = null;
-  private clusterEdges: THREE.LineSegments | null = null;
+  private clusterEdges: THREE.Mesh | null = null;
   private nebulaGroup = new THREE.Group();
   private nebulaTexture: THREE.Texture | null = null;
   private labelLayer: HTMLDivElement;
@@ -250,72 +250,131 @@ export class FullMapScene {
   }
 
   /** Full-graph gates: two vertices per edge, per-vertex colors → gradient. */
+  /**
+   * Ribbon edge factory (итерация 3): 4 вершины на ребро (концы A/B ×
+   * стороны ±1) + 6 индексов — экранный квад шириной uEdgeWidth px.
+   * Используется и полным графом, и кластерными воротами.
+   */
+  private buildRibbonEdges(
+    m: number,
+    vertexData: (e: number) => {
+      a: [number, number, number];
+      b: [number, number, number];
+      colorA: [number, number, number];
+      colorB: [number, number, number];
+      weight: number;
+      kind: number;
+      highlight: number;
+    },
+  ): { geometry: THREE.BufferGeometry; indexArray: Uint32Array; indexAttr: THREE.BufferAttribute } {
+    const V = m * 4; // A+, A-, B+, B-
+    const positions = new Float32Array(V * 3);
+    const others = new Float32Array(V * 3);
+    const colors = new Float32Array(V * 3);
+    const weights = new Float32Array(V);
+    const kinds = new Float32Array(V);
+    const ends = new Float32Array(V);
+    const sides = new Float32Array(V);
+    const highlights = new Float32Array(V);
+
+    const writeCorner = (v: number, p: [number, number, number], o: [number, number, number], c: [number, number, number], weight: number, kind: number, end: number, side: number, highlight: number) => {
+      positions.set(p, v * 3);
+      others.set(o, v * 3);
+      colors.set(c, v * 3);
+      weights[v] = weight;
+      kinds[v] = kind;
+      ends[v] = end;
+      sides[v] = side;
+      highlights[v] = highlight;
+    };
+
+    for (let e = 0; e < m; e++) {
+      const d = vertexData(e);
+      const base = e * 4;
+      writeCorner(base, d.a, d.b, d.colorA, d.weight, d.kind, 0, 1, d.highlight);
+      writeCorner(base + 1, d.a, d.b, d.colorA, d.weight, d.kind, 0, -1, d.highlight);
+      writeCorner(base + 2, d.b, d.a, d.colorB, d.weight, d.kind, 1, 1, d.highlight);
+      writeCorner(base + 3, d.b, d.a, d.colorB, d.weight, d.kind, 1, -1, d.highlight);
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute("aOther", new THREE.BufferAttribute(others, 3));
+    geometry.setAttribute("aColor", new THREE.BufferAttribute(colors, 3));
+    geometry.setAttribute("aWeight", new THREE.BufferAttribute(weights, 1));
+    geometry.setAttribute("aKind", new THREE.BufferAttribute(kinds, 1));
+    geometry.setAttribute("aEnd", new THREE.BufferAttribute(ends, 1));
+    geometry.setAttribute("aSide", new THREE.BufferAttribute(sides, 1));
+    geometry.setAttribute("aHighlight", new THREE.BufferAttribute(highlights, 1));
+
+    // index = edge identity × 6 corner indices; edge-culling rewrites this
+    const indexArray = new Uint32Array(m * 6);
+    for (let e = 0; e < m; e++) {
+      const b = e * 4;
+      const o = e * 6;
+      // A+, B+, A-  /  B+, B-, A+
+      indexArray[o] = b;
+      indexArray[o + 1] = b + 2;
+      indexArray[o + 2] = b + 1;
+      indexArray[o + 3] = b + 2;
+      indexArray[o + 4] = b + 3;
+      indexArray[o + 5] = b + 1;
+    }
+    const indexAttr = new THREE.BufferAttribute(indexArray, 1);
+    geometry.setIndex(indexAttr);
+    return { geometry, indexArray, indexAttr };
+  }
+
+  private edgeMaterial(): THREE.ShaderMaterial {
+    return new THREE.ShaderMaterial({
+      vertexShader: EDGE_VERTEX,
+      fragmentShader: EDGE_FRAGMENT,
+      uniforms: {
+        uTime: { value: 0 },
+        uViewport: { value: new THREE.Vector2(1, 1) },
+        uEdgeWidth: { value: 2.0 },
+      },
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+  }
+
   private buildFullEdges(packed: PackedMapSnapshot): void {
     const m = packed.edgeCount;
-    const positions = new Float32Array(m * 6);
-    const colors = new Float32Array(m * 6);
-    const weights = new Float32Array(m * 2);
-    const kinds = new Float32Array(m * 2);
-    const ends = new Float32Array(m * 2);
-    const highlights = new Float32Array(m * 2);
     const nsRgb = this.palette?.namespaceRgb ?? [];
     const contradicts = this.palette?.contradicts ?? new THREE.Color("#ff7a8a");
 
-    for (let e = 0; e < m; e++) {
+    const { geometry, indexArray, indexAttr } = this.buildRibbonEdges(m, (e) => {
       const src = packed.edgeData[e * 3];
       const tgt = packed.edgeData[e * 3 + 1];
       const typeIdx = packed.edgeData[e * 3 + 2];
-      const weight = packed.edgeWeights[e];
       const kindName = packed.edgeTypes[typeIdx] ?? "";
       const kind = kindName === "supersedes" ? 1 : kindName === "contradicts" ? 2 : 0;
 
       const srcRgb = nsRgb[packed.nodeMeta[src * 4] | 0] ?? [0.54, 0.59, 0.67];
       const tgtRgb = nsRgb[packed.nodeMeta[tgt * 4] | 0] ?? [0.54, 0.59, 0.67];
-
-      positions.set([packed.nodePositions[src * 3], packed.nodePositions[src * 3 + 1], packed.nodePositions[src * 3 + 2]], e * 6);
-      positions.set([packed.nodePositions[tgt * 3], packed.nodePositions[tgt * 3 + 1], packed.nodePositions[tgt * 3 + 2]], e * 6 + 3);
-
       // contradicts burns red regardless of endpoint layers (2D parity)
-      const fromRgb = kind === 2 ? [contradicts.r, contradicts.g, contradicts.b] : srcRgb;
-      const toRgb = kind === 2 ? [contradicts.r, contradicts.g, contradicts.b] : tgtRgb;
-      colors.set(fromRgb, e * 6);
-      colors.set(toRgb, e * 6 + 3);
+      const colorA: [number, number, number] =
+        kind === 2 ? [contradicts.r, contradicts.g, contradicts.b] : srcRgb;
+      const colorB: [number, number, number] =
+        kind === 2 ? [contradicts.r, contradicts.g, contradicts.b] : tgtRgb;
 
-      weights[e * 2] = weight;
-      weights[e * 2 + 1] = weight;
-      kinds[e * 2] = kind;
-      kinds[e * 2 + 1] = kind;
-      ends[e * 2] = 0;
-      ends[e * 2 + 1] = 1;
-    }
-
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    geometry.setAttribute("aColor", new THREE.BufferAttribute(colors, 3));
-    geometry.setAttribute("aWeight", new THREE.BufferAttribute(weights, 1));
-    geometry.setAttribute("aKind", new THREE.BufferAttribute(kinds, 1));
-    geometry.setAttribute("aEnd", new THREE.BufferAttribute(ends, 1));
-    geometry.setAttribute("aHighlight", new THREE.BufferAttribute(highlights, 1));
-
-    // index = edge identity; edge-culling rewrites this buffer
-    this.edgeIndexArray = new Uint32Array(m * 2);
-    for (let e = 0; e < m; e++) {
-      this.edgeIndexArray[e * 2] = e * 2;
-      this.edgeIndexArray[e * 2 + 1] = e * 2 + 1;
-    }
-    this.edgeIndex = new THREE.BufferAttribute(this.edgeIndexArray, 1);
-    geometry.setIndex(this.edgeIndex);
-
-    const material = new THREE.ShaderMaterial({
-      vertexShader: EDGE_VERTEX,
-      fragmentShader: EDGE_FRAGMENT,
-      uniforms: { uTime: { value: 0 } },
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
+      return {
+        a: [packed.nodePositions[src * 3], packed.nodePositions[src * 3 + 1], packed.nodePositions[src * 3 + 2]],
+        b: [packed.nodePositions[tgt * 3], packed.nodePositions[tgt * 3 + 1], packed.nodePositions[tgt * 3 + 2]],
+        colorA,
+        colorB,
+        weight: packed.edgeWeights[e],
+        kind,
+        highlight: 0,
+      };
     });
 
-    this.fullEdges = new THREE.LineSegments(geometry, material);
+    this.edgeIndexArray = indexArray;
+    this.edgeIndex = indexAttr;
+
+    this.fullEdges = new THREE.Mesh(geometry, this.edgeMaterial());
     this.fullEdges.frustumCulled = false;
     this.scene.add(this.fullEdges);
   }
@@ -388,51 +447,30 @@ export class FullMapScene {
 
     const gateKeys = [...gateWeight.keys()];
     const g = gateKeys.length;
-    const gatePositions = new Float32Array(g * 6);
-    const gateColors = new Float32Array(g * 6);
-    const gateWeights = new Float32Array(g * 2);
-    const gateKinds = new Float32Array(g * 2);
-    const gateEnds = new Float32Array(g * 2);
-    const gateHighlights = new Float32Array(g * 2);
 
-    gateKeys.forEach((key, gi) => {
+    const { geometry: gateGeometry } = this.buildRibbonEdges(g, (gi) => {
+      const key = gateKeys[gi];
       const a = Math.floor(key / c);
       const b = key % c;
       // slots are compact after packing — get() can't miss; the optional
       // chain is a cheap guard against malformed future payloads anyway
-      const ca = this.clusterByIndex.get(a)?.centroid;
-      const cb = this.clusterByIndex.get(b)?.centroid;
-      if (!ca || !cb) return;
-      gatePositions.set(ca, gi * 6);
-      gatePositions.set(cb, gi * 6 + 3);
+      const ca = this.clusterByIndex.get(a)?.centroid ?? [0, 0, 0];
+      const cb = this.clusterByIndex.get(b)?.centroid ?? [0, 0, 0];
       const rgbA = nsRgb[packed.clusterNs[a] | 0] ?? [0.54, 0.59, 0.67];
       const rgbB = nsRgb[packed.clusterNs[b] | 0] ?? [0.54, 0.59, 0.67];
-      gateColors.set(rgbA, gi * 6);
-      gateColors.set(rgbB, gi * 6 + 3);
-      const weight = Math.min(3, 1 + Math.log2(gateWeight.get(key)!));
-      gateWeights[gi * 2] = weight;
-      gateWeights[gi * 2 + 1] = weight;
+      const weight = Math.min(3, 1 + Math.log2(gateWeight.get(key) ?? 1));
+      return {
+        a: [ca[0], ca[1], ca[2]],
+        b: [cb[0], cb[1], cb[2]],
+        colorA: rgbA,
+        colorB: rgbB,
+        weight,
+        kind: 0,
+        highlight: 0,
+      };
     });
 
-    const gateGeometry = new THREE.BufferGeometry();
-    gateGeometry.setAttribute("position", new THREE.BufferAttribute(gatePositions, 3));
-    gateGeometry.setAttribute("aColor", new THREE.BufferAttribute(gateColors, 3));
-    gateGeometry.setAttribute("aWeight", new THREE.BufferAttribute(gateWeights, 1));
-    gateGeometry.setAttribute("aKind", new THREE.BufferAttribute(gateKinds, 1));
-    gateGeometry.setAttribute("aEnd", new THREE.BufferAttribute(gateEnds, 1));
-    gateGeometry.setAttribute("aHighlight", new THREE.BufferAttribute(gateHighlights, 1));
-
-    this.clusterEdges = new THREE.LineSegments(
-      gateGeometry,
-      new THREE.ShaderMaterial({
-        vertexShader: EDGE_VERTEX,
-        fragmentShader: EDGE_FRAGMENT,
-        uniforms: { uTime: { value: 0 } },
-        transparent: true,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending,
-      }),
-    );
+    this.clusterEdges = new THREE.Mesh(gateGeometry, this.edgeMaterial());
     this.clusterEdges.frustumCulled = false;
     this.scene.add(this.clusterEdges);
   }
@@ -855,11 +893,18 @@ export class FullMapScene {
 
     const index = this.edgeIndexArray;
     for (let k = 0; k < selected.length; k++) {
-      index[k * 2] = selected[k] * 2;
-      index[k * 2 + 1] = selected[k] * 2 + 1;
+      // ribbon quad of the edge: corner pattern from buildRibbonEdges
+      const b = selected[k] * 4;
+      const o = k * 6;
+      index[o] = b;
+      index[o + 1] = b + 2;
+      index[o + 2] = b + 1;
+      index[o + 3] = b + 2;
+      index[o + 4] = b + 3;
+      index[o + 5] = b + 1;
     }
     this.edgeIndex.needsUpdate = true;
-    this.fullEdges.geometry.setDrawRange(0, selected.length * 2);
+    this.fullEdges.geometry.setDrawRange(0, selected.length * 6);
   }
 
   /** Тумблер «служебные связи» (related_to weight < 1) — off по умолчанию. */
@@ -983,6 +1028,13 @@ export class FullMapScene {
     for (const points of [this.fullPoints, this.clusterPoints]) {
       const material = points?.material as THREE.ShaderMaterial | undefined;
       if (material) material.uniforms.uPixelRatio.value = pixelRatio;
+    }
+    // ribbon edges: viewport в физических px, толщина — 2 CSS px
+    for (const edges of [this.fullEdges, this.clusterEdges]) {
+      const material = edges?.material as THREE.ShaderMaterial | undefined;
+      if (!material) continue;
+      (material.uniforms.uViewport.value as THREE.Vector2).set(width * pixelRatio, height * pixelRatio);
+      material.uniforms.uEdgeWidth.value = 2.0 * pixelRatio;
     }
   }
 
