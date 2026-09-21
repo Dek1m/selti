@@ -56,10 +56,15 @@ jobs:
       - name: Build web UI
         run: |
           # --user: dist принадлежит runner'у, не root — иначе следующий
-          # rsync --delete не сможет его удалить (инцидент 20.09)
+          # rsync --delete не сможет его удалить (инцидент 20.09).
+          # npm ci иногда флейкает «Exit handler never called» (npm/cli bug,
+          # мусорный кеш в /tmp) — ретрай с чистыми node_modules и кешем.
           docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
             -v "$HOME/app/src/selti/web":/app -w /app \
-            node:20-alpine sh -c "npm ci --no-audit --no-fund && npm run build"
+            node:20-alpine sh -c '
+              (npm ci --no-audit --no-fund --cache /tmp/.npm-cache ||
+                { rm -rf node_modules /tmp/.npm-cache; npm ci --no-audit --no-fund --cache /tmp/.npm-cache; }
+              ) && npm run build'
           test -f ~/app/src/selti/web/dist/index.html || { echo "web build failed: no dist/index.html"; exit 1; }
 
       - name: Deploy web UI
