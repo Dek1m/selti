@@ -1,31 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { lodModeFor, selectLabeledNodes, type LabelCandidate } from "./lod";
-
-describe("lodModeFor — hysteresis switch", () => {
-  it("starts in clusters when the camera opens far away", () => {
-    expect(lodModeFor(5000, null)).toBe("clusters");
-    expect(lodModeFor(1000, null)).toBe("full");
-  });
-
-  it("crosses into clusters only at the enter threshold", () => {
-    expect(lodModeFor(1900, "full")).toBe("full");
-    expect(lodModeFor(2600, "full")).toBe("clusters");
-  });
-
-  it("unfolds the full graph only under the exit threshold", () => {
-    expect(lodModeFor(2500, "clusters")).toBe("clusters");
-    expect(lodModeFor(1900, "clusters")).toBe("full");
-  });
-
-  it("never flickers inside the hysteresis band", () => {
-    let mode: "full" | "clusters" | null = "full";
-    // 2600 crosses in; 2100/2400 stay inside the band (no flip); 1850 unfolds
-    for (const distance of [2000, 2600, 2400, 2100, 2400, 1850]) {
-      mode = lodModeFor(distance, mode);
-    }
-    expect(mode).toBe("full");
-  });
-});
+import { selectLabeledNodes, type LabelCandidate } from "./lod";
+import { CONSTELLATION_LAYOUT, FULL_LAYOUT, ellipseLayout, hashUuid } from "./layout";
 
 const candidate = (over: Partial<LabelCandidate>): LabelCandidate => ({
   index: 0,
@@ -83,5 +58,52 @@ describe("selectLabeledNodes — top-K DOM label culling (§7)", () => {
       candidate({ index: i, x: (i % 10) * 130, y: Math.floor(i / 10) * 130, depth: 100 + i }),
     );
     expect(selectLabeledNodes(many, 2000, 2000, 5)).toHaveLength(5);
+  });
+});
+
+describe("ellipseLayout — детерминированный 3D-объём", () => {
+  const uuids = Array.from({ length: 3000 }, (_, i) => `${i.toString(16).padStart(8, "0")}-granule`);
+
+  it("is deterministic — identical positions on every call", () => {
+    const a = ellipseLayout(uuids, new Float32Array(uuids.length * 3), FULL_LAYOUT);
+    const b = ellipseLayout(uuids, new Float32Array(uuids.length * 3), FULL_LAYOUT);
+    expect([...a]).toEqual([...b]);
+  });
+
+  it("keeps every point inside the bounds (full и созвездие)", () => {
+    for (const bounds of [FULL_LAYOUT, CONSTELLATION_LAYOUT]) {
+      const pos = ellipseLayout(uuids, new Float32Array(uuids.length * 3), bounds);
+      for (let i = 0; i < uuids.length; i++) {
+        expect(Math.abs(pos[i * 3])).toBeLessThanOrEqual(bounds.radius);
+        expect(Math.abs(pos[i * 3 + 1])).toBeLessThanOrEqual(bounds.thickness);
+        expect(Math.abs(pos[i * 3 + 2])).toBeLessThanOrEqual(bounds.radius);
+      }
+    }
+  });
+
+  it("объём объёмный: y-джиттер реально используется", () => {
+    const pos = ellipseLayout(uuids, new Float32Array(uuids.length * 3), FULL_LAYOUT);
+    const ys = new Set();
+    for (let i = 0; i < uuids.length; i++) ys.add(pos[i * 3 + 1].toFixed(1));
+    expect(ys.size).toBeGreaterThan(500); // не плоскость
+  });
+
+  it("no two points closer than the anti-clump distance (grid guarantee)", () => {
+    const pos = ellipseLayout(uuids.slice(0, 800), new Float32Array(800 * 3), FULL_LAYOUT);
+    const min2 = 6 * 6 * 0.9; // допуск на релаксацию
+    for (let i = 0; i < 800; i++) {
+      for (let j = i + 1; j < 800; j++) {
+        const dx = pos[i * 3] - pos[j * 3];
+        const dy = pos[i * 3 + 1] - pos[j * 3 + 1];
+        const dz = pos[i * 3 + 2] - pos[j * 3 + 2];
+        expect(dx * dx + dy * dy + dz * dz).toBeGreaterThan(min2);
+      }
+    }
+  });
+
+  it("hashUuid is stable", () => {
+    expect(hashUuid("000e4e05-cbde-4e5a-aa08-cb2577bf1c15")).toBe(
+      hashUuid("000e4e05-cbde-4e5a-aa08-cb2577bf1c15"),
+    );
   });
 });

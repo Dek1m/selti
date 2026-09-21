@@ -1,18 +1,11 @@
-// /ui/graph — the deep chart (§6). EVE Online star map: WebGL stars with
-// importance-driven halos, gradient hyperspace gates, dashed supersedes
-// routes, extinguished superseded granules, parallax star field and a
-// working HUD. Lazy-loaded: this module pulls graphology + sigma into
-// their own chunk so the search bundle stays lean.
+// /ui/graph — the deep chart (§6). Единый three.js-движок (fullmap) для
+// обоих режимов: «Созвездие» — компактный поисковый граф (кап 120, seeds
+// по ?q=), «Полная карта» — все 15k гранул с куллингом. EVE-style HUD,
+// region legend, glass по клику, глубина BFS.
 
 import { useQueries, useQuery } from "@tanstack/react-query";
-import Graph from "graphology";
-import { circular } from "graphology-layout";
-import forceAtlas2 from "graphology-layout-forceatlas2";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
-import { SigmaContainer, useLoadGraph, useRegisterEvents } from "@react-sigma/core";
-import type { Sigma } from "sigma";
-import "@react-sigma/core/lib/style.css";
 import { getMemory, getRelations, searchGranules, type SearchFilters } from "../api/selti";
 import type { MemoryRecord } from "../api/types";
 import { FullMapLayer, type MapStats } from "../components/FullMapLayer";
@@ -21,224 +14,13 @@ import { GraphErrorBoundary } from "../components/GraphErrorBoundary";
 import { namespaceColor, resolveCssColor, toRgba } from "../lib/colors";
 import {
   buildGraphModel,
-  edgeKind,
-  edgeThickness,
   graphNodeFromRecord,
-  nodeSize,
-  starGlow,
   type GraphModel,
   type GraphNodeRecord,
 } from "../lib/graph";
 import { drawStarfield } from "../lib/starfield";
-import { eveDrawNodeHover, HyperspaceEdgeProgram, StarNodeProgram } from "../lib/rendering";
+import type { RawMapSnapshot } from "../lib/fullmap/types";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
-
-/** Deterministic PRNG — "recalculate layout" reseeds the FA2 start. */
-function mulberry32(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-/** Link weight → gate opacity: heavier relations burn brighter. */
-function routeAlpha(weight: number): number {
-  return 0.16 + Math.min(2, Math.max(0, weight - 1)) * 0.09;
-}
-
-/** Model → renderable graph: circular seed positions + seeded jitter,
- * then synchronous forceatlas2 (≤120 nodes — sub-frame on the main thread). */
-function toSigmaGraph(model: GraphModel, layoutSeed: number): Graph {
-  const graph = new Graph({ multi: false, type: "directed" });
-  const starColor = (ns: string | null) => resolveCssColor(namespaceColor(ns));
-  const extinguishedColor = resolveCssColor("var(--sl-ns-superseded)");
-  const routeColor = resolveCssColor("var(--sl-warn)");
-  const contradictsColor = resolveCssColor("var(--sl-danger)");
-
-  for (const node of model.nodes) {
-    const extinguished = starGlow(node) < 0;
-    graph.addNode(node.id, {
-      label: node.label,
-      size: nodeSize(node),
-      color: extinguished ? extinguishedColor : starColor(node.namespace),
-      glow: starGlow(node),
-      dim: 0,
-      namespace: node.namespace ?? "",
-      seed: node.seed,
-      x: 0,
-      y: 0,
-    });
-  }
-  for (const edge of model.edges) {
-    // parallel pair (different link types) keeps the first line only
-    if (graph.hasEdge(edge.source, edge.target)) continue;
-    const kind = edgeKind(edge.linkType);
-    const from = resolveCssColor(namespaceColor(graph.getNodeAttribute(edge.source, "namespace") || null));
-    const to = resolveCssColor(namespaceColor(graph.getNodeAttribute(edge.target, "namespace") || null));
-    const [colorFrom, colorTo] =
-      kind === "route"
-        ? [toRgba(from, routeAlpha(edge.weight)), toRgba(to, routeAlpha(edge.weight))]
-        : kind === "supersedes"
-          ? [toRgba(routeColor, 0.55), toRgba(routeColor, 0.3)]
-          : [toRgba(contradictsColor, 0.55), toRgba(contradictsColor, 0.35)];
-    graph.addEdge(edge.source, edge.target, {
-      size: edgeThickness(edge.weight),
-      color: toRgba(from, routeAlpha(edge.weight)),
-      colorFrom,
-      colorTo,
-      dash: kind === "supersedes" ? 1 : 0,
-      dim: 0,
-      weight: edge.weight,
-      linkType: edge.linkType,
-    });
-  }
-  circular.assign(graph, { scale: 120 });
-  const rng = mulberry32(layoutSeed);
-  graph.forEachNode((id) => {
-    graph.setNodeAttribute(id, "x", graph.getNodeAttribute(id, "x") + (rng() - 0.5) * 80);
-    graph.setNodeAttribute(id, "y", graph.getNodeAttribute(id, "y") + (rng() - 0.5) * 80);
-  });
-  forceAtlas2.assign(graph, {
-    iterations: 120,
-    settings: { barnesHutOptimize: true, adjustSizes: true, scalingRatio: 8, gravity: 0.35, slowDown: 4 },
-  });
-  return graph;
-}
-
-/** Sigma wiring: load the graph instance, forward node clicks. */
-function GraphEffects({ graph, onSelect, onHover }: {
-  graph: Graph;
-  onSelect: (id: string | null) => void;
-  onHover: (id: string | null) => void;
-}) {
-  const loadGraph = useLoadGraph();
-  const registerEvents = useRegisterEvents();
-
-  useEffect(() => {
-    loadGraph(graph, true);
-  }, [graph, loadGraph]);
-
-  useEffect(() => {
-    registerEvents({
-      clickNode: ({ node }) => onSelect(node),
-      clickStage: () => onSelect(null),
-      enterNode: ({ node }) => onHover(node),
-      leaveNode: () => onHover(null),
-    });
-  }, [registerEvents, onSelect, onHover]);
-
-  return null;
-}
-
-/**
- * Deep-space backdrop behind the sigma canvas. Static dots only — redrawn
- * on resize and camera parallax, never per frame, so the graph keeps its
- * whole GPU budget for the constellation itself.
- */
-function StarfieldLayer({ sigma }: { sigma: Sigma | null }) {
-  const ref = useRef<HTMLCanvasElement>(null);
-
-  useEffect(() => {
-    const canvas = ref.current;
-    if (!canvas) return;
-    let frame = 0;
-    const redraw = () => {
-      const camera = sigma?.getCamera();
-      drawStarfield(canvas, camera ? { parallax: { x: camera.x - 0.5, y: camera.y - 0.5 } } : undefined);
-    };
-    const schedule = () => {
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(redraw);
-    };
-    redraw();
-    const observer = new ResizeObserver(schedule);
-    observer.observe(canvas);
-    const camera = sigma?.getCamera();
-    camera?.on("updated", schedule);
-    return () => {
-      camera?.off("updated", schedule);
-      observer.disconnect();
-      cancelAnimationFrame(frame);
-    };
-  }, [sigma]);
-
-  return <canvas ref={ref} className="graph-stars" aria-hidden="true" />;
-}
-
-/**
- * Delicate focus ring around the hovered star, on its own overlay canvas:
- * a RAF loop that runs ONLY while hovering, so idle rendering cost is zero.
- * Honors prefers-reduced-motion with a single static ring.
- */
-function HoverPing({ sigma, hovered }: { sigma: Sigma | null; hovered: string | null }) {
-  const ref = useRef<HTMLCanvasElement>(null);
-
-  useEffect(() => {
-    const canvas = ref.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    const clear = () => {
-      const dpr = window.devicePixelRatio || 1;
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
-    };
-
-    if (!hovered || !sigma || !sigma.getGraph().hasNode(hovered)) {
-      clear();
-      return;
-    }
-
-    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    let raf = 0;
-    const draw = (phase: number) => {
-      const dpr = window.devicePixelRatio || 1;
-      const w = canvas.clientWidth;
-      const h = canvas.clientHeight;
-      if (canvas.width !== Math.round(w * dpr)) {
-        canvas.width = Math.round(w * dpr);
-        canvas.height = Math.round(h * dpr);
-      }
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.clearRect(0, 0, w, h);
-
-      const attr = sigma.getGraph().getNodeAttributes(hovered) as { x?: number; y?: number } | undefined;
-      if (!attr || typeof attr.x !== "number" || typeof attr.y !== "number") return;
-      const point = sigma.graphToViewport({ x: attr.x, y: attr.y });
-      const base = 12; // screen-space px, just outside the core
-      const ring = (p: number, alphaScale: number) => {
-        const radius = base * (1.3 + p * 1.9);
-        const alpha = Math.max(0, 1 - p) * 0.45 * alphaScale;
-        ctx.beginPath();
-        ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
-        ctx.strokeStyle = `rgba(56, 189, 248, ${alpha.toFixed(3)})`;
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-      };
-      if (reduced) {
-        ring(0, 0.9);
-      } else {
-        ring(phase, 1);
-        ring((phase + 0.5) % 1, 0.65);
-      }
-    };
-
-    let start = performance.now();
-    const loop = (t: number) => {
-      draw(((t - start) % 1700) / 1700);
-      raf = requestAnimationFrame(loop);
-    };
-    raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
-  }, [sigma, hovered]);
-
-  return <canvas ref={ref} className="graph-pings" aria-hidden="true" />;
-}
 
 const GRAPH_FILTERS: SearchFilters = {
   query: "",
@@ -249,11 +31,91 @@ const GRAPH_FILTERS: SearchFilters = {
   period: "all",
 };
 
-/** Zoom → LOD step: far away, faint gates fade and let the big stars read. */
-function zoomStepFor(ratio: number): number {
-  if (ratio > 3.2) return 2;
-  if (ratio > 1.8) return 1;
-  return 0;
+/**
+ * Deep-space backdrop behind the 3D map. Static dots only — redrawn on
+ * resize and camera parallax, never per frame.
+ */
+function StarfieldLayer() {
+  const ref = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = ref.current;
+    if (!canvas) return;
+    let frame = 0;
+    const redraw = () => {
+      drawStarfield(canvas);
+    };
+    const schedule = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(redraw);
+    };
+    redraw();
+    const observer = new ResizeObserver(schedule);
+    observer.observe(canvas);
+    return () => {
+      observer.disconnect();
+      cancelAnimationFrame(frame);
+    };
+  }, []);
+
+  return <canvas ref={ref} className="graph-stars" aria-hidden="true" />;
+}
+
+/**
+ * Модель созвездия → RawMapSnapshot для общего 3D-движка: узлы как
+ * [id, label, null, nsIdx, -1, importance, flags], рёбра с типами.
+ * Координаты не нужны — движок раскладывает детерминированным объёмом.
+ */
+function modelToSnapshot(model: GraphModel): RawMapSnapshot {
+  const namespaces: string[] = [];
+  const nsIndex = new Map<string, number>();
+  const nsIdxOf = (uid: string | null): number => {
+    const key = uid ?? "default";
+    let idx = nsIndex.get(key);
+    if (idx === undefined) {
+      idx = namespaces.push(key) - 1;
+      nsIndex.set(key, idx);
+    }
+    return idx;
+  };
+
+  const edgeTypes: string[] = [];
+  const etIndex = new Map<string, number>();
+  const etIdxOf = (linkType: string): number => {
+    let idx = etIndex.get(linkType);
+    if (idx === undefined) {
+      idx = edgeTypes.push(linkType) - 1;
+      etIndex.set(linkType, idx);
+    }
+    return idx;
+  };
+
+  const indexOf = new Map<string, number>();
+  const nodes = model.nodes.map((node, i) => {
+    indexOf.set(node.id, i);
+    const flags = (node.status === "superseded" || node.status === "retracted" ? 2 : 0) | (node.status === "uncertain" ? 0 : 0);
+    return [
+      node.id,
+      node.label,
+      null,
+      nsIdxOf(node.namespace),
+      -1,
+      node.importance ?? 3,
+      flags,
+      0,
+      0,
+      0,
+    ] as RawMapSnapshot["nodes"][number];
+  });
+
+  const edges = model.edges.map((edge) => [
+    indexOf.get(edge.source) ?? 0,
+    indexOf.get(edge.target) ?? 0,
+    etIdxOf(edge.linkType),
+    Math.max(1, edge.weight),
+  ] as RawMapSnapshot["edges"][number]);
+
+  return { v: "constellation", ns: namespaces, et: edgeTypes, clusters: [], nodes, edges };
 }
 
 export function GraphScreen() {
@@ -261,14 +123,10 @@ export function GraphScreen() {
   const [input, setInput] = useState(searchParams.get("q") ?? "");
   const query = useDebouncedValue(input, 300).trim();
   const [selected, setSelected] = useState<string | null>(null);
-  const [hovered, setHovered] = useState<string | null>(null);
-  const [layoutSeed, setLayoutSeed] = useState(1);
   const [legendOpen, setLegendOpen] = useState(true);
   const [hiddenLayers, setHiddenLayers] = useState<ReadonlySet<string>>(new Set());
-  const [sigma, setSigma] = useState<Sigma | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const zoomStepRef = useRef(0);
-  // M3: "full" renders the 3D whole-memory map, "constellation" — the 2D search graph
+  // M3: "full" renders the 3D whole-memory map, "constellation" — поисковый граф
   const view: "constellation" | "full" = searchParams.get("view") === "full" ? "full" : "constellation";
   const [mapStats, setMapStats] = useState<MapStats | null>(null);
 
@@ -324,9 +182,8 @@ export function GraphScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search.data, relationsSettled, relations.map((q) => q.dataUpdatedAt).join(",")]);
 
-  // Gray strangers: relation neighbors the search never returned, whose layer
-  // /relations does not carry. Fetch their granules and relight the stars —
-  // the FA2 layout depends on topology only, so positions stay put.
+  // Gray strangers: relation neighbors the search never returned — fetch
+  // their granules and relight the stars with real layers.
   const strangers = useMemo(
     () => (model ? model.nodes.filter((node) => !node.namespace).map((node) => node.id) : []),
     [model],
@@ -359,15 +216,11 @@ export function GraphScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [model, strangers, strangersStamp]);
 
-  const graph = useMemo(
-    () => (enrichedModel && enrichedModel.nodes.length > 0 ? toSigmaGraph(enrichedModel, layoutSeed) : null),
-    [enrichedModel, layoutSeed],
-  );
-
-  const hoveredLabel = useMemo(() => {
-    if (!hovered || !graph || !graph.hasNode(hovered)) return null;
-    return graph.getNodeAttribute(hovered, "label") as string;
-  }, [hovered, graph]);
+  // созвездие → снапшот для общего 3D-движка (seed стабилен — детерминизм)
+  const constellationSnapshot = useMemo(() => {
+    if (!enrichedModel || enrichedModel.nodes.length === 0) return null;
+    return modelToSnapshot(enrichedModel);
+  }, [enrichedModel]);
 
   // Region map: namespaces present in the current constellation + counts
   const regions = useMemo(() => {
@@ -390,55 +243,25 @@ export function GraphScreen() {
     });
   }, []);
 
-  /**
-   * Focus + LOD + layer filters: written straight into graph attributes.
-   * Hidden nodes/edges drop out of programs; dim fades non-neighbors when
-   * a star is focused, and faint gates at far zoom (LOD).
-   */
-  const applyGraphState = useCallback(() => {
-    if (!graph) return;
-    const neighborSet =
-      hovered && graph.hasNode(hovered)
-        ? new Set<string>([hovered, ...graph.neighbors(hovered)])
-        : null;
-    const lod = zoomStepRef.current;
-
-    graph.updateEachNodeAttributes((node, attrs) => {
-      const hidden = hiddenLayers.has(String(attrs.namespace ?? "default"));
-      attrs.hidden = hidden;
-      attrs.dim = !hidden && neighborSet && !neighborSet.has(node) ? 1 : 0;
-      return attrs;
-    });
-    graph.updateEachEdgeAttributes((_edge, attrs, source, target, sourceAttrs, targetAttrs) => {
-      const hidden = sourceAttrs.hidden || targetAttrs.hidden;
-      attrs.hidden = hidden;
-      const lodDim = lod >= 2 && attrs.weight <= 2 ? 0.6 : lod >= 1 && attrs.weight < 2 ? 0.5 : 0;
-      attrs.dim = hidden ? 0 : neighborSet ? (neighborSet.has(source) && neighborSet.has(target) ? 0 : 1) : lodDim;
-      return attrs;
-    });
-  }, [graph, hovered, hiddenLayers]);
-
-  useEffect(() => applyGraphState(), [applyGraphState]);
-
-  // Camera zoom crossing an LOD threshold rewrites dim flags (discrete, not per frame)
-  useEffect(() => {
-    if (!sigma) return;
-    const camera = sigma.getCamera();
-    zoomStepRef.current = zoomStepFor(camera.ratio);
-    let last = zoomStepRef.current;
-    const onUpdate = () => {
-      const step = zoomStepFor(camera.ratio);
-      if (step !== last) {
-        last = step;
-        zoomStepRef.current = step;
-        applyGraphState();
-      }
+  // Layer visibility скрытых слоёв — через подсветку легенды: движок full
+  // не знает про слои созвездия, поэтому скрываем регионы перерасборкой
+  // модели (простота: скрытые слои просто не отдаются в снапшот)
+  const constellationForEngine = useMemo(() => {
+    if (!constellationSnapshot) return null;
+    if (hiddenLayers.size === 0) return constellationSnapshot;
+    const keep = enrichedModel
+      ? enrichedModel.nodes.filter((node) => !hiddenLayers.has(node.namespace ?? "default")).map((node) => node.id)
+      : [];
+    const keepSet = new Set(keep);
+    const filtered: RawMapSnapshot = {
+      ...constellationSnapshot,
+      nodes: constellationSnapshot.nodes.filter((node) => keepSet.has(node[0])),
+      edges: constellationSnapshot.edges.filter(
+        (edge) => keepSet.has(constellationSnapshot.nodes[edge[0]][0]) && keepSet.has(constellationSnapshot.nodes[edge[1]][0]),
+      ),
     };
-    camera.on("updated", onUpdate);
-    return () => {
-      camera.off("updated", onUpdate);
-    };
-  }, [sigma, applyGraphState]);
+    return filtered;
+  }, [constellationSnapshot, hiddenLayers, enrichedModel]);
 
   const reset = () => {
     setInput("");
@@ -448,7 +271,7 @@ export function GraphScreen() {
 
   return (
     <div className="graph-root">
-      <StarfieldLayer sigma={sigma} />
+      <StarfieldLayer />
 
       <div
         className="graph-canvas"
@@ -485,37 +308,20 @@ export function GraphScreen() {
             <h3>По «{query}» глубина молчит</h3>
             <p>Попробуйте другой запрос — созвездие строится от результатов поиска.</p>
           </div>
-        ) : graph ? (
+        ) : (
           <GraphErrorBoundary>
-            <SigmaContainer
-              ref={setSigma}
-              settings={{
-                nodeProgramClasses: { star: StarNodeProgram },
-                defaultNodeType: "star",
-                edgeProgramClasses: { hyperspace: HyperspaceEdgeProgram },
-                defaultEdgeType: "hyperspace",
-                defaultDrawNodeHover: eveDrawNodeHover,
-                defaultEdgeColor: resolveCssColor("var(--sl-border-strong)"),
-                labelColor: { color: resolveCssColor("var(--sl-text-2)") },
-                labelFont: '"JetBrains Mono", ui-monospace, monospace',
-                labelSize: 11,
-                labelWeight: "600",
-                labelRenderedSizeThreshold: 9,
-                labelDensity: 0.4,
-                labelGridCellSize: 70,
-                minCameraRatio: 0.15,
-                maxCameraRatio: 6,
-                zIndex: true,
-                renderEdgeLabels: false,
-              }}
-            >
-              <GraphEffects graph={graph} onSelect={setSelected} onHover={setHovered} />
-            </SigmaContainer>
+            <FullMapLayer
+              mode="constellation"
+              constellationSnapshot={constellationForEngine}
+              query=""
+              selected={selected}
+              onSelect={setSelected}
+              onStats={setMapStats}
+            />
           </GraphErrorBoundary>
-        ) : null}
+        )}
       </div>
 
-      {graph && <HoverPing sigma={sigma} hovered={hovered} />}
       <div className="graph-vignette" aria-hidden="true" />
 
       <div className="graph-float" role="complementary" aria-label="Управление графом">
@@ -523,7 +329,7 @@ export function GraphScreen() {
           <span className="graph-hud-title">Deep Chart</span>
           <span className="graph-hud-live">
             <i className="live-dot" aria-hidden="true" />
-            {search.isFetching ? "Scanning" : "Online"}
+            {view === "constellation" && search.isFetching ? "Scanning" : "Online"}
           </span>
         </header>
 
@@ -562,20 +368,9 @@ export function GraphScreen() {
           />
         </div>
         <div className="graph-controls">
-          {view === "constellation" ? (
-            <>
-              <button className="btn" onClick={() => setLayoutSeed((s) => s + 1)} disabled={!graph}>
-                <i className="bi bi-arrow-repeat" aria-hidden="true" /> Раскладка
-              </button>
-              <button className="btn" onClick={reset} disabled={!input && !selected}>
-                <i className="bi bi-x-circle" aria-hidden="true" /> Сброс
-              </button>
-            </>
-          ) : (
-            <button className="btn" onClick={reset} disabled={!input && !selected}>
-              <i className="bi bi-x-circle" aria-hidden="true" /> Сброс
-            </button>
-          )}
+          <button className="btn" onClick={reset} disabled={!input && !selected}>
+            <i className="bi bi-x-circle" aria-hidden="true" /> Сброс
+          </button>
         </div>
         {view === "full" ? (
           <>
@@ -595,7 +390,6 @@ export function GraphScreen() {
           enrichedModel && (
             <p className="graph-count">
               {enrichedModel.nodes.length} узлов · {enrichedModel.edges.length} связей
-              {hoveredLabel && <span className="graph-hover"> · {hoveredLabel}</span>}
             </p>
           )
         )}
@@ -648,9 +442,6 @@ export function GraphScreen() {
                     </li>
                     <li>
                       <span className="gate-sample contradicts" /> contradicts — спор
-                    </li>
-                    <li>
-                      <span className="legend-star extinct" /> погасшая гранула
                     </li>
                   </ul>
                 </div>

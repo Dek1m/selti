@@ -1,23 +1,8 @@
-// Cluster LOD decision (§2.4/M3): far camera → cluster "star systems" +
-// aggregate gates, near camera → the full graph. Pure threshold logic with
-// hysteresis so the switch never flickers, plus the label top-K picker.
-
-export const LOD_CLUSTER_ENTER = 2600;
-/** Camera must come this close again to unfold the full graph (hysteresis). */
-export const LOD_CLUSTER_EXIT = 1900;
-
-export type LodMode = "full" | "clusters";
-
-/**
- * Hysteresis switch on camera distance: cross `enter` → clusters, come back
- * under `exit` → full. state=null means "no decision yet" (first call).
- */
-export function lodModeFor(cameraDistance: number, state: LodMode | null): LodMode {
-  if (state === null) return cameraDistance >= LOD_CLUSTER_ENTER ? "clusters" : "full";
-  if (state === "full" && cameraDistance >= LOD_CLUSTER_ENTER) return "clusters";
-  if (state === "clusters" && cameraDistance <= LOD_CLUSTER_EXIT) return "full";
-  return state;
-}
+// Label top-K picker for the full map (§7 "метки в 3D = DOM-пад"):
+// only stars inside the viewport, above a projected-size threshold,
+// nearest first, importance as tiebreak; a minimum pixel gap keeps the
+// tag layer breathable. Pure — tested with fake projections.
+// (Кластерный LOD убран по развороту Мастера — всегда полный граф.)
 
 export interface LabelCandidate {
   index: number;
@@ -39,10 +24,8 @@ export interface LabelPick {
 }
 
 /**
- * Top-K label picker (§7 "метки в 3D = DOM-пад"): only stars inside the
- * viewport, above a projected-size threshold, nearest first, importance as
- * tiebreak; a minimum pixel gap keeps the tag layer breathable.
- * Pure — tested with fake projections.
+ * Top-K label picker: viewport filter, projected-size threshold,
+ * nearest first with importance tiebreak, minimum pixel gap enforced.
  */
 export function selectLabeledNodes(
   candidates: LabelCandidate[],

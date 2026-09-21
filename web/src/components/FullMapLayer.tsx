@@ -9,8 +9,9 @@ import { useSearchParams } from "react-router";
 import * as THREE from "three";
 import { searchGranules, type SearchFilters } from "../api/selti";
 import { FullMapScene, type ScenePalette } from "../lib/fullmap/scene";
-import { unpackNodeString } from "../lib/fullmap/pack";
-import type { PackedMapSnapshot } from "../lib/fullmap/types";
+import { packSnapshot, unpackNodeString } from "../lib/fullmap/pack";
+import { CONSTELLATION_LAYOUT } from "../lib/fullmap/layout";
+import type { PackedMapSnapshot, RawMapSnapshot } from "../lib/fullmap/types";
 import { hslToRgb, namespaceColor, resolveCssColor } from "../lib/colors";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 
@@ -22,6 +23,10 @@ export interface MapStats {
 }
 
 interface FullMapLayerProps {
+  /** full = снапшот всех гранул; constellation = компактный поисковый граф */
+  mode?: "full" | "constellation";
+  /** готовый RawMapSnapshot созвездия (модель Поиска), грузится без воркера */
+  constellationSnapshot?: RawMapSnapshot | null;
   query: string;
   selected: string | null;
   onSelect: (id: string | null) => void;
@@ -70,7 +75,7 @@ const LOAD_STEPS: Record<string, string> = {
   mock: "Собираю мок-вселенную…",
 };
 
-export function FullMapLayer({ query, selected, onSelect, onStats }: FullMapLayerProps) {
+export function FullMapLayer({ mode = "full", constellationSnapshot = null, query, selected, onSelect, onStats }: FullMapLayerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const labelLayerRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<FullMapScene | null>(null);
@@ -83,7 +88,6 @@ export function FullMapLayer({ query, selected, onSelect, onStats }: FullMapLaye
   });
   const [error, setError] = useState<string | null>(null);
   const [tooltip, setTooltip] = useState<TooltipState | null>(null);
-  const [lodMode, setLodMode] = useState<"full" | "clusters">("full");
   // служебный co_occurrence-слой (related_to weight < 1) — off по умолчанию
   const [auxEdges, setAuxEdges] = useState(false);
   // M4: слайдер глубины BFS 1-6/∞ (7 = ∞, дефолт), предустановка ?depth=
@@ -108,8 +112,10 @@ export function FullMapLayer({ query, selected, onSelect, onStats }: FullMapLaye
     const labelLayer = labelLayerRef.current;
     if (!container || !labelLayer) return;
 
-    const mockForced = new URLSearchParams(window.location.search).get("mock") === "1";
-    const worker = new Worker(new URL("../lib/fullmap/map.worker.ts", import.meta.url), { type: "module" });
+    const isConstellation = mode === "constellation";
+    const worker = isConstellation
+      ? null
+      : new Worker(new URL("../lib/fullmap/map.worker.ts", import.meta.url), { type: "module" });
 
     const fog = new THREE.Color(resolveCssColor("var(--sl-bg-abyss)"));
     const palette: ScenePalette = {
@@ -139,17 +145,52 @@ export function FullMapLayer({ query, selected, onSelect, onStats }: FullMapLaye
           onSelect(null);
           return;
         }
-        if ("cluster" in pick) return; // system drill-down is handled in-scene
         const packed = packedRef.current;
         if (!packed) return;
         onSelect(unpackNodeString(packed, pick.index, 0));
       },
-      onLodChange: setLodMode,
     });
     scene.setPalette(palette);
     sceneRef.current = scene;
 
-    worker.onmessage = (event: MessageEvent) => {
+    if (isConstellation) {
+      // созвездие: данные уже собраны GraphScreen'ом — пакуем на main thread
+      // (120 узлов — мгновенно) и грузим тем же движком в компактном объёме
+      if (!constellationSnapshot) {
+        // данных ещё нет (запрос пустой/летит) — чистый выход без ошибки
+        setProgress(null);
+        return () => {
+          scene.dispose();
+          sceneRef.current = null;
+          packedRef.current = null;
+        };
+      }
+      try {
+        const packed = packSnapshot(constellationSnapshot, false);
+        packedRef.current = packed;
+        palette.namespaceRgb = packed.namespaces.map((uid) => nsToRgb(uid));
+        indexByIdRef.current = buildUuidIndex(packed);
+        scene.setPalette(palette);
+        scene.load(packed, CONSTELLATION_LAYOUT);
+        onStats({
+          nodes: packed.nodeCount,
+          edges: packed.edgeCount,
+          clusters: 0,
+          mock: false,
+        });
+        setProgress(null);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "созвездие не собралось");
+        setProgress(null);
+      }
+      return () => {
+        scene.dispose();
+        sceneRef.current = null;
+        packedRef.current = null;
+      };
+    }
+
+    worker!.onmessage = (event: MessageEvent) => {
       const data = event.data as Record<string, unknown>;
       if (data.type === "progress") {
         setProgress(data.progress as { phase: string; fraction: number });
@@ -173,16 +214,17 @@ export function FullMapLayer({ query, selected, onSelect, onStats }: FullMapLaye
       }
     };
 
-    worker.postMessage({ type: "load", url: "/api/map/full?with_preview=true", withPreview: true, mock: mockForced });
+    const mockForced = new URLSearchParams(window.location.search).get("mock") === "1";
+    worker!.postMessage({ type: "load", url: "/api/map/full?with_preview=true", withPreview: true, mock: mockForced });
 
     return () => {
-      worker.terminate();
+      worker?.terminate();
       scene.dispose();
       sceneRef.current = null;
       packedRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [mode, constellationSnapshot]);
 
   // ── selection → glass ──
   useEffect(() => {
@@ -286,9 +328,6 @@ export function FullMapLayer({ query, selected, onSelect, onStats }: FullMapLaye
           <span className="map-depth-value">{depth >= 7 ? "∞" : depth}</span>
         </label>
 
-        <span className={`map-lod-badge${lodMode === "clusters" ? " far" : ""}`}>
-          {lodMode === "clusters" ? "звёздные системы" : "полный граф"}
-        </span>
         <button className="btn" onClick={() => sceneRef.current?.resetCamera()} disabled={!!progress}>
           <i className="bi bi-arrow-counterclockwise" aria-hidden="true" /> Сброс камеры
         </button>

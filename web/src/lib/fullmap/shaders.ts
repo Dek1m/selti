@@ -11,20 +11,25 @@
 export const STAR_VERTEX = /* glsl */ `
 attribute float aSize;       // importance 1..5
 attribute vec3 aColor;       // namespace spectrum
-attribute float aFlags;      // bit0 = frozen (вечный факт)
+attribute float aFlags;      // bit0 = frozen, bit1 = погасшая (созвездие)
 attribute float aBfs;        // BFS level from selection (-1 = no selection)
 attribute float aHighlight;  // search segment: 0 none, 1 cluster member, 2 hit
 
 uniform float uPixelRatio;
 uniform float uSizeScale;
+uniform float uTime;
+uniform float uTwinkle;      // 0 when prefers-reduced-motion
 uniform float uDepthCap;     // M4: кап уровней BFS (99 = бесконечность)
 
 varying vec3 vColor;
+varying float vGlow;
 varying float vGlass;
 varying float vDesat;
 varying float vFrozen;
+varying float vDimmed;
 varying float vHighlight;
 varying float vFade;
+varying float vTwinklePhase;
 
 const float FADE_START = 900.0;
 const float FADE_END = 2200.0;
@@ -33,13 +38,13 @@ void main() {
   vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
   float dist = -mvPosition.z;
 
-  // атомы эталонного размера: базовый спрайт 14.5..32.5 px, экранно-постоянный
+  // эталон созвездия: базовый спрайт 14.5..32.5 px, экранно-постоянный
   float sizePx = (10.0 + aSize * 4.5) * uSizeScale * uPixelRatio;
 
   float fade = 1.0 - smoothstep(FADE_START, FADE_END, dist);
   vFade = fade * fade;
 
-  // glass curve (§4.2) + M4: уровни глубже капа растворяются продолжением кривой
+  // glass curve (§4.2) + M4: уровни глубже капа растворяются
   float level = aBfs;
   float glass = (level < 0.0) ? 1.0 : mix(0.95, 0.12, smoothstep(0.0, 6.0, level));
   if (level == 0.0) glass = 1.0;
@@ -54,7 +59,14 @@ void main() {
   float highlightBoost = (aHighlight >= 2.0) ? 1.7 : (aHighlight >= 1.0) ? 1.3 : 1.0;
   sizePx *= highlightBoost;
 
+  // importance glow — сила ореола, та же семья что и 2D starGlow()
+  float glow = (aSize <= 0.0) ? 0.3 : 0.2 + clamp((aSize - 1.0) / 4.0, 0.0, 1.0) * 0.8;
+  vGlow = glow * highlightBoost;
+
   vFrozen = step(0.5, mod(aFlags, 2.0));
+  vDimmed = step(1.5, mod(floor(aFlags / 2.0), 2.0));
+
+  vTwinklePhase = fract(sin(dot(position.xy, vec2(12.9898, 78.233))) * 43758.5453);
 
   gl_PointSize = clamp(sizePx, 3.0 * uPixelRatio, 64.0 * uPixelRatio);
   gl_Position = projectionMatrix * mvPosition;
@@ -66,44 +78,54 @@ void main() {
 export const STAR_FRAGMENT = /* glsl */ `
 precision highp float;
 
+uniform float uTime;
+uniform float uTwinkle;
 uniform vec3 uFogColor;
 uniform vec3 uIceColor;
 
 varying vec3 vColor;
+varying float vGlow;
 varying float vGlass;
 varying float vDesat;
 varying float vFrozen;
+varying float vDimmed;
 varying float vHighlight;
 varying float vFade;
+varying float vTwinklePhase;
 
 void main() {
   vec2 uv = gl_PointCoord * 2.0 - 1.0;
   float dist = length(uv);
   if (dist > 1.0) discard;
 
+  float twinkle = 1.0 - uTwinkle * 0.24 * (0.5 + 0.5 * sin(uTime * 1.7 + vTwinklePhase * 6.2831));
+
   float luma = dot(vColor, vec3(0.2126, 0.7152, 0.0722));
-  vec3 body = mix(vColor, vec3(luma), vDesat);
-  body = mix(body, uIceColor, vFrozen * 0.55);
+  vec3 color = mix(vColor, vec3(luma), vDesat);
+  color = mix(color, uIceColor, vFrozen * 0.55);
 
-  // кристаллический атом: сферический шейдинг, светлое пятно смещено
-  // вверх-влево, лимб темнеет к кромке, жёсткий узкий блик сверху
-  vec3 N = vec3(uv, sqrt(max(0.0, 1.0 - dist * dist)));
-  vec3 L = normalize(vec3(-0.45, 0.6, 0.66));
-  float diff = max(dot(N, L), 0.0);
-  float rim = smoothstep(0.7, 1.0, dist);
+  // эталон созвездия: графичное ядро ~50% диаметра с резкой кромкой,
+  // деликатный white-hot в центре и МЯГКИЙ глоу-ореол силы 0.75 за ядром
+  float coreR = 0.5;
+  float core = 1.0 - smoothstep(coreR * 0.82, coreR * 1.06, dist);
+  float hot = 1.0 - smoothstep(0.0, coreR * 0.55, dist);
+  vec3 coreColor = mix(color, vec3(1.0), 0.28 * hot);
 
-  vec3 shaded = body * (0.4 + 0.75 * diff);
-  shaded *= 1.0 - rim * 0.5;
-  shaded += vec3(1.0) * pow(diff, 26.0) * 0.85;
+  float haloT = clamp((dist - coreR) / (1.0 - coreR), 0.0, 1.0);
+  float halo = pow(1.0 - haloT, 2.0) * min(vGlow, 1.0);
 
-  // чёткая кромка — графичный шарик, не размытый глоу
-  float disc = 1.0 - smoothstep(0.94, 1.0, dist);
-  float alpha = disc * (0.5 + 0.5 * diff);
-  alpha = max(alpha, disc * 0.28);
-  alpha *= vGlass * vFade;
+  float alpha = max(core, halo * 0.75);
+  float rim = (vHighlight >= 2.0) ? (1.0 - smoothstep(0.55, 1.0, dist)) * 0.35 : 0.0;
+  alpha = max(alpha, rim);
+  // погасшие гранулы созвездия: тлеющий контур вместо полноценной звезды
+  float ember = vDimmed * (1.0 - smoothstep(0.3, 1.0, dist)) * 0.28;
+  alpha = mix(alpha, ember, vDimmed * 0.75);
+  color = mix(color, vec3(luma), vDimmed * 0.6);
 
-  vec3 color = mix(shaded, uFogColor, (1.0 - vFade) * 0.6);
-  gl_FragColor = vec4(color * alpha, alpha);
+  alpha *= vGlass * vFade * twinkle;
+
+  vec3 fogged = mix(color, uFogColor, (1.0 - vFade) * 0.6);
+  gl_FragColor = vec4(mix(coreColor, fogged, haloT) * alpha, alpha);
 }
 `;
 

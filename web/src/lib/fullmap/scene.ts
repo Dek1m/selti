@@ -5,10 +5,9 @@
 //     ember outlines) plus 3D-specific glass / distance-fade / twinkle.
 //   • LineSegments: gradient gates, additive, one draw call, index-culled
 //     beyond the fade threshold (§4.4).
-//   • Cluster LOD (§M3): far camera collapses the map into cluster "star
-//     systems" + aggregate gates; near camera unfolds the full graph.
-//   • OrbitControls remapped per the Master's decision: RMB = orbit,
-//     LMB = pan, wheel = zoom, damped; click-vs-pan discriminator at 5px.
+//   • Fixed camera framing from the ellipse edge (разворот Мастера):
+//     RMB = orbit, LMB = pan, wheel = zoom, damped; click-vs-pan at 5px.
+//     Всегда полный граф с куллингом 280/1200 — кластерный LOD убран.
 //   • Search segment (§4.1): hit clusters light up whole — nebula shells
 //     at cluster centroids, hits brighter, the rest turns to glass.
 //   • Glass (§4.2): click → BFS levels → continuous opacity/desaturation.
@@ -18,7 +17,8 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { bfsLevels } from "./bfs";
 import { EDGE_VISIBLE_CAP, selectVisibleEdges, selectVisibleNodes } from "./edges";
-import { lodModeFor, selectLabeledNodes, type LabelCandidate, type LodMode } from "./lod";
+import { selectLabeledNodes, type LabelCandidate } from "./lod";
+import { ellipseLayout, type LayoutBounds, FULL_LAYOUT } from "./layout";
 import { unpackNodeString } from "./pack";
 import { EDGE_FRAGMENT, EDGE_VERTEX, STAR_FRAGMENT, STAR_VERTEX } from "./shaders";
 import type { PackedCluster, PackedMapSnapshot } from "./types";
@@ -42,10 +42,8 @@ const NODE_CULL_MARGIN = 1.15;
 export interface FullMapSceneCallbacks {
   /** hover moved onto a star (index) or off (null); screen px included */
   onHover: (node: { index: number; x: number; y: number } | null) => void;
-  /** click resolved as a star (full mode) or a system (cluster mode) */
-  onSelect: (node: { index: number } | { cluster: number } | null) => void;
-  /** LOD mode changed — HUD can react */
-  onLodChange: (mode: LodMode) => void;
+  /** click resolved as a star */
+  onSelect: (node: { index: number } | null) => void;
 }
 
 /** Neutral palette pieces resolved once from CSS tokens. */
@@ -68,12 +66,9 @@ export class FullMapScene {
   private packed: PackedMapSnapshot | null = null;
   private palette: ScenePalette | null = null;
   private reducedMotion = false;
-  private coarsePointer = false;
 
   private fullPoints: THREE.Points | null = null;
   private fullEdges: THREE.Mesh | null = null;
-  private clusterPoints: THREE.Points | null = null;
-  private clusterEdges: THREE.Mesh | null = null;
   private nebulaGroup = new THREE.Group();
   private nebulaTexture: THREE.Texture | null = null;
   private labelLayer: HTMLDivElement;
@@ -97,7 +92,6 @@ export class FullMapScene {
   private clusterRadii = new Map<number, number>();
   private clusterByIndex = new Map<number, PackedCluster>();
 
-  private lodState: LodMode | null = null;
   private levels: Int32Array | null = null;
   private hoverIndex: number | null = null;
   private labels: HTMLDivElement[] = [];
@@ -117,7 +111,6 @@ export class FullMapScene {
     this.callbacks = callbacks;
 
     this.reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    this.coarsePointer = window.matchMedia("(pointer: coarse)").matches;
 
     this.renderer = new THREE.WebGLRenderer({
       antialias: true,
@@ -130,7 +123,7 @@ export class FullMapScene {
     container.appendChild(this.renderer.domElement);
 
     this.camera = new THREE.PerspectiveCamera(55, 1, 2, 20000);
-    this.camera.position.set(0, 900, 2600);
+    this.camera.position.set(0, 620, 950);
 
     this.scene = new THREE.Scene();
 
@@ -177,12 +170,19 @@ export class FullMapScene {
   }
 
   /** Build/replace the GPU buffers from a packed snapshot. */
-  load(packed: PackedMapSnapshot): void {
+  load(packed: PackedMapSnapshot, bounds: LayoutBounds = FULL_LAYOUT): void {
     this.disposeMap();
     this.packed = packed;
     this.levels = null;
     this.hoverIndex = null;
-    this.lodState = this.coarsePointer ? "clusters" : null;
+
+    // разворот Мастера: клиентская детерминированная раскладка — компактный
+    // 3D-объём по хэшу uuid; серверные координаты full-снапшота игнорируем
+    const uuids: string[] = [];
+    for (let i = 0; i < packed.nodeCount; i++) {
+      uuids.push(unpackNodeString(packed, i, 0));
+    }
+    ellipseLayout(uuids, packed.nodePositions, bounds);
 
     const n = packed.nodeCount;
     const colors = new Float32Array(n * 3);
@@ -224,8 +224,7 @@ export class FullMapScene {
     this.scene.add(this.fullPoints);
 
     this.buildFullEdges(packed);
-    this.buildClusterLevel(packed);
-    this.updateLodVisibility(true);
+    this.rebuildClusterRadii(packed);
     this.rebuildVisibleNodes(performance.now(), true);
     this.cullEdges(null);
     // ribbon-материалы созданы здесь впервые — их uViewport обязан получить
@@ -237,6 +236,15 @@ export class FullMapScene {
   /** importance per node, кешируется при load — selectVisibleEdges читает её */
   private edgeImportance: Float32Array | null = null;
 
+  /** Радиусы кластеров для оболочек-туманностей (по числу членов). */
+  private rebuildClusterRadii(packed: PackedMapSnapshot): void {
+    this.clusterByIndex = new Map(packed.clusters.map((cl) => [cl.index, cl]));
+    this.clusterRadii.clear();
+    for (const cluster of packed.clusters) {
+      this.clusterRadii.set(cluster.index, 40 + Math.sqrt(cluster.members) * 11);
+    }
+  }
+
   private starMaterial(): THREE.ShaderMaterial {
     return new THREE.ShaderMaterial({
       vertexShader: STAR_VERTEX,
@@ -244,6 +252,8 @@ export class FullMapScene {
       uniforms: {
         uPixelRatio: { value: this.renderer.getPixelRatio() },
         uSizeScale: { value: 1 },
+        uTime: { value: 0 },
+        uTwinkle: { value: this.reducedMotion ? 0 : 1 },
         uDepthCap: { value: 99 },
         uFogColor: { value: this.palette?.fog ?? new THREE.Color("#060a12") },
         uIceColor: { value: this.palette?.ice ?? new THREE.Color("#7dd3fc") },
@@ -386,102 +396,6 @@ export class FullMapScene {
     this.fullEdges = new THREE.Mesh(geometry, this.edgeMaterial());
     this.fullEdges.frustumCulled = false;
     this.scene.add(this.fullEdges);
-  }
-
-  /** Cluster "star systems": centroid stars sized by membership + gates. */
-  private buildClusterLevel(packed: PackedMapSnapshot): void {
-    const c = packed.clusters.length;
-    if (c === 0) return;
-
-    const positions = new Float32Array(c * 3);
-    const colors = new Float32Array(c * 3);
-    const sizes = new Float32Array(c);
-    const flags = new Float32Array(c);
-    const bfs = new Float32Array(c).fill(-1);
-    const highlight = new Float32Array(c);
-    const nsRgb = this.palette?.namespaceRgb ?? [];
-
-    this.clusterByIndex = new Map(packed.clusters.map((cl) => [cl.index, cl]));
-
-    // cluster radius from the member mean distance to the centroid
-    const accDist = new Float64Array(c);
-    const accCnt = new Float64Array(c);
-    for (let i = 0; i < packed.nodeCount; i++) {
-      const clusterIdx = packed.nodeMeta[i * 4 + 1] | 0;
-      if (clusterIdx < 0 || clusterIdx >= c) continue;
-      const centroid = this.clusterByIndex.get(clusterIdx)?.centroid;
-      if (!centroid) continue;
-      const dx = packed.nodePositions[i * 3] - centroid[0];
-      const dy = packed.nodePositions[i * 3 + 1] - centroid[1];
-      const dz = packed.nodePositions[i * 3 + 2] - centroid[2];
-      accDist[clusterIdx] += Math.sqrt(dx * dx + dy * dy + dz * dz);
-      accCnt[clusterIdx] += 1;
-    }
-
-    for (let k = 0; k < c; k++) {
-      const cluster = packed.clusters[k];
-      const centroid = cluster.centroid;
-      positions.set(centroid, k * 3);
-      const rgb = nsRgb[packed.clusterNs[cluster.index] | 0] ?? [0.54, 0.59, 0.67];
-      colors.set(rgb, k * 3);
-      sizes[k] = 3 + Math.sqrt(cluster.members) * 0.8;
-      flags[k] = 0;
-      this.clusterRadii.set(cluster.index, (accDist[cluster.index] / (accCnt[cluster.index] || 1)) * 2.1 + 40);
-    }
-
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    geometry.setAttribute("aColor", new THREE.BufferAttribute(colors, 3));
-    geometry.setAttribute("aSize", new THREE.BufferAttribute(sizes, 1));
-    geometry.setAttribute("aFlags", new THREE.BufferAttribute(flags, 1));
-    geometry.setAttribute("aBfs", new THREE.BufferAttribute(bfs, 1));
-    this.clusterHighlightAttr = new THREE.BufferAttribute(highlight, 1);
-    geometry.setAttribute("aHighlight", this.clusterHighlightAttr);
-
-    this.clusterPoints = new THREE.Points(geometry, this.starMaterial());
-    this.clusterPoints.frustumCulled = false;
-    this.scene.add(this.clusterPoints);
-
-    // aggregate gates between systems (weighted by inter-cluster edges)
-    const gateWeight = new Map<number, number>();
-    for (let e = 0; e < packed.edgeCount; e++) {
-      const srcCluster = packed.nodeMeta[packed.edgeData[e * 3] * 4 + 1] | 0;
-      const tgtCluster = packed.nodeMeta[packed.edgeData[e * 3 + 1] * 4 + 1] | 0;
-      if (srcCluster < 0 || tgtCluster < 0 || srcCluster === tgtCluster) continue;
-      const a = Math.min(srcCluster, tgtCluster);
-      const b = Math.max(srcCluster, tgtCluster);
-      const key = a * c + b;
-      gateWeight.set(key, (gateWeight.get(key) ?? 0) + packed.edgeWeights[e]);
-    }
-
-    const gateKeys = [...gateWeight.keys()];
-    const g = gateKeys.length;
-
-    const { geometry: gateGeometry } = this.buildRibbonEdges(g, (gi) => {
-      const key = gateKeys[gi];
-      const a = Math.floor(key / c);
-      const b = key % c;
-      // slots are compact after packing — get() can't miss; the optional
-      // chain is a cheap guard against malformed future payloads anyway
-      const ca = this.clusterByIndex.get(a)?.centroid ?? [0, 0, 0];
-      const cb = this.clusterByIndex.get(b)?.centroid ?? [0, 0, 0];
-      const rgbA = nsRgb[packed.clusterNs[a] | 0] ?? [0.54, 0.59, 0.67];
-      const rgbB = nsRgb[packed.clusterNs[b] | 0] ?? [0.54, 0.59, 0.67];
-      const weight = Math.min(3, 1 + Math.log2(gateWeight.get(key) ?? 1));
-      return {
-        a: [ca[0], ca[1], ca[2]],
-        b: [cb[0], cb[1], cb[2]],
-        colorA: rgbA,
-        colorB: rgbB,
-        weight,
-        kind: 0,
-        highlight: 0,
-      };
-    });
-
-    this.clusterEdges = new THREE.Mesh(gateGeometry, this.edgeMaterial());
-    this.clusterEdges.frustumCulled = false;
-    this.scene.add(this.clusterEdges);
   }
 
   /** Soft radial sprite used as the "туманность" shell around lit regions. */
@@ -695,49 +609,27 @@ export class FullMapScene {
    * Weighted by the on-screen star size so bright giants pick easier.
    */
   private pick(): number | null {
-    if (!this.packed) return null;
-    const lod = this.lodState ?? "full";
-    const source =
-      lod === "clusters"
-        ? (this.clusterPoints?.geometry as THREE.BufferGeometry | undefined)
-        : (this.fullPoints?.geometry as THREE.BufferGeometry | undefined);
-    if (!source) return null;
+    if (!this.packed || !this.fullPoints) return null;
+    const source = this.fullPoints.geometry as THREE.BufferGeometry;
+    const positions = source.getAttribute("position") as THREE.BufferAttribute;
     const rect = this.renderer.domElement.getBoundingClientRect();
     const a = new THREE.Vector3();
     let best = -1;
     let bestScore = PICK_RADIUS_PX;
 
-    if (lod === "clusters") {
-      const positions = source.getAttribute("position") as THREE.BufferAttribute;
-      for (let i = 0; i < this.packed.clusters.length; i++) {
-        a.set(positions.getX(i), positions.getY(i), positions.getZ(i));
-        if (a.distanceTo(this.camera.position) > 6000) continue;
-        a.project(this.camera);
-        if (a.z > 1) continue;
-        const sx = ((a.x + 1) / 2) * rect.width;
-        const sy = ((1 - a.y) / 2) * rect.height;
-        const distPx = Math.hypot(sx - this.pointerScreen.x, sy - this.pointerScreen.y);
-        if (distPx < bestScore) {
-          bestScore = distPx;
-          best = i;
-        }
-      }
-    } else {
-      // только отрисованные звёзды: тултип на куллнутом узле — ложный шанс
-      const positions = source.getAttribute("position") as THREE.BufferAttribute;
-      for (let k = 0; k < this.nodeVisibleCount; k++) {
-        const i = this.nodeIndexArray ? this.nodeIndexArray[k] : -1;
-        if (i < 0) continue;
-        a.set(positions.getX(i), positions.getY(i), positions.getZ(i));
-        a.project(this.camera);
-        if (a.z > 1) continue;
-        const sx = ((a.x + 1) / 2) * rect.width;
-        const sy = ((1 - a.y) / 2) * rect.height;
-        const distPx = Math.hypot(sx - this.pointerScreen.x, sy - this.pointerScreen.y);
-        if (distPx < bestScore) {
-          bestScore = distPx;
-          best = i;
-        }
+    // только отрисованные звёзды: тултип на куллнутом узле — ложный шанс
+    for (let k = 0; k < this.nodeVisibleCount; k++) {
+      const i = this.nodeIndexArray ? this.nodeIndexArray[k] : -1;
+      if (i < 0) continue;
+      a.set(positions.getX(i), positions.getY(i), positions.getZ(i));
+      a.project(this.camera);
+      if (a.z > 1) continue;
+      const sx = ((a.x + 1) / 2) * rect.width;
+      const sy = ((1 - a.y) / 2) * rect.height;
+      const distPx = Math.hypot(sx - this.pointerScreen.x, sy - this.pointerScreen.y);
+      if (distPx < bestScore) {
+        bestScore = distPx;
+        best = i;
       }
     }
     return best >= 0 ? best : null;
@@ -745,47 +637,40 @@ export class FullMapScene {
 
   private emitClick(): void {
     const picked = this.pick();
-    if (picked === null) {
-      this.callbacks.onSelect(null);
-      return;
-    }
-    if ((this.lodState ?? "full") === "clusters") {
-      // drill into the system: fly close enough to unfold the full graph
-      const cluster = this.packed?.clusters[picked];
-      if (cluster) {
-        const target = new THREE.Vector3(...cluster.centroid);
-        this.flyTo(target.clone().add(new THREE.Vector3(0, 260, 620)), target);
-      }
-      this.callbacks.onSelect({ cluster: picked });
-    } else {
-      this.callbacks.onSelect({ index: picked });
-    }
+    this.callbacks.onSelect(picked === null ? null : { index: picked });
   }
 
-  // ── per-frame work ──
+  private depthCap = Number.POSITIVE_INFINITY;
 
-  private updateLodVisibility(force = false): void {
-    if (!this.packed) return;
-    const distance = this.camera.position.distanceTo(this.controls.target);
-    const next = this.coarsePointer ? "clusters" : lodModeFor(distance, this.lodState);
-    if (next === this.lodState && !force) return;
-    this.lodState = next;
-    if (this.fullPoints) this.fullPoints.visible = next === "full";
-    if (this.fullEdges) this.fullEdges.visible = next === "full";
-    if (this.clusterPoints) this.clusterPoints.visible = next === "clusters";
-    if (this.clusterEdges) this.clusterEdges.visible = next === "clusters";
-    if (next === "clusters") this.cullEdges(null);
-    else this.cameraDirty = true; // unfold → немедленный rebuild draw-списка
-    this.callbacks.onLodChange(next);
+  /**
+   * M4: слайдер глубины 1-6/∞. Кап уровней BFS от выбранной звезды:
+   * уровни глубже капа растворяются продолжением glass-кривой (uniform,
+   * мгновенно, без сети); отбор узлов опускает их в конец приоритета.
+   */
+  setDepth(cap: number | null): void {
+    const next = cap ?? Number.POSITIVE_INFINITY;
+    if (this.depthCap === next) return;
+    this.depthCap = next;
+    const uniformValue = Number.isFinite(next) ? next : 99;
+    for (const points of [this.fullPoints]) {
+      const material = points?.material as THREE.ShaderMaterial | undefined;
+      if (material) material.uniforms.uDepthCap.value = uniformValue;
+    }
+    this.cameraDirty = true;
+  }
+
+  /** Тумблер «служебные связи» (related_to weight < 1) — off по умолчанию. */
+  setShowAuxiliaryEdges(show: boolean): void {
+    if (this.showAuxiliaryEdges === show) return;
+    this.showAuxiliaryEdges = show;
+    this.cameraDirty = true;
+    this.cullEdges(null); // немедленная перестройка
   }
 
   /**
    * Viewport-culling узлов (фидбек Мастера 1): проецируем звёзды через
-   * view-projection матрицу, берём видимые во фрустуме (+margin) ближе
-   * порога fade, сортируем по «ярче/ближе важнее» (importance, BFS-выбор,
-   * поисковый сегмент, дистанция) и рисуем максимум NODE_VISIBLE_CAP.
-   * Пересборка индекс-буфера — throttle 150 мс при движении камеры,
-   * механика та же, что у edge-culling. Скрытые узлы не рендерятся вовсе.
+   * view-projection матрицу, связный greedy-отбор (итерация 4) —
+   * максимум NODE_VISIBLE_CAP, пересборка throttle 150 мс при движении.
    */
   private rebuildVisibleNodes(now: number, force = false): void {
     if (!this.packed || !this.fullPoints || !this.nodeIndex || !this.nodeIndexArray) return;
@@ -794,7 +679,6 @@ export class FullMapScene {
 
     const cam = this.camera.position;
     this.camera.updateMatrixWorld();
-    // combined view-projection, column-major elements (THREE layout)
     const vp = new THREE.Matrix4().multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse);
     const e = vp.elements;
     const positions = this.packed.nodePositions;
@@ -802,9 +686,8 @@ export class FullMapScene {
     const levels = this.levels;
     const highlight = this.highlightAttr ? (this.highlightAttr.array as Float32Array) : null;
     const margin = NODE_CULL_MARGIN;
-    const maxDistSq = 2200 * 2200; // FADE_END — за порогом не рисуем вовсе
+    const maxDistSq = 2200 * 2200;
 
-    // reusable candidate storage: parallel arrays, no per-frame garbage
     const candIdx: number[] = (this.candIdx ||= []);
     const candScore: number[] = (this.candScore ||= []);
     candIdx.length = 0;
@@ -821,23 +704,19 @@ export class FullMapScene {
       if (distSq > maxDistSq) continue;
 
       const cw = e[3] * x + e[7] * y + e[11] * z + e[15];
-      if (cw <= 0) continue; // behind the camera
-      const cx = e[0] * x + e[4] * y + e[8] * z + e[12];
-      const cy = e[1] * x + e[5] * y + e[9] * z + e[13];
-      const nx = cx / cw;
-      const ny = cy / cw;
+      if (cw <= 0) continue;
+      const nx = (e[0] * x + e[4] * y + e[8] * z + e[12]) / cw;
+      const ny = (e[1] * x + e[5] * y + e[9] * z + e[13]) / cw;
       if (nx < -margin || nx > margin || ny < -margin || ny > margin) continue;
 
       const importance = meta[i * 4 + 2];
       const dist = Math.sqrt(distSq);
       let score = importance * 3 + (1 - dist / 2200) * 2;
-      // выбор и сегмент обязаны пробиваться сквозь кап
       if (levels) {
         const level = levels[i];
         if (level === 0) score += 1000;
         else if (level === 1) score += 200;
         else if (level > 0) score += Math.max(0, 30 - level * 3);
-        // M4: растворённые уровни — в конец приоритета отбора
         if (level > this.depthCap) score -= 60;
       }
       if (highlight) {
@@ -848,26 +727,23 @@ export class FullMapScene {
       candScore.push(score);
     }
 
-    // связный отбор (итерация 4): seeds + добор соседей выбранных — кадр
-    // собирается в «молекулы», у большинства звёзд есть стержень внутрь
+    // связный greedy (итерация 4): seeds + добор соседей выбранных —
+    // кадр собирается в «молекулы» со стержнями внутрь набора
     const importance = this.edgeImportance ?? new Float32Array(this.packed.nodeCount);
-    for (let i = 0; i < this.packed.nodeCount; i++) {
-      importance[i] = meta[i * 4 + 2];
-    }
+    for (let i = 0; i < this.packed.nodeCount; i++) importance[i] = meta[i * 4 + 2];
     this.edgeImportance = importance;
-    const candIdxTyped = Int32Array.from(candIdx);
-    const candScoreTyped = Float32Array.from(candScore);
     const selection = selectVisibleNodes(
-      candIdxTyped,
-      candScoreTyped,
+      Int32Array.from(candIdx),
+      Float32Array.from(candScore),
       this.packed.adjOffsets,
       this.packed.adjList,
       importance,
       Math.floor(NODE_VISIBLE_CAP / 2),
       NODE_VISIBLE_CAP,
     );
-    const visible = selection.visible;
+
     let drawCount = 0;
+    const visible = selection.visible;
     for (let i = 0; i < this.packed.nodeCount; i++) {
       if (visible[i]) this.nodeIndexArray[drawCount++] = i;
     }
@@ -876,7 +752,7 @@ export class FullMapScene {
     this.nodeIndex.needsUpdate = true;
     this.fullPoints.geometry.setDrawRange(0, drawCount);
 
-    // mirror of the draw set — edge selection reads it (см. selectVisibleEdges)
+    // mirror of the draw set — edge selection reads it
     if (!this.nodeVisible || this.nodeVisible.length < this.packed.nodeCount) {
       this.nodeVisible = new Uint8Array(this.packed.nodeCount);
     }
@@ -887,10 +763,9 @@ export class FullMapScene {
   private candScore: number[] | null = null;
 
   /**
-   * Edge culling + cap (итерация 2): рисуем рёбра только у видимых звёзд,
-   * максимум EDGE_VISIBLE_CAP по приоритету «weight × важность концов»,
-   * служебный co_occurrence-слой скрыт тумблером. Throttle 150 мс — как у
-   * узлов; 86k рёбер больше не образуют паутину.
+   * Edge culling + cap: рёбра только у видимых звёзд, максимум
+   * EDGE_VISIBLE_CAP по приоритету «weight × важность концов»,
+   * служебный слой скрыт тумблером. Throttle 150 мс.
    */
   private cullEdges(now: number | null): void {
     if (!this.packed || !this.fullEdges || !this.edgeIndex || !this.edgeIndexArray) return;
@@ -915,13 +790,14 @@ export class FullMapScene {
     if (stats && now !== null && now - this.lastEdgeDebugLog > 2000) {
       this.lastEdgeDebugLog = now;
       console.debug(
-        `[fullmap] nodes ${this.nodeVisibleCount}/${this.packed.nodeCount} · edges candidates ${stats.candidates} → drawn ${stats.drawn} (cap ${EDGE_VISIBLE_CAP}) · both-ends-visible ${stats.bothVisible}`,
+        '[fullmap] nodes ' + this.nodeVisibleCount + '/' + this.packed.nodeCount +
+        ' · edges candidates ' + stats.candidates + ' → drawn ' + stats.drawn +
+        ' (cap ' + EDGE_VISIBLE_CAP + ') · both-ends-visible ' + stats.bothVisible,
       );
     }
 
     const index = this.edgeIndexArray;
     for (let k = 0; k < selected.length; k++) {
-      // ribbon quad of the edge: corner pattern from buildRibbonEdges
       const b = selected[k] * 4;
       const o = k * 6;
       index[o] = b;
@@ -935,36 +811,9 @@ export class FullMapScene {
     this.fullEdges.geometry.setDrawRange(0, selected.length * 6);
   }
 
-  /** Тумблер «служебные связи» (related_to weight < 1) — off по умолчанию. */
-  setShowAuxiliaryEdges(show: boolean): void {
-    if (this.showAuxiliaryEdges === show) return;
-    this.showAuxiliaryEdges = show;
-    this.cameraDirty = true;
-    this.cullEdges(null); // немедленная перестройка
-  }
-
-  private depthCap = Number.POSITIVE_INFINITY;
-
-  /**
-   * M4: слайдер глубины 1-6/∞. Кап уровней BFS от выбранной звезды:
-   * уровни глубже капа растворяются продолжением glass-кривой (uniform,
-   * мгновенно, без сети); отбор узлов опускает их в конец приоритета.
-   */
-  setDepth(cap: number | null): void {
-    const next = cap ?? Number.POSITIVE_INFINITY;
-    if (this.depthCap === next) return;
-    this.depthCap = next;
-    const uniformValue = Number.isFinite(next) ? next : 99;
-    for (const points of [this.fullPoints, this.clusterPoints]) {
-      const material = points?.material as THREE.ShaderMaterial | undefined;
-      if (material) material.uniforms.uDepthCap.value = uniformValue;
-    }
-    this.cameraDirty = true;
-  }
-
   /** Top-K DOM labels (§7): только видимые звёзды, throttle 140 мс. */
   private refreshLabels(now: number): void {
-    if (!this.packed || (this.lodState ?? "full") !== "full") {
+    if (!this.packed) {
       this.renderLabels([]);
       return;
     }
@@ -973,9 +822,8 @@ export class FullMapScene {
 
     const rect = this.renderer.domElement.getBoundingClientRect();
     const fovScale = rect.height / 2 / Math.tan((this.camera.fov * Math.PI) / 360);
-    const starWorldRadius = 3.2; // matches the shader's mid-size star
+    const starWorldRadius = 3.2;
     const candidates: LabelCandidate[] = [];
-    // source set = the culled draw list — labels compete inside the cap
     const total = Math.max(this.nodeVisibleCount, 0);
     for (let k = 0; k < total; k++) {
       const i = this.nodeIndexArray ? this.nodeIndexArray[k] : -1;
@@ -992,7 +840,6 @@ export class FullMapScene {
         y: ((1 - v.y) / 2) * rect.height,
         depth,
         behind: v.z > 1,
-        // projected star radius in px — the label threshold reads this
         radiusPx: (starWorldRadius * fovScale) / Math.max(depth, 1),
         importance: this.packed.nodeMeta[i * 4 + 2],
       });
@@ -1003,23 +850,24 @@ export class FullMapScene {
   private renderLabels(picks: Array<{ index: number; x: number; y: number }>): void {
     if (!this.packed) return;
     while (this.labels.length < picks.length) {
-      const div = document.createElement("div");
-      div.className = "map-label";
+      const div = document.createElement('div');
+      div.className = 'map-label';
       this.labelLayer.appendChild(div);
       this.labels.push(div);
     }
     this.labels.forEach((div, i) => {
       const pick = picks[i];
       if (!pick) {
-        div.style.display = "none";
+        div.style.display = 'none';
         return;
       }
-      // decode the name only here — the packed blob stays UTF-8 until needed
       div.textContent = unpackNodeString(this.packed!, pick.index, 1);
-      div.style.display = "block";
-      div.style.transform = `translate(${pick.x}px, ${pick.y - 14}px) translate(-50%, -100%)`;
+      div.style.display = 'block';
+      div.style.transform = 'translate(' + pick.x + 'px, ' + (pick.y - 14) + 'px) translate(-50%, -100%)';
     });
   }
+
+  // ── per-frame work ──
 
   private animate(): void {
     if (this.disposed) return;
@@ -1029,10 +877,13 @@ export class FullMapScene {
 
     this.stepFly(now);
     this.controls.update();
-    this.updateLodVisibility();
 
-    // пульс contradicts — время в рёберный материал (звёзды-атомы статичны)
-    for (const edges of [this.fullEdges, this.clusterEdges]) {
+    // время: twinkle звёзд + пульс contradicts
+    for (const points of [this.fullPoints]) {
+      const material = points?.material as THREE.ShaderMaterial | undefined;
+      if (material) material.uniforms.uTime.value = elapsed;
+    }
+    for (const edges of [this.fullEdges]) {
       const material = edges?.material as THREE.ShaderMaterial | undefined;
       if (material) material.uniforms.uTime.value = elapsed;
     }
@@ -1049,12 +900,12 @@ export class FullMapScene {
     }
 
     // viewport-culling узлов (фидбек 1): throttle 150 мс, как edge-culling
-    if ((this.lodState ?? "full") === "full" && this.cameraDirty) {
+    if (this.cameraDirty) {
       this.rebuildVisibleNodes(now);
     }
     this.cameraDirty = false;
 
-    if ((this.lodState ?? "full") === "full") this.cullEdges(now);
+    this.cullEdges(now);
     this.refreshLabels(now);
     this.renderer.render(this.scene, this.camera);
   }
@@ -1066,12 +917,12 @@ export class FullMapScene {
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height, false);
     const pixelRatio = this.renderer.getPixelRatio();
-    for (const points of [this.fullPoints, this.clusterPoints]) {
+    for (const points of [this.fullPoints]) {
       const material = points?.material as THREE.ShaderMaterial | undefined;
       if (material) material.uniforms.uPixelRatio.value = pixelRatio;
     }
     // ribbon edges: viewport в физических px, толщина — 2 CSS px
-    for (const edges of [this.fullEdges, this.clusterEdges]) {
+    for (const edges of [this.fullEdges]) {
       const material = edges?.material as THREE.ShaderMaterial | undefined;
       if (!material) continue;
       (material.uniforms.uViewport.value as THREE.Vector2).set(width * pixelRatio, height * pixelRatio);
@@ -1080,7 +931,7 @@ export class FullMapScene {
   }
 
   private disposeMap(): void {
-    for (const object of [this.fullPoints, this.fullEdges, this.clusterPoints, this.clusterEdges]) {
+    for (const object of [this.fullPoints, this.fullEdges]) {
       if (!object) continue;
       this.scene.remove(object);
       object.geometry.dispose();
@@ -1088,8 +939,6 @@ export class FullMapScene {
     }
     this.fullPoints = null;
     this.fullEdges = null;
-    this.clusterPoints = null;
-    this.clusterEdges = null;
     this.edgeIndex = null;
     this.edgeIndexArray = null;
     this.nodeIndex = null;
