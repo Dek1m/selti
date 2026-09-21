@@ -154,10 +154,10 @@ void main() {
   // per-vertex fade: an edge is as strong as its fainter endpoint (§4.4)
   float fade = 1.0 - smoothstep(FADE_START, FADE_END, dist);
 
-  // читаемость на полном графе (фидбек 4): ярче, чем раньше
-  float base = mix(0.11, 0.34, clamp((aWeight - 1.0) / 2.0, 0.0, 1.0));
-  // contradicts burns bright red regardless of endpoint layers
-  if (aKind > 1.5) base = 0.42;
+  // читаемость без паутины (итерация 2): с капом рёбер хватает скромной базы
+  float base = mix(0.06, 0.2, clamp((aWeight - 1.0) / 2.0, 0.0, 1.0));
+  // contradicts burns red regardless of endpoint layers (сияние — в пульсе)
+  if (aKind > 1.5) base = 0.3;
 
   vAlpha = base * fade * (1.0 + aHighlight * 1.6);
   // phase from position → per-edge desynced pulse waves

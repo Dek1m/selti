@@ -83,6 +83,8 @@ export function FullMapLayer({ query, selected, onSelect, onStats }: FullMapLaye
   const [error, setError] = useState<string | null>(null);
   const [tooltip, setTooltip] = useState<TooltipState | null>(null);
   const [lodMode, setLodMode] = useState<"full" | "clusters">("full");
+  // служебный co_occurrence-слой (related_to weight < 1) — off по умолчанию
+  const [auxEdges, setAuxEdges] = useState(false);
 
   // ── snapshot load (worker) + scene lifetime ──
   useEffect(() => {
@@ -242,6 +244,17 @@ export function FullMapLayer({ query, selected, onSelect, onStats }: FullMapLaye
       )}
 
       <div className="map-cam-buttons" role="group" aria-label="Камера">
+        <label className="map-edge-toggle" title="related_to с весом < 1 (co_occurrence-слой)">
+          <input
+            type="checkbox"
+            checked={auxEdges}
+            onChange={(e) => {
+              setAuxEdges(e.target.checked);
+              sceneRef.current?.setShowAuxiliaryEdges(e.target.checked);
+            }}
+          />
+          <span className="map-edge-toggle-label">служебные связи</span>
+        </label>
         <span className={`map-lod-badge${lodMode === "clusters" ? " far" : ""}`}>
           {lodMode === "clusters" ? "звёздные системы" : "полный граф"}
         </span>

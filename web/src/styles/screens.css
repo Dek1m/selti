@@ -515,6 +515,8 @@
 .map-cam-buttons {
   position: absolute; right: var(--sl-s-4); bottom: var(--sl-s-4); z-index: 6;
   display: flex; align-items: center; gap: var(--sl-s-2);
+  flex-wrap: wrap; justify-content: flex-end;
+  max-width: min(640px, calc(100% - 32px));
 }
 /* GranulePanel is 440px on the right — tuck the buttons out of its way */
 .graph-root:has(.panel) .map-cam-buttons { right: 472px; }
@@ -533,6 +535,26 @@
   white-space: nowrap;
 }
 .map-lod-badge.far { color: var(--sl-warn); text-shadow: 0 0 10px rgba(255, 193, 94, 0.3); }
+
+/* тумблер служебных связей (related_to weight < 1) — off по умолчанию */
+.map-edge-toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--sl-hud-frame-soft);
+  border-radius: var(--sl-r-full);
+  background: var(--sl-hud-panel);
+  cursor: pointer;
+  user-select: none;
+}
+.map-edge-toggle input { accent-color: var(--sl-hud-cyan); margin: 0; cursor: pointer; }
+.map-edge-toggle-label {
+  font: 500 10px/1 var(--sl-font-mono);
+  letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--sl-text-3);
+  white-space: nowrap;
+}
+.map-edge-toggle:hover .map-edge-toggle-label { color: var(--sl-text-2); }
+.map-edge-toggle:has(input:checked) .map-edge-toggle-label { color: var(--sl-hud-cyan); }
 
 /* Search screen → full map cross-link (§4.6) */
 .results-head .map-jump {

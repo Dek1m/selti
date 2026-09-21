@@ -17,6 +17,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { bfsLevels } from "./bfs";
+import { EDGE_VISIBLE_CAP, selectVisibleEdges } from "./edges";
 import { lodModeFor, selectLabeledNodes, type LabelCandidate, type LodMode } from "./lod";
 import { unpackNodeString } from "./pack";
 import { EDGE_FRAGMENT, EDGE_VERTEX, STAR_FRAGMENT, STAR_VERTEX } from "./shaders";
@@ -85,6 +86,8 @@ export class FullMapScene {
   private nodeIndex: THREE.BufferAttribute | null = null;
   private nodeIndexArray: Uint32Array | null = null;
   private nodeVisibleCount = 0;
+  private nodeVisible: Uint8Array | null = null;
+  private showAuxiliaryEdges = false;
   private lastNodeCull = 0;
   private lastEdgeCull = 0;
   private lastLabelRefresh = 0;
@@ -222,7 +225,11 @@ export class FullMapScene {
     this.buildClusterLevel(packed);
     this.updateLodVisibility(true);
     this.rebuildVisibleNodes(performance.now(), true);
+    this.cullEdges(null);
   }
+
+  /** importance per node, кешируется при load — selectVisibleEdges читает её */
+  private edgeImportance: Float32Array | null = null;
 
   private starMaterial(): THREE.ShaderMaterial {
     return new THREE.ShaderMaterial({
@@ -807,44 +814,60 @@ export class FullMapScene {
     this.nodeVisibleCount = drawCount;
     this.nodeIndex.needsUpdate = true;
     this.fullPoints.geometry.setDrawRange(0, drawCount);
+
+    // mirror of the draw set — edge selection reads it (см. selectVisibleEdges)
+    if (!this.nodeVisible || this.nodeVisible.length < this.packed.nodeCount) {
+      this.nodeVisible = new Uint8Array(this.packed.nodeCount);
+    }
+    const visible = this.nodeVisible;
+    visible.fill(0);
+    for (let k = 0; k < drawCount; k++) visible[this.nodeIndexArray[k]] = 1;
   }
 
   private candIdx: number[] | null = null;
   private candScore: number[] | null = null;
 
   /**
-   * Edge culling (§4.4): edges whose both endpoints sit beyond the fade
-   * threshold drop out of the index buffer. Rewritten at most every
-   * EDGE_CULL_COOLDOWN_MS while the camera moves — never per frame.
+   * Edge culling + cap (итерация 2): рисуем рёбра только у видимых звёзд,
+   * максимум EDGE_VISIBLE_CAP по приоритету «weight × важность концов»,
+   * служебный co_occurrence-слой скрыт тумблером. Throttle 150 мс — как у
+   * узлов; 86k рёбер больше не образуют паутину.
    */
   private cullEdges(now: number | null): void {
     if (!this.packed || !this.fullEdges || !this.edgeIndex || !this.edgeIndexArray) return;
+    if (!this.nodeVisible) return;
     if (now !== null && now - this.lastEdgeCull < EDGE_CULL_COOLDOWN_MS) return;
     if (now !== null) this.lastEdgeCull = now;
 
-    const cam = this.camera.position;
-    const positions = this.packed.nodePositions;
-    const cullDist = 2300; // just past FADE_END — fully faded edges cut
-    const index = this.edgeIndexArray;
-    let written = 0;
+    const importance = this.edgeImportance ?? new Float32Array(this.packed.nodeCount);
+    for (let i = 0; i < this.packed.nodeCount; i++) {
+      importance[i] = this.packed.nodeMeta[i * 4 + 2];
+    }
+    this.edgeImportance = importance;
+    const selected = selectVisibleEdges(
+      this.packed.edgeData,
+      this.packed.edgeWeights,
+      this.packed.edgeTypes,
+      importance,
+      this.nodeVisible,
+      { showAuxiliary: this.showAuxiliaryEdges, cap: EDGE_VISIBLE_CAP },
+    );
 
-    for (let e = 0; e < this.packed.edgeCount; e++) {
-      const src = this.packed.edgeData[e * 3];
-      const tgt = this.packed.edgeData[e * 3 + 1];
-      const dxs = positions[src * 3] - cam.x;
-      const dys = positions[src * 3 + 1] - cam.y;
-      const dzs = positions[src * 3 + 2] - cam.z;
-      const dxt = positions[tgt * 3] - cam.x;
-      const dyt = positions[tgt * 3 + 1] - cam.y;
-      const dzt = positions[tgt * 3 + 2] - cam.z;
-      const nearSrc = dxs * dxs + dys * dys + dzs * dzs < cullDist * cullDist;
-      const nearTgt = dxt * dxt + dyt * dyt + dzt * dzt < cullDist * cullDist;
-      if (!nearSrc && !nearTgt) continue;
-      index[written++] = e * 2;
-      index[written++] = e * 2 + 1;
+    const index = this.edgeIndexArray;
+    for (let k = 0; k < selected.length; k++) {
+      index[k * 2] = selected[k] * 2;
+      index[k * 2 + 1] = selected[k] * 2 + 1;
     }
     this.edgeIndex.needsUpdate = true;
-    this.fullEdges.geometry.setDrawRange(0, written);
+    this.fullEdges.geometry.setDrawRange(0, selected.length * 2);
+  }
+
+  /** Тумблер «служебные связи» (related_to weight < 1) — off по умолчанию. */
+  setShowAuxiliaryEdges(show: boolean): void {
+    if (this.showAuxiliaryEdges === show) return;
+    this.showAuxiliaryEdges = show;
+    this.cameraDirty = true;
+    this.cullEdges(null); // немедленная перестройка
   }
 
   /** Top-K DOM labels (§7): только видимые звёзды, throttle 140 мс. */
@@ -979,6 +1002,8 @@ export class FullMapScene {
     this.nodeIndex = null;
     this.nodeIndexArray = null;
     this.nodeVisibleCount = 0;
+    this.nodeVisible = null;
+    this.edgeImportance = null;
     this.bfsAttr = null;
     this.highlightAttr = null;
     this.nebulaGroup.clear();
