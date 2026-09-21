@@ -16,6 +16,8 @@ export interface EdgeSelectOptions {
   /** тумблер «служебные связи» — off по умолчанию */
   showAuxiliary: boolean;
   cap: number;
+  /** debug-диагностика (?debug=1): заполняется вызывающим, если передан */
+  stats?: { candidates: number; bothVisible: number; drawn: number };
 }
 
 /**
@@ -35,6 +37,7 @@ export function selectVisibleEdges(
   const m = edgeWeights.length;
   const candIdx: number[] = [];
   const candScore: number[] = [];
+  let bothVisible = 0;
 
   for (let e = 0; e < m; e++) {
     const src = edgeData[e * 3];
@@ -42,6 +45,7 @@ export function selectVisibleEdges(
     const srcVisible = !!nodeVisible[src];
     const tgtVisible = !!nodeVisible[tgt];
     if (!srcVisible && !tgtVisible) continue;
+    if (srcVisible && tgtVisible) bothVisible++;
     const weight = edgeWeights[e];
     const typeName = edgeTypeNames[edgeData[e * 3 + 2]] ?? "";
     if (!options.showAuxiliary && isAuxiliaryEdge(typeName, weight)) continue;
@@ -54,6 +58,11 @@ export function selectVisibleEdges(
 
     candIdx.push(e);
     candScore.push(score);
+  }
+  if (options.stats) {
+    options.stats.candidates = candIdx.length;
+    options.stats.bothVisible = bothVisible;
+    options.stats.drawn = Math.min(candIdx.length, options.cap);
   }
 
   let count = candIdx.length;

@@ -153,8 +153,10 @@ varying float vKind;
 varying float vEnd;
 varying float vPhase;     // pulse phase for contradicts glow waves
 
-const float FADE_START = 1000.0;
-const float FADE_END = 2100.0;
+const float FADE_START = 1100.0;
+// узлы выбираются до 2200 — лента с видимым концом обязана доживать
+// до дальнего конца и таять там плавно, а не исчезать целиком
+const float FADE_END = 2400.0;
 
 void main() {
   vec4 clipA = projectionMatrix * modelViewMatrix * vec4(position, 1.0);

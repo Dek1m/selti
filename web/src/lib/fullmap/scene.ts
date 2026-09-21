@@ -89,6 +89,8 @@ export class FullMapScene {
   private nodeVisible: Uint8Array | null = null;
   private showAuxiliaryEdges = false;
   private lastNodeCull = 0;
+  private edgeDebug = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("debug");
+  private lastEdgeDebugLog = 0;
   private lastEdgeCull = 0;
   private lastLabelRefresh = 0;
   private cameraDirty = true;
@@ -226,6 +228,10 @@ export class FullMapScene {
     this.updateLodVisibility(true);
     this.rebuildVisibleNodes(performance.now(), true);
     this.cullEdges(null);
+    // ribbon-материалы созданы здесь впервые — их uViewport обязан получить
+    // реальные размеры немедленно (иначе ленты строятся от viewport 1×1
+    // и улетают мимо экрана: «рёбер нет вообще»)
+    this.resize();
   }
 
   /** importance per node, кешируется при load — selectVisibleEdges читает её */
@@ -336,6 +342,10 @@ export class FullMapScene {
       },
       transparent: true,
       depthWrite: false,
+      // ленты строятся в screen space — обход зависит от знака перпендикуляра,
+      // без DoubleSide половина квадов culled как back-facing (симптом:
+      // «рёбра исчезают при движении камеры»)
+      side: THREE.DoubleSide,
       blending: THREE.AdditiveBlending,
     });
   }
@@ -882,14 +892,21 @@ export class FullMapScene {
       importance[i] = this.packed.nodeMeta[i * 4 + 2];
     }
     this.edgeImportance = importance;
+    const stats = this.edgeDebug ? { candidates: 0, bothVisible: 0, drawn: 0 } : undefined;
     const selected = selectVisibleEdges(
       this.packed.edgeData,
       this.packed.edgeWeights,
       this.packed.edgeTypes,
       importance,
       this.nodeVisible,
-      { showAuxiliary: this.showAuxiliaryEdges, cap: EDGE_VISIBLE_CAP },
+      { showAuxiliary: this.showAuxiliaryEdges, cap: EDGE_VISIBLE_CAP, stats },
     );
+    if (stats && now !== null && now - this.lastEdgeDebugLog > 2000) {
+      this.lastEdgeDebugLog = now;
+      console.debug(
+        `[fullmap] nodes ${this.nodeVisibleCount}/${this.packed.nodeCount} · edges candidates ${stats.candidates} → drawn ${stats.drawn} (cap ${EDGE_VISIBLE_CAP}) · both-ends-visible ${stats.bothVisible}`,
+      );
+    }
 
     const index = this.edgeIndexArray;
     for (let k = 0; k < selected.length; k++) {
