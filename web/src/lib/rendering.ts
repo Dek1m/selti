@@ -127,7 +127,9 @@ void main() {
 `;
 
 const STAR_NODE_FRAGMENT_SHADER = /*glsl*/ `
-precision mediump float;
+// highp to match the vertex stage default: u_correctionRatio is shared by
+// both shaders, and a precision mismatch kills program linking (WebGL2).
+precision highp float;
 
 varying vec4 v_color;
 varying vec2 v_diffVector;
