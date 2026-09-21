@@ -149,6 +149,11 @@ function buildRibbon(count, vertexData) {
   const sides = new Float32Array(V);
   const highlights = new Float32Array(V);
   const wc = (v, p, o, c, w, k, end, side, hl) => {
+    const valid = (x) => Array.isArray(x) && x.length === 3 && x.every(Number.isFinite);
+    if (!valid(p) || !valid(o) || !valid(c)) {
+      say(`wc(v=${v}): bad source p=${JSON.stringify(p)} o=${JSON.stringify(o)} c=${JSON.stringify(c)}`, "bad");
+      p = valid(p) ? p : [0, 0, 0]; o = valid(o) ? o : [0, 0, 0]; c = valid(c) ? c : [1, 1, 1];
+    }
     positions.set(p, v * 3); others.set(o, v * 3); colors.set(c, v * 3);
     weights[v] = w; kinds[v] = k; ends[v] = end; sides[v] = side; highlights[v] = hl;
   };
@@ -179,7 +184,17 @@ function buildRibbon(count, vertexData) {
   return geo;
 }
 
-const geometry = buildRibbon(VERTS.length, (e) => VERTS[e]);
+const geometry = buildRibbon(VERTS.length, (e) => {
+  const d = VERTS[e];
+  return {
+    a: d.a, b: d.b,
+    colorA: d.ca ?? [1, 1, 1],
+    colorB: d.cb ?? [1, 1, 1],
+    weight: d.w ?? 1,
+    kind: d.k ?? 0,
+    highlight: 0,
+  };
+});
 const material = new THREE.ShaderMaterial({
   vertexShader: EDGE_VERTEX,
   fragmentShader: EDGE_FRAGMENT_SOLID,
