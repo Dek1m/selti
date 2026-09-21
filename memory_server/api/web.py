@@ -15,9 +15,11 @@ CORS — под фронт-порт Vite (settings.cors_origins).
 """
 
 from datetime import datetime
+from hashlib import sha1
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from memory_server.config import settings
@@ -47,6 +49,8 @@ TASK_GET_RELATIONS = "memory_server.tasks.memory_tasks.get_relations"
 TASK_FIND_SIMILAR = "memory_server.tasks.memory_tasks.find_similar"
 TASK_NAMESPACES = "memory_server.tasks.memory_tasks.get_namespaces"
 TASK_LINKER_STATS = "memory_server.tasks.linker_tasks.linker_stats"
+TASK_MAP_META = "memory_server.tasks.map_tasks.map_meta"
+TASK_MAP_BUILD = "memory_server.tasks.map_tasks.build_map_snapshot"
 TASK_PROJECT_LIST = "memory_server.tasks.project_tasks.list_projects"
 TASK_PROJECT_GET = "memory_server.tasks.project_tasks.get_project"
 TASK_PROJECT_CREATE = "memory_server.tasks.project_tasks.create_project"
@@ -208,9 +212,98 @@ async def linker_stats() -> dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════
-# Projects CRUD-минимум
+# Полная карта 3D (PLAN_FULL_MAP_3D M1)
 # ═══════════════════════════════════════════════════════════════
 
+# Байты снапшота лежат в Redis сжатыми (Celery-JSON байты не переносит):
+# web-процесс читает их сам — тот же fast-path-паттерн, что у облачка
+# Фазы 6 (/api/contexts). Отдельная функция — точка подмены в тестах.
+async def _redis_get_bytes(key: str) -> bytes | None:
+    from memory_server.state import get_state
+
+    redis = await get_state().get_redis_bytes()
+    return await redis.get(key)
+
+
+def _map_etag(
+    version: str, with_preview: bool, project_id: str | None, namespace: str | None
+) -> str:
+    """ETag снапшота: дефолтный набор параметров = чистая version (план §2.5);
+    фильтры/with_preview меняют тело при той же version — расширяют тег."""
+    if with_preview and not project_id and not namespace:
+        return version
+    return sha1(f"{version}|{int(with_preview)}|{project_id or ''}|{namespace or ''}".encode()).hexdigest()[:12]
+
+
+def _etag_matches(if_none_match: str | None, etag: str) -> bool:
+    """If-None-Match: список тегов через запятую, возможен слабый W/-префикс."""
+    if not if_none_match:
+        return False
+    for candidate in if_none_match.split(","):
+        normalized = candidate.strip()
+        if normalized.startswith("W/"):
+            normalized = normalized[2:]
+        if normalized.strip('"') == etag:
+            return True
+    return False
+
+
+_MAP_CACHE_CONTROL = "public, max-age=60, stale-while-revalidate=600"
+
+
+@router.get("/map/meta")
+async def map_meta() -> dict[str, Any]:
+    """Мета Полной карты: version-хэш, счётчики, layout_at/stale (<50мс,
+    кеш Redis 60с). Источник ETag для /api/map/full."""
+    return await _call(TASK_MAP_META)
+
+
+@router.get("/map/full")
+async def map_full(
+    request: Request,
+    with_preview: bool = True,
+    project_id: str | None = Query(None, max_length=64),
+    namespace: str | None = Query(None, max_length=64),
+) -> Response:
+    """Снапшот Полной карты (columnar, план §3): узлы/рёбра индексными
+    массивами, координаты из map_layout (или сферический fallback до
+    первого прогона layout_map). gz-байты отдаются как есть с
+    Content-Encoding: gzip — GZipMiddleware в приложении нет, двойного
+    сжатия не возникает. If-None-Match → 304."""
+    meta = await _call(TASK_MAP_META)
+    etag = _map_etag(meta["version"], with_preview, project_id, namespace)
+    headers = {"ETag": f'"{etag}"', "Cache-Control": _MAP_CACHE_CONTROL}
+    if _etag_matches(request.headers.get("if-none-match"), etag):
+        return Response(status_code=304, headers=headers)
+
+    report = await _call(
+        TASK_MAP_BUILD,
+        with_preview=with_preview,
+        project_id=project_id,
+        namespace=namespace,
+    )
+    if report.get("stalled"):
+        # Конкурент держит build-lock дольше лимита ожидания — клиент
+        # повторит через секунды (тело ещё собирается)
+        raise HTTPException(status_code=503, detail="map snapshot build in progress")
+    # Фикс F5: ETag — из ТОГО ЖЕ ответа, что собирал тело. Данные могли
+    # смениться между meta- и build-вызовами: метка обязана описывать
+    # отданные байты, а не версию на секунду старше.
+    etag = _map_etag(report["version"], with_preview, project_id, namespace)
+    headers["ETag"] = f'"{etag}"'
+    snapshot = await _redis_get_bytes(report["key"])
+    if snapshot is None:
+        raise HTTPException(status_code=502, detail="map snapshot missing in cache after build")
+    return Response(
+        content=snapshot,
+        media_type="application/json",
+        headers={**headers, "Content-Encoding": "gzip"},
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
+# Projects CRUD-минимум
+# ═══════════════════════════════════════════════════════════════
 
 class ProjectLinkIn(BaseModel):
     link_type: LinkType

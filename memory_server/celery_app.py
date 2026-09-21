@@ -71,6 +71,7 @@ app.conf.task_routes = {
     "memory_server.tasks.lifecycle_tasks.*": {"queue": "memory"},
     "memory_server.tasks.context_tasks.*": {"queue": "memory"},
     "memory_server.tasks.linker_tasks.*": {"queue": "memory"},
+    "memory_server.tasks.map_tasks.*": {"queue": "memory"},
     "worker_stats.update": {"queue": "memory"},
     "business_metrics.update": {"queue": "memory"},
 }
@@ -130,6 +131,13 @@ app.conf.beat_schedule = {
     "refresh-clusters": {
         "task": "memory_server.tasks.lifecycle_tasks.refresh_clusters",
         "schedule": crontab(hour=2, minute=0),  # ежедневно 02:00 UTC
+    },
+    # Полная карта 3D (PLAN_FULL_MAP_3D M2): пересчёт раскладки после
+    # refresh_clusters — кластеры нового состава сразу получают места;
+    # no-op при отсутствии dirty и неизменном version-хэше графа.
+    "layout-map": {
+        "task": "memory_server.tasks.map_tasks.layout_map",
+        "schedule": crontab(hour=2, minute=30),  # ежедневно 02:30 UTC
     },
     "confidence-decay": {
         "task": "memory_server.tasks.lifecycle_tasks.confidence_decay",

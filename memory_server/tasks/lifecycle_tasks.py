@@ -17,6 +17,7 @@ from memory_server.logger import get_logger
 from memory_server.state import get_state
 from memory_server.tasks.async_bridge import run_async
 from memory_server.tasks.base import SeltiTask
+from memory_server.tasks.map_tasks import bump_map_dirty
 
 logger = get_logger(__name__)
 
@@ -205,7 +206,10 @@ def refresh_clusters(self, namespace: str | None = None) -> dict[str, Any]:
     """
     service = _get_service()
     if namespace is not None:
-        return run_async(service.refresh_clusters, namespace=namespace)
+        result = run_async(service.refresh_clusters, namespace=namespace)
+        if result.get("ok") is not False:
+            bump_map_dirty()
+        return result
 
     namespaces = run_async(service.ns_repo.list_all)
     summary: dict[str, Any] = {"ok": True, "namespaces": {}}
@@ -216,4 +220,8 @@ def refresh_clusters(self, namespace: str | None = None) -> dict[str, Any]:
             # 022 не применена или Qdrant недоступен — по одному ns не шумим,
             # выходим сразу (retry подхватит весь обход)
             return result
+    # Кластерный состав в снапшоте меняется БЕЗ следов в version-хэше
+    # (разметка cluster_id не трогает memories.updated_at — триггер 022) →
+    # единственный инвалидатор — dirty-bump (PLAN_FULL_MAP_3D M2)
+    bump_map_dirty()
     return summary

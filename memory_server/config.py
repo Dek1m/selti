@@ -137,6 +137,22 @@ class Settings(BaseSettings):
 
     api_key: str = ""
 
+    # ── Полная карта 3D (PLAN_FULL_MAP_3D, M1/M2) ──
+    # Серверная раскладка: igraph DrL dim=3 → нормировка в куб →
+    # min-distance-релаксация. Координаты целые в [-bbox, bbox]³.
+    map_layout_bbox: int = 1000        # полу-сторона куба нормировки
+    map_min_dist: float = 50.0         # мин. дистанция расталкивания пар (единицы bbox)
+    map_relax_iterations: int = 8      # итераций релаксации (ранний выход при стабилизации)
+    map_drl_timeout: float = 120.0     # лимит spawn-субпроцесса DrL (сегфолт-щит, фикс F1)
+    # Снапшот: кеш /full (gz-байты) и /meta в Redis
+    map_meta_ttl: int = 60             # кеш меты, с (план: <50мс на запрос)
+    map_snapshot_ttl: int = 86400      # TTL снапшота текущей версии, с
+    map_stale_ttl: int = 300           # EXPIRE устаревших версий снапшота, с
+    map_build_wait_seconds: float = 60.0  # ожидание конкурента под build-lock, с
+    # Усечение полей узла при сборке снапшота
+    map_preview_chars: int = 180       # preview контента, по границе слова + «…»
+    map_name_chars: int = 80           # entity_name (тултип)
+
     # ── Фаза 5: веб-морда ──
     # CORS под фронт-порт (Vite default 5173); переопределяется env-JSON
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]

@@ -346,3 +346,38 @@ LINKER_L2_QUEUE_SIZE = Gauge(
     f"{PREFIX}_linker_l2_queue_size",
     "Pending L2 verdict queue size (granules waiting for LLM)",
 )
+
+# ============================================================
+# Полная карта 3D (PLAN_FULL_MAP_3D, M1/M2)
+# ============================================================
+
+MAP_SNAPSHOT_BUILD_SECONDS = Histogram(
+    f"{PREFIX}_map_snapshot_build_seconds",
+    "Full-map snapshot cold build duration (Celery, under lock)",
+    buckets=(0.1, 0.25, 0.5, 1.0, 1.5, 2.5, 5.0, 10.0),
+)
+
+MAP_LAYOUT_SECONDS = Histogram(
+    f"{PREFIX}_map_layout_seconds",
+    "3D layout rebuild duration (DrL + relaxation + normalization)",
+    buckets=(0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0),
+)
+
+# Сработки сегфолт-щита DrL (фикс F1 приёмки): subprocess умер/завис/ошибся,
+# раскладка ушла в сферический fallback. Растёт — igraph на платформе нездоров.
+MAP_LAYOUT_FALLBACKS = Counter(
+    f"{PREFIX}_map_layout_fallbacks_total",
+    "Total DrL subprocess failures answered by spherical fallback",
+    ["reason"],  # reason: drl_failed
+)
+
+MAP_SNAPSHOT_BYTES = Histogram(
+    f"{PREFIX}_map_snapshot_bytes",
+    "Snapshot payload size (gz bytes, as stored in Redis)",
+    buckets=(100_000, 500_000, 1_000_000, 2_500_000, 5_000_000, 10_000_000),
+)
+
+MAP_CACHE_HITS = Counter(
+    f"{PREFIX}_map_cache_hits_total",
+    "Total map meta/snapshot cache hits (Redis)",
+)

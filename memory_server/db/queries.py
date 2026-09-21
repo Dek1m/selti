@@ -1046,3 +1046,141 @@ INSERT_PROJECT_TECHNOLOGIES = """
     FROM unnest($2::text[], $3::text[], $4::text[]) AS t(name, version, purpose)
     JOIN technologies tech ON tech.name = t.name
 """
+
+
+# ── Полная карта 3D (PLAN_FULL_MAP_3D M1/M2) ──
+# Снапшот /api/map/full: только актуальные гранулы (asserted + valid_to IS
+# NULL), рёбра — только резолвленные (target_id IS NOT NULL) между гранулами
+# снапшота. Кластерный уровень — таблица clusters (022). ORDER BY id —
+# детерминизм columnar-массивов: одинаковый корпус = одинаковые индексы.
+
+# Version-hash и счётчики меты: дешёвые агрегаты одним запросом.
+# relations не имеет updated_at (005) — маркер свежести рёбер created_at,
+# причём ТОЛЬКО по резолвленным (фикс F4): висячие (target_id IS NULL) в
+# карту не входят, их создание не должно инвалилировать снапшот.
+# map_layout вынесена в MAP_LAYOUT_VERSION: до применения 024 таблицы нет,
+# основной запрос не должен падать (layout_rev=0, layout_at=NULL).
+MAP_VERSION_SQL = """
+    SELECT
+        (SELECT count(*) FROM memories
+          WHERE status = 'asserted' AND valid_to IS NULL)              AS node_count,
+        (SELECT count(*) FROM relations WHERE target_id IS NOT NULL)   AS edge_count,
+        (SELECT count(*) FROM clusters)                                 AS cluster_count,
+        (SELECT max(updated_at) FROM memories)                          AS mem_updated,
+        (SELECT max(created_at) FROM relations
+          WHERE target_id IS NOT NULL)                                  AS rel_created
+"""
+
+# Отдельно от MAP_VERSION_SQL: existence map_layout проверяет вызывающий
+# (to_regclass), при отсутствии таблицы — DEFAULT'ы.
+MAP_LAYOUT_EXISTS_SQL = "SELECT to_regclass('public.map_layout') IS NOT NULL"
+
+MAP_LAYOUT_VERSION_SQL = """
+    SELECT max(rev) AS layout_rev, max(updated_at) AS layout_at
+    FROM map_layout
+"""
+
+MAP_LAYOUT_NEXT_REV_SQL = "SELECT coalesce(max(rev), 0) + 1 FROM map_layout"
+
+# Узлы снапшота: LEFT JOIN map_layout — координаты NULL до первого прогона
+# layout_map (сборка подставит сферический fallback, M1).
+MAP_NODES_SQL = """
+    SELECT m.id::text,
+           m.metadata->>'entity_name' AS entity_name,
+           m.content,
+           n.uid AS namespace,
+           m.cluster_id::text,
+           m.importance,
+           m.frozen,
+           ml.x, ml.y, ml.z
+    FROM memories m
+    JOIN namespaces n ON n.id = m.namespace_id
+    LEFT JOIN map_layout ml ON ml.node_id = m.id
+    WHERE m.status = 'asserted' AND m.valid_to IS NULL
+      AND ($1::text IS NULL OR n.uid = $1::text)
+      AND ($2::uuid IS NULL OR m.project_id = $2::uuid)
+    ORDER BY m.id
+"""
+
+# Тот же SELECT до применения 024 (фикс F2 приёмки): map_layout не существует,
+# LEFT JOIN падает на parse — литеральные NULL держат форму строк совместимой
+# (x/y/z = None → сферический fallback сборки), /full отвечает 200.
+MAP_NODES_NO_LAYOUT_SQL = """
+    SELECT m.id::text,
+           m.metadata->>'entity_name' AS entity_name,
+           m.content,
+           n.uid AS namespace,
+           m.cluster_id::text,
+           m.importance,
+           m.frozen,
+           NULL::real AS x, NULL::real AS y, NULL::real AS z
+    FROM memories m
+    JOIN namespaces n ON n.id = m.namespace_id
+    WHERE m.status = 'asserted' AND m.valid_to IS NULL
+      AND ($1::text IS NULL OR n.uid = $1::text)
+      AND ($2::uuid IS NULL OR m.project_id = $2::uuid)
+    ORDER BY m.id
+"""
+
+# Рёбра снапшота: обе стороны обязаны пройти фильтры узлов (иначе разрыв
+# индексов). Джойны namespaces ×2 только ради namespace-фильтра — на билде
+# под lock это дешевле дублирования логики фильтра в Python.
+MAP_EDGES_SQL = """
+    SELECT r.source_id::text, r.target_id::text, r.link_type, r.weight
+    FROM relations r
+    JOIN memories s ON s.id = r.source_id
+    JOIN namespaces sn ON sn.id = s.namespace_id
+    JOIN memories t ON t.id = r.target_id
+    JOIN namespaces tn ON tn.id = t.namespace_id
+    WHERE r.target_id IS NOT NULL
+      AND s.status = 'asserted' AND s.valid_to IS NULL
+      AND t.status = 'asserted' AND t.valid_to IS NULL
+      AND ($1::text IS NULL OR (sn.uid = $1::text AND tn.uid = $1::text))
+      AND ($2::uuid IS NULL OR (s.project_id = $2::uuid AND t.project_id = $2::uuid))
+"""
+
+# Метаданные кластеров снапшота; финальное сужение до используемых — в Python.
+MAP_CLUSTERS_SQL = """
+    SELECT c.id::text, n.uid AS namespace, c.label, c.member_count
+    FROM clusters c
+    JOIN namespaces n ON n.id = c.namespace_id
+    WHERE ($1::text IS NULL OR n.uid = $1::text)
+    ORDER BY c.id
+"""
+
+# Вход раскладки layout_map: узлы + рёбра графа (без контента — только
+# топология, веса и кластеры для fallback/аналитики).
+MAP_LAYOUT_NODES_SQL = """
+    SELECT m.id::text, m.cluster_id::text
+    FROM memories m
+    WHERE m.status = 'asserted' AND m.valid_to IS NULL
+    ORDER BY m.id
+"""
+
+MAP_LAYOUT_EDGES_SQL = """
+    SELECT r.source_id::text, r.target_id::text, r.weight
+    FROM relations r
+    JOIN memories s ON s.id = r.source_id
+    JOIN memories t ON t.id = r.target_id
+    WHERE r.target_id IS NOT NULL
+      AND s.status = 'asserted' AND s.valid_to IS NULL
+      AND t.status = 'asserted' AND t.valid_to IS NULL
+"""
+
+# Seeding: сохранённые координаты прошлой раскладки (карта «дышит», а не
+# перетасовывается при живом reconciler).
+MAP_LAYOUT_EXISTING_SQL = """
+    SELECT node_id::text, x, y, z
+    FROM map_layout
+"""
+
+# Bulk-UPSERT раскладки одним запросом (unnest параллельными массивами):
+# rev — глобальный номер прогона, +1 от максимума читает вызывающий.
+MAP_LAYOUT_UPSERT_SQL = """
+    INSERT INTO map_layout (node_id, x, y, z, rev)
+    SELECT u.node_id, u.x, u.y, u.z, $5::int
+    FROM unnest($1::uuid[], $2::real[], $3::real[], $4::real[]) AS u(node_id, x, y, z)
+    ON CONFLICT (node_id) DO UPDATE SET
+        x = EXCLUDED.x, y = EXCLUDED.y, z = EXCLUDED.z,
+        rev = EXCLUDED.rev, updated_at = now()
+"""

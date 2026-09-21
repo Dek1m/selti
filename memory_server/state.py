@@ -41,9 +41,11 @@ class SeltiState:
     def __init__(self) -> None:
         self._pool: Optional[asyncpg.Pool] = None
         self._redis: Optional[aioredis.Redis] = None
+        self._redis_bytes: Optional[aioredis.Redis] = None
         self._qdrant: Optional["CircuitBreakerQdrantClient"] = None
         self._embedding: Optional["EmbeddingClient"] = None
         self._memory_service: Optional["MemoryService"] = None
+        self._map_service: Optional["MapService"] = None
         self._hash_repository: Optional["HashRepository"] = None
         self._namespace_repository: Optional["NamespaceRepository"] = None
         self._project_repository: Optional["ProjectRepository"] = None
@@ -102,6 +104,22 @@ class SeltiState:
                 )
                 logger.info("Redis client ready", extra={"url": settings.redis_url})
         return self._redis
+
+    async def get_redis_bytes(self) -> aioredis.Redis:
+        """Бинарный Redis-клиент (decode_responses=False): кеш снапшота
+        карты хранит gz-байты — текстовый клиент декодировал бы их в
+        UTF-8 и молча портил. Отдельный инстанс, тот же сервер."""
+        if self._redis_bytes is not None:
+            return self._redis_bytes
+        async with self._pool_lock:
+            if self._redis_bytes is None:
+                self._redis_bytes = aioredis.from_url(
+                    settings.redis_url,
+                    decode_responses=False,
+                    socket_timeout=_REDIS_TIMEOUT,
+                    socket_connect_timeout=_REDIS_TIMEOUT,
+                )
+        return self._redis_bytes
 
     def get_qdrant(self) -> Optional["CircuitBreakerQdrantClient"]:
         """QdrantClient с circuit breaker (sync). None, если qdrant_enabled=False."""
@@ -241,6 +259,28 @@ class SeltiState:
             )
         return self._memory_service
 
+    async def get_map_service(self) -> "MapService":
+        """Полная карта 3D (PLAN_FULL_MAP_3D): снапшот /api/map/full,
+        мета, раскладка layout_map. Бинарный Redis — gz-байты снапшота."""
+        if self._map_service is not None:
+            return self._map_service
+        pool = await self.get_pool()
+        async with self._services_lock:
+            if self._map_service is None:
+                from memory_server.memory.map_service import MapService
+
+                if self._project_repository is None:
+                    from memory_server.memory.project_repository import ProjectRepository
+
+                    self._project_repository = ProjectRepository(pool)
+                self._map_service = MapService(
+                    pool=pool,
+                    redis_provider=self.get_redis_bytes,
+                    project_repository=self._project_repository,
+                    config=settings,
+                )
+        return self._map_service
+
     async def get_linker(self) -> "Linker":
         """Linker V3 (ADR-019 C): pool + Qdrant + Redis + LLM-клиент L2.
 
@@ -333,6 +373,16 @@ class SeltiState:
                 )
             self._redis = None
 
+        if self._redis_bytes is not None:
+            try:
+                await self._redis_bytes.aclose()
+            except Exception as exc:
+                logger.warning(
+                    "Redis bytes close failed",
+                    extra={"error": str(exc), "error_type": type(exc).__name__},
+                )
+            self._redis_bytes = None
+
         if self._pool is not None:
             try:
                 await self._pool.close()
@@ -346,6 +396,7 @@ class SeltiState:
 
         # Сервисы — чистые ссылки на закрытые ресурсы, просто сбрасываем
         self._memory_service = None
+        self._map_service = None
         self._hash_repository = None
         self._namespace_repository = None
         self._project_repository = None

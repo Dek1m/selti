@@ -23,6 +23,7 @@ from memory_server.logger import get_logger
 from memory_server.state import get_state
 from memory_server.tasks.async_bridge import run_async
 from memory_server.tasks.base import SeltiTask
+from memory_server.tasks.map_tasks import bump_map_dirty
 
 logger = get_logger(__name__)
 
@@ -126,7 +127,12 @@ def name_reconciler(self, dry_run: bool | None = None) -> dict[str, Any]:
     глобальный → свежейшая asserted). dry_run=None берёт конфиг
     (по умолчанию True — первый прогон только отчёт)."""
     linker = _get_linker()
-    return run_async(linker.run_name_reconciler, dry_run=dry_run)
+    result = run_async(linker.run_name_reconciler, dry_run=dry_run)
+    # Бой-резолв меняет рёбра карты: version-хэш ловит новые target_id,
+    # но переписи существующих — нет → снос кешей карты (PLAN_FULL_MAP_3D M2)
+    if not result.get("dry_run") and result.get("resolved", 0):
+        bump_map_dirty()
+    return result
 
 
 @shared_task(
