@@ -29,17 +29,21 @@ varying float vHighlight;
 varying float vFade;         // distance fade to camera
 varying float vTwinklePhase;
 
-const float FADE_START = 1400.0;
-const float FADE_END = 3400.0;
+const float FADE_START = 900.0;
+const float FADE_END = 2200.0;
 
 void main() {
   vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
   float dist = -mvPosition.z;                       // camera-space depth
-  float sizeWorld = (1.6 + aSize * 1.5) * uSizeScale;
-  float sizePx = sizeWorld * uPixelRatio * (900.0 / max(dist, 1.0));
 
-  // camera distance fade (§4.4): near = solid, far = dissolving
-  vFade = 1.0 - smoothstep(FADE_START, FADE_END, dist);
+  // Screen-constant star size, constellation parity (§ M3 feedback 2):
+  // importance 1..5 → ~6.6..17 px diameter, NO distance attenuation —
+  // depth reads through fade/culling, not through shrinking stars.
+  float sizePx = (4.0 + aSize * 2.6) * uSizeScale * uPixelRatio;
+
+  // camera distance fade (§4.4, усилен по фидбеку): near = solid, far = gone
+  float fade = 1.0 - smoothstep(FADE_START, FADE_END, dist);
+  vFade = fade * fade;
 
   // glass curve (§4.2) — BFS level drives opacity/desaturation
   float level = aBfs;
@@ -50,7 +54,7 @@ void main() {
 
   // search segment emphasis: hits burn brighter and larger
   vHighlight = aHighlight;
-  float highlightBoost = (aHighlight >= 2.0) ? 2.1 : (aHighlight >= 1.0) ? 1.45 : 1.0;
+  float highlightBoost = (aHighlight >= 2.0) ? 1.7 : (aHighlight >= 1.0) ? 1.3 : 1.0;
   sizePx *= highlightBoost;
 
   // importance glow, same mapping family as the 2D starGlow()
@@ -63,7 +67,7 @@ void main() {
   // gentle twinkle: slow per-star phase, disabled for reduced motion
   vTwinklePhase = fract(sin(dot(position.xy, vec2(12.9898, 78.233))) * 43758.5453);
 
-  gl_PointSize = clamp(sizePx, 1.5 * uPixelRatio, 64.0 * uPixelRatio);
+  gl_PointSize = clamp(sizePx, 2.0 * uPixelRatio, 64.0 * uPixelRatio);
   gl_Position = projectionMatrix * mvPosition;
 
   vColor = aColor;
@@ -132,13 +136,16 @@ attribute float aKind;    // 0 route, 1 supersedes, 2 contradicts
 attribute float aEnd;     // 0 → source vertex, 1 → target vertex
 attribute float aHighlight; // both endpoints in a lit cluster
 
+uniform float uTime;
+
 varying vec3 vColor;
 varying float vAlpha;
 varying float vKind;
 varying float vEnd;
+varying float vPhase;     // pulse phase for contradicts glow waves
 
-const float FADE_START = 1500.0;
-const float FADE_END = 3200.0;
+const float FADE_START = 1000.0;
+const float FADE_END = 2100.0;
 
 void main() {
   vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
@@ -146,9 +153,15 @@ void main() {
 
   // per-vertex fade: an edge is as strong as its fainter endpoint (§4.4)
   float fade = 1.0 - smoothstep(FADE_START, FADE_END, dist);
-  float base = mix(0.05, 0.16, clamp((aWeight - 1.0) / 2.0, 0.0, 1.0));
+
+  // читаемость на полном графе (фидбек 4): ярче, чем раньше
+  float base = mix(0.11, 0.34, clamp((aWeight - 1.0) / 2.0, 0.0, 1.0));
+  // contradicts burns bright red regardless of endpoint layers
+  if (aKind > 1.5) base = 0.42;
 
   vAlpha = base * fade * (1.0 + aHighlight * 1.6);
+  // phase from position → per-edge desynced pulse waves
+  vPhase = dot(position, vec3(0.0137, 0.0171, 0.0113));
   vEnd = aEnd;
   vKind = aKind;
   vColor = aColor;
@@ -160,12 +173,13 @@ void main() {
 export const EDGE_FRAGMENT = /* glsl */ `
 precision highp float;
 
-uniform vec3 uFogColor;
+uniform float uTime;
 
 varying vec3 vColor;
 varying float vAlpha;
 varying float vKind;
 varying float vEnd;
+varying float vPhase;
 
 void main() {
   float alpha = vAlpha;
@@ -176,7 +190,13 @@ void main() {
     alpha *= mix(0.15, 1.0, step(phase, 0.55));
   }
 
-  vec3 color = mix(vColor, uFogColor, 0.2);
-  gl_FragColor = vec4(color * alpha, alpha);
+  // contradicts СИЯЮТ (фидбек 6): редкий тип, time-based glow wave по ребру
+  if (vKind > 1.5) {
+    alpha *= 0.55 + 0.45 * sin(uTime * 2.6 + vPhase);
+  }
+
+  // чистый градиент цвет-из → цвет-в: fog не подмешиваем, чтобы переход
+  // между слоями читался (фидбек 5); таяние дальних делает alpha
+  gl_FragColor = vec4(vColor * alpha, alpha);
 }
 `;

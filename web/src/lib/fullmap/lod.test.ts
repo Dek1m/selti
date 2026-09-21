@@ -1,12 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  collectLabelCandidates,
-  lodModeFor,
-  selectLabeledNodes,
-  type LabelCandidate,
-} from "./lod";
-import { buildMockSnapshot } from "./mock";
-import { packSnapshot } from "./pack";
+import { lodModeFor, selectLabeledNodes, type LabelCandidate } from "./lod";
 
 describe("lodModeFor — hysteresis switch", () => {
   it("starts in clusters when the camera opens far away", () => {
@@ -90,21 +83,5 @@ describe("selectLabeledNodes — top-K DOM label culling (§7)", () => {
       candidate({ index: i, x: (i % 10) * 130, y: Math.floor(i / 10) * 130, depth: 100 + i }),
     );
     expect(selectLabeledNodes(many, 2000, 2000, 5)).toHaveLength(5);
-  });
-});
-
-describe("collectLabelCandidates", () => {
-  it("projects every node through the callback", () => {
-    const packed = packSnapshot(buildMockSnapshot(40, 60), false);
-    const seen: number[] = [];
-    const candidates = collectLabelCandidates(packed, (x, y, z) => {
-      seen.push(1);
-      expect(typeof x).toBe("number");
-      void y;
-      void z;
-      return { x: 0, y: 0, depth: 100, behind: false, radiusPx: 5 };
-    });
-    expect(candidates).toHaveLength(40);
-    expect(seen).toHaveLength(40);
   });
 });

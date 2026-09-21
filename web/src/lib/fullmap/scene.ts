@@ -17,7 +17,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { bfsLevels } from "./bfs";
-import { collectLabelCandidates, lodModeFor, selectLabeledNodes, type LodMode } from "./lod";
+import { lodModeFor, selectLabeledNodes, type LabelCandidate, type LodMode } from "./lod";
 import { unpackNodeString } from "./pack";
 import { EDGE_FRAGMENT, EDGE_VERTEX, STAR_FRAGMENT, STAR_VERTEX } from "./shaders";
 import type { PackedCluster, PackedMapSnapshot } from "./types";
@@ -27,6 +27,16 @@ const PICK_RADIUS_PX = 12;
 const LABEL_MAX = 22;
 const EDGE_CULL_COOLDOWN_MS = 150;
 const LABEL_COOLDOWN_MS = 140;
+
+/**
+ * Жёсткий кап видимых звёзд (фидбек Мастера 1/7): полный граф держит
+ * fill-rate глоу под контролем — рисуем только фрустум + margin, максимум
+ * NODE_VISIBLE_CAP одновременно, приоритет «ярче/ближе важнее».
+ */
+const NODE_VISIBLE_CAP = 280;
+const NODE_CULL_COOLDOWN_MS = 150;
+/** NDC margin around the viewport before a star leaves the draw set. */
+const NODE_CULL_MARGIN = 1.15;
 
 export interface FullMapSceneCallbacks {
   /** hover moved onto a star (index) or off (null); screen px included */
@@ -72,8 +82,13 @@ export class FullMapScene {
   private clusterHighlightAttr: THREE.BufferAttribute | null = null;
   private edgeIndex: THREE.BufferAttribute | null = null;
   private edgeIndexArray: Uint32Array | null = null;
+  private nodeIndex: THREE.BufferAttribute | null = null;
+  private nodeIndexArray: Uint32Array | null = null;
+  private nodeVisibleCount = 0;
+  private lastNodeCull = 0;
   private lastEdgeCull = 0;
   private lastLabelRefresh = 0;
+  private cameraDirty = true;
   private clusterRadii = new Map<number, number>();
   private clusterByIndex = new Map<number, PackedCluster>();
 
@@ -131,6 +146,7 @@ export class FullMapScene {
     this.controls.addEventListener("start", () => this.onControlsStart());
     this.controls.addEventListener("change", () => {
       this.pointerDirty = true;
+      this.cameraDirty = true;
     });
 
     this.renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
@@ -190,6 +206,12 @@ export class FullMapScene {
     this.highlightAttr = new THREE.BufferAttribute(highlight, 1);
     geometry.setAttribute("aBfs", this.bfsAttr);
     geometry.setAttribute("aHighlight", this.highlightAttr);
+    // viewport-culled draw set (фидбек 1): Points рисует только индексы,
+    // отобранные rebuildVisibleNodes — скрытые узлы не рендерятся вовсе
+    this.nodeIndexArray = new Uint32Array(n);
+    this.nodeIndex = new THREE.BufferAttribute(this.nodeIndexArray, 1);
+    geometry.setIndex(this.nodeIndex);
+    geometry.setDrawRange(0, 0);
     geometry.computeBoundingSphere();
 
     this.fullPoints = new THREE.Points(geometry, this.starMaterial());
@@ -199,6 +221,7 @@ export class FullMapScene {
     this.buildFullEdges(packed);
     this.buildClusterLevel(packed);
     this.updateLodVisibility(true);
+    this.rebuildVisibleNodes(performance.now(), true);
   }
 
   private starMaterial(): THREE.ShaderMaterial {
@@ -279,9 +302,7 @@ export class FullMapScene {
     const material = new THREE.ShaderMaterial({
       vertexShader: EDGE_VERTEX,
       fragmentShader: EDGE_FRAGMENT,
-      uniforms: {
-        uFogColor: { value: this.palette?.fog ?? new THREE.Color("#060a12") },
-      },
+      uniforms: { uTime: { value: 0 } },
       transparent: true,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
@@ -399,7 +420,7 @@ export class FullMapScene {
       new THREE.ShaderMaterial({
         vertexShader: EDGE_VERTEX,
         fragmentShader: EDGE_FRAGMENT,
-        uniforms: { uFogColor: { value: this.palette?.fog ?? new THREE.Color("#060a12") } },
+        uniforms: { uTime: { value: 0 } },
         transparent: true,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
@@ -433,6 +454,7 @@ export class FullMapScene {
   select(index: number | null): void {
     if (!this.packed) return;
     if (!this.bfsAttr) return;
+    this.cameraDirty = true; // выбор пробивается сквозь visible-cap
     const attr = this.bfsAttr;
     const array = attr.array as Float32Array;
     if (index === null) {
@@ -451,6 +473,7 @@ export class FullMapScene {
    */
   setSearchSegment(hitIndices: number[], clusterIndices: number[]): void {
     if (!this.packed || !this.highlightAttr) return;
+    this.cameraDirty = true; // сегмент пробивается сквозь visible-cap
     const attr = this.highlightAttr;
     const array = attr.array as Float32Array;
     array.fill(0);
@@ -481,6 +504,7 @@ export class FullMapScene {
 
   clearSearchSegment(): void {
     if (!this.highlightAttr) return;
+    this.cameraDirty = true;
     (this.highlightAttr.array as Float32Array).fill(0);
     this.highlightAttr.needsUpdate = true;
     if (this.clusterHighlightAttr) {
@@ -624,25 +648,42 @@ export class FullMapScene {
         ? (this.clusterPoints?.geometry as THREE.BufferGeometry | undefined)
         : (this.fullPoints?.geometry as THREE.BufferGeometry | undefined);
     if (!source) return null;
-    const count = lod === "clusters" ? this.packed.clusters.length : this.packed.nodeCount;
-    const positions = source.getAttribute("position") as THREE.BufferAttribute;
     const rect = this.renderer.domElement.getBoundingClientRect();
     const a = new THREE.Vector3();
     let best = -1;
     let bestScore = PICK_RADIUS_PX;
 
-    for (let i = 0; i < count; i++) {
-      a.set(positions.getX(i), positions.getY(i), positions.getZ(i));
-      const distance = a.distanceTo(this.camera.position);
-      if (distance > 6000) continue;
-      a.project(this.camera);
-      if (a.z > 1) continue;
-      const sx = ((a.x + 1) / 2) * rect.width;
-      const sy = ((1 - a.y) / 2) * rect.height;
-      const distPx = Math.hypot(sx - this.pointerScreen.x, sy - this.pointerScreen.y);
-      if (distPx < bestScore) {
-        bestScore = distPx;
-        best = i;
+    if (lod === "clusters") {
+      const positions = source.getAttribute("position") as THREE.BufferAttribute;
+      for (let i = 0; i < this.packed.clusters.length; i++) {
+        a.set(positions.getX(i), positions.getY(i), positions.getZ(i));
+        if (a.distanceTo(this.camera.position) > 6000) continue;
+        a.project(this.camera);
+        if (a.z > 1) continue;
+        const sx = ((a.x + 1) / 2) * rect.width;
+        const sy = ((1 - a.y) / 2) * rect.height;
+        const distPx = Math.hypot(sx - this.pointerScreen.x, sy - this.pointerScreen.y);
+        if (distPx < bestScore) {
+          bestScore = distPx;
+          best = i;
+        }
+      }
+    } else {
+      // только отрисованные звёзды: тултип на куллнутом узле — ложный шанс
+      const positions = source.getAttribute("position") as THREE.BufferAttribute;
+      for (let k = 0; k < this.nodeVisibleCount; k++) {
+        const i = this.nodeIndexArray ? this.nodeIndexArray[k] : -1;
+        if (i < 0) continue;
+        a.set(positions.getX(i), positions.getY(i), positions.getZ(i));
+        a.project(this.camera);
+        if (a.z > 1) continue;
+        const sx = ((a.x + 1) / 2) * rect.width;
+        const sy = ((1 - a.y) / 2) * rect.height;
+        const distPx = Math.hypot(sx - this.pointerScreen.x, sy - this.pointerScreen.y);
+        if (distPx < bestScore) {
+          bestScore = distPx;
+          best = i;
+        }
       }
     }
     return best >= 0 ? best : null;
@@ -680,8 +721,96 @@ export class FullMapScene {
     if (this.clusterPoints) this.clusterPoints.visible = next === "clusters";
     if (this.clusterEdges) this.clusterEdges.visible = next === "clusters";
     if (next === "clusters") this.cullEdges(null);
+    else this.cameraDirty = true; // unfold → немедленный rebuild draw-списка
     this.callbacks.onLodChange(next);
   }
+
+  /**
+   * Viewport-culling узлов (фидбек Мастера 1): проецируем звёзды через
+   * view-projection матрицу, берём видимые во фрустуме (+margin) ближе
+   * порога fade, сортируем по «ярче/ближе важнее» (importance, BFS-выбор,
+   * поисковый сегмент, дистанция) и рисуем максимум NODE_VISIBLE_CAP.
+   * Пересборка индекс-буфера — throttle 150 мс при движении камеры,
+   * механика та же, что у edge-culling. Скрытые узлы не рендерятся вовсе.
+   */
+  private rebuildVisibleNodes(now: number, force = false): void {
+    if (!this.packed || !this.fullPoints || !this.nodeIndex || !this.nodeIndexArray) return;
+    if (!force && now - this.lastNodeCull < NODE_CULL_COOLDOWN_MS) return;
+    this.lastNodeCull = now;
+
+    const cam = this.camera.position;
+    this.camera.updateMatrixWorld();
+    // combined view-projection, column-major elements (THREE layout)
+    const vp = new THREE.Matrix4().multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse);
+    const e = vp.elements;
+    const positions = this.packed.nodePositions;
+    const meta = this.packed.nodeMeta;
+    const levels = this.levels;
+    const highlight = this.highlightAttr ? (this.highlightAttr.array as Float32Array) : null;
+    const margin = NODE_CULL_MARGIN;
+    const maxDistSq = 2200 * 2200; // FADE_END — за порогом не рисуем вовсе
+
+    // reusable candidate storage: parallel arrays, no per-frame garbage
+    const candIdx: number[] = (this.candIdx ||= []);
+    const candScore: number[] = (this.candScore ||= []);
+    candIdx.length = 0;
+    candScore.length = 0;
+
+    for (let i = 0; i < this.packed.nodeCount; i++) {
+      const x = positions[i * 3];
+      const y = positions[i * 3 + 1];
+      const z = positions[i * 3 + 2];
+      const dx = x - cam.x;
+      const dy = y - cam.y;
+      const dz = z - cam.z;
+      const distSq = dx * dx + dy * dy + dz * dz;
+      if (distSq > maxDistSq) continue;
+
+      const cw = e[3] * x + e[7] * y + e[11] * z + e[15];
+      if (cw <= 0) continue; // behind the camera
+      const cx = e[0] * x + e[4] * y + e[8] * z + e[12];
+      const cy = e[1] * x + e[5] * y + e[9] * z + e[13];
+      const nx = cx / cw;
+      const ny = cy / cw;
+      if (nx < -margin || nx > margin || ny < -margin || ny > margin) continue;
+
+      const importance = meta[i * 4 + 2];
+      const dist = Math.sqrt(distSq);
+      let score = importance * 3 + (1 - dist / 2200) * 2;
+      // выбор и сегмент обязаны пробиваться сквозь кап
+      if (levels) {
+        const level = levels[i];
+        if (level === 0) score += 1000;
+        else if (level === 1) score += 200;
+        else if (level > 0) score += Math.max(0, 30 - level * 3);
+      }
+      if (highlight) {
+        if (highlight[i] >= 2) score += 500;
+        else if (highlight[i] >= 1) score += 120;
+      }
+      candIdx.push(i);
+      candScore.push(score);
+    }
+
+    // cap 280: приоритет по score — ближе/ярче важнее (фидбек 7)
+    let drawCount = candIdx.length;
+    if (drawCount > NODE_VISIBLE_CAP) {
+      const order = candIdx.map((_, k) => k).sort((a, b) => candScore[b] - candScore[a]);
+      for (let k = 0; k < NODE_VISIBLE_CAP; k++) {
+        this.nodeIndexArray[k] = candIdx[order[k]];
+      }
+      drawCount = NODE_VISIBLE_CAP;
+    } else {
+      for (let k = 0; k < drawCount; k++) this.nodeIndexArray[k] = candIdx[k];
+    }
+
+    this.nodeVisibleCount = drawCount;
+    this.nodeIndex.needsUpdate = true;
+    this.fullPoints.geometry.setDrawRange(0, drawCount);
+  }
+
+  private candIdx: number[] | null = null;
+  private candScore: number[] | null = null;
 
   /**
    * Edge culling (§4.4): edges whose both endpoints sit beyond the fade
@@ -695,7 +824,7 @@ export class FullMapScene {
 
     const cam = this.camera.position;
     const positions = this.packed.nodePositions;
-    const cullDist = 3300; // just past FADE_END — fully faded edges cut
+    const cullDist = 2300; // just past FADE_END — fully faded edges cut
     const index = this.edgeIndexArray;
     let written = 0;
 
@@ -718,7 +847,7 @@ export class FullMapScene {
     this.fullEdges.geometry.setDrawRange(0, written);
   }
 
-  /** Top-K DOM labels (§7): refresh at a throttled cadence, reuse divs. */
+  /** Top-K DOM labels (§7): только видимые звёзды, throttle 140 мс. */
   private refreshLabels(now: number): void {
     if (!this.packed || (this.lodState ?? "full") !== "full") {
       this.renderLabels([]);
@@ -730,19 +859,29 @@ export class FullMapScene {
     const rect = this.renderer.domElement.getBoundingClientRect();
     const fovScale = rect.height / 2 / Math.tan((this.camera.fov * Math.PI) / 360);
     const starWorldRadius = 3.2; // matches the shader's mid-size star
-    const candidates = collectLabelCandidates(this.packed, (x, y, z) => {
+    const candidates: LabelCandidate[] = [];
+    // source set = the culled draw list — labels compete inside the cap
+    const total = Math.max(this.nodeVisibleCount, 0);
+    for (let k = 0; k < total; k++) {
+      const i = this.nodeIndexArray ? this.nodeIndexArray[k] : -1;
+      if (i < 0) continue;
+      const x = this.packed.nodePositions[i * 3];
+      const y = this.packed.nodePositions[i * 3 + 1];
+      const z = this.packed.nodePositions[i * 3 + 2];
       const v = new THREE.Vector3(x, y, z);
       const depth = v.distanceTo(this.camera.position);
       v.project(this.camera);
-      return {
+      candidates.push({
+        index: i,
         x: ((v.x + 1) / 2) * rect.width,
         y: ((1 - v.y) / 2) * rect.height,
         depth,
         behind: v.z > 1,
         // projected star radius in px — the label threshold reads this
         radiusPx: (starWorldRadius * fovScale) / Math.max(depth, 1),
-      };
-    });
+        importance: this.packed.nodeMeta[i * 4 + 2],
+      });
+    }
     this.renderLabels(selectLabeledNodes(candidates, rect.width, rect.height, LABEL_MAX));
   }
 
@@ -771,19 +910,22 @@ export class FullMapScene {
     if (this.disposed) return;
     this.frame = requestAnimationFrame(this.animate);
     const now = performance.now();
+    const elapsed = this.clock.getElapsedTime();
 
     this.stepFly(now);
     this.controls.update();
     this.updateLodVisibility();
 
-    // sprite LOD: shrink point size when zoomed far out (fill-rate guard)
-    const distance = this.camera.position.distanceTo(this.controls.target);
+    // размер звёзд — экранные px без дистанционной аттенюации (фидбек 2),
+    // uSizeScale остаётся 1: глубину читают fade + culling, не мельчание
     for (const points of [this.fullPoints, this.clusterPoints]) {
       const material = points?.material as THREE.ShaderMaterial | undefined;
-      if (material) {
-        material.uniforms.uTime.value = this.clock.getElapsedTime();
-        material.uniforms.uSizeScale.value = distance > 2200 ? 0.7 : distance < 700 ? 1.25 : 1;
-      }
+      if (material) material.uniforms.uTime.value = elapsed;
+    }
+    // пульс contradicts (фидбек 6) — время в рёберный материал
+    for (const edges of [this.fullEdges, this.clusterEdges]) {
+      const material = edges?.material as THREE.ShaderMaterial | undefined;
+      if (material) material.uniforms.uTime.value = elapsed;
     }
 
     if (this.pointerDirty) {
@@ -796,6 +938,12 @@ export class FullMapScene {
         );
       }
     }
+
+    // viewport-culling узлов (фидбек 1): throttle 150 мс, как edge-culling
+    if ((this.lodState ?? "full") === "full" && this.cameraDirty) {
+      this.rebuildVisibleNodes(now);
+    }
+    this.cameraDirty = false;
 
     if ((this.lodState ?? "full") === "full") this.cullEdges(now);
     this.refreshLabels(now);
@@ -828,6 +976,9 @@ export class FullMapScene {
     this.clusterEdges = null;
     this.edgeIndex = null;
     this.edgeIndexArray = null;
+    this.nodeIndex = null;
+    this.nodeIndexArray = null;
+    this.nodeVisibleCount = 0;
     this.bfsAttr = null;
     this.highlightAttr = null;
     this.nebulaGroup.clear();

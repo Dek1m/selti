@@ -2,9 +2,6 @@
 // aggregate gates, near camera → the full graph. Pure threshold logic with
 // hysteresis so the switch never flickers, plus the label top-K picker.
 
-import type { PackedMapSnapshot } from "./types";
-
-/** Camera distance where the map collapses into star systems. */
 export const LOD_CLUSTER_ENTER = 2600;
 /** Camera must come this close again to unfold the full graph (hysteresis). */
 export const LOD_CLUSTER_EXIT = 1900;
@@ -68,32 +65,4 @@ export function selectLabeledNodes(
     if (clear) picked.push({ index: candidate.index, x: candidate.x, y: candidate.y });
   }
   return picked;
-}
-
-/** Gather label candidates by projecting every node (called at rAF cadence). */
-export function collectLabelCandidates(
-  packed: PackedMapSnapshot,
-  project: (x: number, y: number, z: number) => { x: number; y: number; depth: number; behind: boolean; radiusPx: number },
-): LabelCandidate[] {
-  const out: LabelCandidate[] = [];
-  for (let i = 0; i < packed.nodeCount; i++) {
-    const p = project(
-      packed.nodePositions[i * 3],
-      packed.nodePositions[i * 3 + 1],
-      packed.nodePositions[i * 3 + 2],
-    );
-    if (p.behind) {
-      continue;
-    }
-    out.push({
-      index: i,
-      x: p.x,
-      y: p.y,
-      depth: p.depth,
-      radiusPx: p.radiusPx,
-      importance: packed.nodeMeta[i * 4 + 2],
-      behind: false,
-    });
-  }
-  return out;
 }
