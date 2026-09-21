@@ -36,10 +36,10 @@ void main() {
   vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
   float dist = -mvPosition.z;                       // camera-space depth
 
-  // Screen-constant star size, constellation parity (§ M3 feedback 2):
-  // importance 1..5 → ~6.6..17 px diameter, NO distance attenuation —
-  // depth reads through fade/culling, not through shrinking stars.
-  float sizePx = (4.0 + aSize * 2.6) * uSizeScale * uPixelRatio;
+  // Screen-constant star size, эталон созвездия (итерация 3): базовый
+  // спрайт 14.5..32.5 px диаметра — крупная графичная точка, дальше
+  // глубину читают fade/culling, не мельчание.
+  float sizePx = (10.0 + aSize * 4.5) * uSizeScale * uPixelRatio;
 
   // camera distance fade (§4.4, усилен по фидбеку): near = solid, far = gone
   float fade = 1.0 - smoothstep(FADE_START, FADE_END, dist);
@@ -105,18 +105,18 @@ void main() {
   // frozen granules carry an ice sheen on top of their layer color
   color = mix(color, uIceColor, vFrozen * 0.55);
 
-  // hot white-shifted core (35% toward white, as the 2D star shader)
-  float core = 1.0 - smoothstep(0.0, 0.24, dist);
-  vec3 coreColor = mix(color, vec3(1.0), 0.35 * core);
+  // графичное ядро (итерация 3): ~50% диаметра спрайта, резкий край —
+  // яркое цветное ядро, не размытый шар; деликатный white-hot только в центре
+  float coreR = 0.5;
+  float core = 1.0 - smoothstep(coreR * 0.82, coreR * 1.06, dist);
+  float hot = 1.0 - smoothstep(0.0, coreR * 0.55, dist);
+  vec3 coreColor = mix(color, vec3(1.0), 0.28 * hot);
 
-  // quadratic falloff halo, span tuned to leave breathing room in the point
-  float haloSpan = 0.28 + vGlow * 0.62;
-  float halo = 0.0;
-  if (dist > 0.2) {
-    halo = pow(max(0.0, 1.0 - (dist - 0.2) / haloSpan), 2.2) * vGlow;
-  }
+  // мягкий квадратичный ореол ровно за ядром: спад до нуля к краю спрайта
+  float haloT = clamp((dist - coreR) / (1.0 - coreR), 0.0, 1.0);
+  float halo = (1.0 - haloT) * (1.0 - haloT) * min(vGlow, 1.0);
 
-  float alpha = max(core, halo * 0.55);
+  float alpha = max(core, halo * 0.42);
   // search hits get a warm rim so they read above their cluster
   float rim = (vHighlight >= 2.0) ? (1.0 - smoothstep(0.55, 1.0, dist)) * 0.35 : 0.0;
   alpha = max(alpha, rim);
@@ -125,7 +125,7 @@ void main() {
   // fog toward the abyss color melts the far plane (§4.4)
   color = mix(color, uFogColor, (1.0 - vFade) * 0.6);
 
-  gl_FragColor = vec4(color * alpha, alpha);
+  gl_FragColor = vec4(mix(coreColor, color, haloT) * alpha, alpha);
 }
 `;
 
