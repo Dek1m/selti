@@ -451,9 +451,50 @@ export class HyperspaceEdgeProgram<
 
 // ─── hover renderer (canvas 2D) ───
 
+const HOVER_TAG_MAX_WIDTH = 360;
+const HOVER_TAG_PAD_X = 8;
+const HOVER_TAG_PAD_Y = 5;
+const HOVER_TAG_MARGIN = 8;
+
+/** Greedy word wrap with hard breaks for unbroken entity names (snake_case…). */
+function wrapHoverLabel(context: CanvasRenderingContext2D, label: string, maxWidth: number): string[] {
+  const breakWord = (word: string): string[] => {
+    const chunks: string[] = [];
+    let chunk = "";
+    for (const ch of word) {
+      if (chunk && context.measureText(chunk + ch).width > maxWidth) {
+        chunks.push(chunk);
+        chunk = ch;
+      } else {
+        chunk += ch;
+      }
+    }
+    if (chunk) chunks.push(chunk);
+    return chunks;
+  };
+
+  const lines: string[] = [];
+  let line = "";
+  for (const word of label.split(/\s+/).filter(Boolean)) {
+    for (const piece of context.measureText(word).width > maxWidth ? breakWord(word) : [word]) {
+      const candidate = line ? `${line} ${piece}` : piece;
+      if (line && context.measureText(candidate).width > maxWidth) {
+        lines.push(line);
+        line = piece;
+      } else {
+        line = candidate;
+      }
+    }
+  }
+  if (line) lines.push(line);
+  return lines.length > 0 ? lines : [label];
+}
+
 /**
  * EVE-style hover: no stock white bubble — a slim HUD tag next to the star.
- * The pulsing focus ring is drawn by the ping overlay canvas, not here.
+ * Sizes to its content (max 360px, wrapped), flips to the left of the star
+ * near the right edge and stays clamped inside the viewport. The pulsing
+ * focus ring is drawn by the ping overlay canvas, not here.
  */
 export function eveDrawNodeHover(
   context: CanvasRenderingContext2D,
@@ -464,16 +505,28 @@ export function eveDrawNodeHover(
   if (!label || data.x === undefined || data.x === null || data.y === undefined || data.y === null) return;
   const size = data.size ?? settings.labelSize;
 
-  const font = `${settings.labelWeight} ${settings.labelSize}px ${settings.labelFont}`;
-  context.font = font;
+  context.font = `${settings.labelWeight} ${settings.labelSize}px ${settings.labelFont}`;
 
-  const textWidth = context.measureText(label).width;
-  const padX = 8;
-  const padY = 5;
-  const boxW = Math.ceil(textWidth + padX * 2);
-  const boxH = Math.ceil(settings.labelSize + padY * 2);
-  const x = Math.round(data.x + size + 8);
-  const y = Math.round(data.y - boxH / 2);
+  // viewport bounds in the same (CSS px) space the hover layer draws in
+  const transform = context.getTransform();
+  const viewW = context.canvas.width / (transform.a || 1);
+  const viewH = context.canvas.height / (transform.d || 1);
+
+  const maxTextWidth = HOVER_TAG_MAX_WIDTH - HOVER_TAG_PAD_X * 2;
+  const lines = wrapHoverLabel(context, label, maxTextWidth);
+  const lineHeight = Math.ceil(settings.labelSize * 1.4);
+  const textWidth = Math.max(...lines.map((line) => context.measureText(line).width));
+
+  const boxW = Math.ceil(Math.min(textWidth + HOVER_TAG_PAD_X * 2, HOVER_TAG_MAX_WIDTH));
+  const boxH = lines.length * lineHeight + HOVER_TAG_PAD_Y * 2;
+
+  // flip to the left side when the tag would cross the right edge
+  let x = data.x + size + HOVER_TAG_MARGIN;
+  if (x + boxW > viewW - HOVER_TAG_MARGIN) {
+    x = Math.max(HOVER_TAG_MARGIN, data.x - size - HOVER_TAG_MARGIN - boxW);
+  }
+  let y = data.y - boxH / 2;
+  y = Math.min(Math.max(HOVER_TAG_MARGIN, y), Math.max(HOVER_TAG_MARGIN, viewH - boxH - HOVER_TAG_MARGIN));
 
   context.shadowColor = "rgba(2, 6, 14, 0.8)";
   context.shadowBlur = 10;
@@ -494,5 +547,7 @@ export function eveDrawNodeHover(
   context.stroke();
 
   context.fillStyle = resolveCssColor("var(--sl-text)");
-  context.fillText(label, x + padX, y + padY + size * 0.82);
+  lines.forEach((line, i) => {
+    context.fillText(line, x + HOVER_TAG_PAD_X, y + HOVER_TAG_PAD_Y + settings.labelSize * 0.82 + i * lineHeight);
+  });
 }

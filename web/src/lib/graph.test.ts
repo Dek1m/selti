@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RelationsPayload, SearchHit } from "../api/types";
-import { buildGraphModel, edgeKind, edgeThickness, nodeLabel, nodeSize, starGlow } from "./graph";
+import { buildGraphModel, edgeKind, edgeThickness, graphNodeFromRecord, nodeLabel, nodeSize, starGlow } from "./graph";
 import { resolveCssColor, toRgba } from "./colors";
 
 const hit = (id: string, score = 0.5, importance = 3, ns = "code_knowledge"): SearchHit =>
@@ -63,6 +63,21 @@ describe("buildGraphModel", () => {
     expect(neighbor?.importance).toBeNull();
     expect(neighbor?.namespace).toBeNull();
     expect(neighbor?.status).toBeNull();
+  });
+
+  it("colors relation neighbors that are present in the search results", () => {
+    // a neighbor known to the search rides in as a full (seed) star
+    const model = buildGraphModel(
+      [hit("seed"), hit("n1", 0.5, 4, "user_facts")],
+      new Map([["seed", relations([["n1", "related_to"]])]]),
+    );
+    const neighbor = model.nodes.find((n) => n.id === "n1");
+    expect(neighbor).toMatchObject({
+      seed: true,
+      namespace: "user_facts",
+      importance: 4,
+      status: "asserted",
+    });
   });
 
   it("dedups identical (source, target, linkType) triples", () => {
@@ -176,6 +191,33 @@ describe("star map mapping (EVE art direction)", () => {
     expect(
       starGlow({ id: "x", label: "x", namespace: null, importance: 5, seed: true, status: "retracted" }),
     ).toBeLessThan(0);
+  });
+});
+
+describe("graphNodeFromRecord", () => {
+  const record = {
+    id: "abc-123",
+    content: "контент гранулы про архитектуру",
+    metadata: { entity_name: "ADR-018" },
+    namespace: "project_meta",
+    importance: 3,
+    status: "asserted",
+  };
+
+  it("builds a full star from a fetched granule", () => {
+    expect(graphNodeFromRecord(record)).toEqual({
+      id: "abc-123",
+      label: "ADR-018",
+      namespace: "project_meta",
+      importance: 3,
+      seed: false,
+      status: "asserted",
+    });
+  });
+
+  it("keeps a superseded granule extinguished after enrichment", () => {
+    const node = graphNodeFromRecord({ ...record, status: "superseded" });
+    expect(starGlow(node)).toBeLessThan(0);
   });
 });
 

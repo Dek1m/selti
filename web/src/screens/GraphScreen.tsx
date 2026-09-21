@@ -13,16 +13,20 @@ import { useSearchParams } from "react-router";
 import { SigmaContainer, useLoadGraph, useRegisterEvents } from "@react-sigma/core";
 import type { Sigma } from "sigma";
 import "@react-sigma/core/lib/style.css";
-import { getRelations, searchGranules, type SearchFilters } from "../api/selti";
+import { getMemory, getRelations, searchGranules, type SearchFilters } from "../api/selti";
+import type { MemoryRecord } from "../api/types";
 import { GranulePanel } from "../components/GranulePanel";
+import { GraphErrorBoundary } from "../components/GraphErrorBoundary";
 import { namespaceColor, resolveCssColor, toRgba } from "../lib/colors";
 import {
   buildGraphModel,
   edgeKind,
   edgeThickness,
+  graphNodeFromRecord,
   nodeSize,
   starGlow,
   type GraphModel,
+  type GraphNodeRecord,
 } from "../lib/graph";
 import { drawStarfield } from "../lib/starfield";
 import { eveDrawNodeHover, HyperspaceEdgeProgram, StarNodeProgram } from "../lib/rendering";
@@ -306,7 +310,45 @@ export function GraphScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search.data, relationsSettled, relations.map((q) => q.dataUpdatedAt).join(",")]);
 
-  const graph = useMemo(() => (model && model.nodes.length > 0 ? toSigmaGraph(model, layoutSeed) : null), [model, layoutSeed]);
+  // Gray strangers: relation neighbors the search never returned, whose layer
+  // /relations does not carry. Fetch their granules and relight the stars —
+  // the FA2 layout depends on topology only, so positions stay put.
+  const strangers = useMemo(
+    () => (model ? model.nodes.filter((node) => !node.namespace).map((node) => node.id) : []),
+    [model],
+  );
+  const strangerQueries = useQueries({
+    queries: strangers.map((id) => ({
+      queryKey: ["memory", id],
+      queryFn: () => getMemory(id),
+      staleTime: 300_000,
+      retry: 1,
+    })),
+  });
+  const strangersStamp = strangerQueries.map((q) => q.dataUpdatedAt).join(",");
+
+  const enrichedModel = useMemo(() => {
+    if (!model) return null;
+    if (strangers.length === 0) return model;
+    const byId = new Map<string, GraphNodeRecord>();
+    strangerQueries.forEach((query) => {
+      const record = query.data as MemoryRecord | undefined;
+      if (record) byId.set(record.id, record);
+    });
+    if (byId.size === 0) return model;
+    return {
+      ...model,
+      nodes: model.nodes.map((node) =>
+        node.namespace || !byId.has(node.id) ? node : graphNodeFromRecord(byId.get(node.id)!),
+      ),
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [model, strangers, strangersStamp]);
+
+  const graph = useMemo(
+    () => (enrichedModel && enrichedModel.nodes.length > 0 ? toSigmaGraph(enrichedModel, layoutSeed) : null),
+    [enrichedModel, layoutSeed],
+  );
 
   const hoveredLabel = useMemo(() => {
     if (!hovered || !graph || !graph.hasNode(hovered)) return null;
@@ -316,14 +358,14 @@ export function GraphScreen() {
   // Region map: namespaces present in the current constellation + counts
   const regions = useMemo(() => {
     const counts = new Map<string, { count: number; color: string }>();
-    model?.nodes.forEach((n) => {
+    enrichedModel?.nodes.forEach((n) => {
       const uid = n.namespace ?? "default";
       const entry = counts.get(uid) ?? { count: 0, color: resolveCssColor(namespaceColor(n.namespace)) };
       entry.count += 1;
       counts.set(uid, entry);
     });
     return [...counts.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([uid, v]) => ({ uid, ...v }));
-  }, [model]);
+  }, [enrichedModel]);
 
   const toggleLayer = useCallback((uid: string) => {
     setHiddenLayers((prev) => {
@@ -426,30 +468,32 @@ export function GraphScreen() {
             <p>Попробуйте другой запрос — созвездие строится от результатов поиска.</p>
           </div>
         ) : graph ? (
-          <SigmaContainer
-            ref={setSigma}
-            settings={{
-              nodeProgramClasses: { star: StarNodeProgram },
-              defaultNodeType: "star",
-              edgeProgramClasses: { hyperspace: HyperspaceEdgeProgram },
-              defaultEdgeType: "hyperspace",
-              defaultDrawNodeHover: eveDrawNodeHover,
-              defaultEdgeColor: resolveCssColor("var(--sl-border-strong)"),
-              labelColor: { color: resolveCssColor("var(--sl-text-2)") },
-              labelFont: '"JetBrains Mono", ui-monospace, monospace',
-              labelSize: 11,
-              labelWeight: "600",
-              labelRenderedSizeThreshold: 9,
-              labelDensity: 0.4,
-              labelGridCellSize: 70,
-              minCameraRatio: 0.15,
-              maxCameraRatio: 6,
-              zIndex: true,
-              renderEdgeLabels: false,
-            }}
-          >
-            <GraphEffects graph={graph} onSelect={setSelected} onHover={setHovered} />
-          </SigmaContainer>
+          <GraphErrorBoundary>
+            <SigmaContainer
+              ref={setSigma}
+              settings={{
+                nodeProgramClasses: { star: StarNodeProgram },
+                defaultNodeType: "star",
+                edgeProgramClasses: { hyperspace: HyperspaceEdgeProgram },
+                defaultEdgeType: "hyperspace",
+                defaultDrawNodeHover: eveDrawNodeHover,
+                defaultEdgeColor: resolveCssColor("var(--sl-border-strong)"),
+                labelColor: { color: resolveCssColor("var(--sl-text-2)") },
+                labelFont: '"JetBrains Mono", ui-monospace, monospace',
+                labelSize: 11,
+                labelWeight: "600",
+                labelRenderedSizeThreshold: 9,
+                labelDensity: 0.4,
+                labelGridCellSize: 70,
+                minCameraRatio: 0.15,
+                maxCameraRatio: 6,
+                zIndex: true,
+                renderEdgeLabels: false,
+              }}
+            >
+              <GraphEffects graph={graph} onSelect={setSelected} onHover={setHovered} />
+            </SigmaContainer>
+          </GraphErrorBoundary>
         ) : null}
       </div>
 
@@ -486,9 +530,9 @@ export function GraphScreen() {
             <i className="bi bi-x-circle" aria-hidden="true" /> Сброс
           </button>
         </div>
-        {model && (
+        {enrichedModel && (
           <p className="graph-count">
-            {model.nodes.length} узлов · {model.edges.length} связей
+            {enrichedModel.nodes.length} узлов · {enrichedModel.edges.length} связей
             {hoveredLabel && <span className="graph-hover"> · {hoveredLabel}</span>}
           </p>
         )}

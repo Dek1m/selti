@@ -224,6 +224,16 @@
 }
 .pulse-dot.big { width: 14px; height: 14px; }
 
+/* error-boundary fallback: readable over the star field, HUD-framed */
+.graph-crash { background: rgba(5, 8, 14, 0.82); }
+.graph-crash h3 { color: var(--sl-danger); }
+.graph-crash p {
+  max-width: 460px;
+  font-family: var(--sl-font-mono); font-size: 12px; line-height: 1.6;
+  color: var(--sl-text-2);
+  overflow-wrap: anywhere;
+}
+
 /* ── HUD console ── */
 
 .graph-float {

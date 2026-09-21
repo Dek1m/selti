@@ -67,6 +67,28 @@ export function nodeLabel(id: string, hit?: SearchHit): string {
   return id.slice(0, 8);
 }
 
+/** Minimal record shape needed to light a star (MemoryRecord satisfies it). */
+export interface GraphNodeRecord {
+  id: string;
+  content: string;
+  metadata: Record<string, unknown>;
+  namespace: string | null;
+  importance: number;
+  status: string;
+}
+
+/** Turn a fetched granule into a full star (used to enrich gray strangers). */
+export function graphNodeFromRecord(record: GraphNodeRecord, seed = false): GraphNode {
+  return {
+    id: record.id,
+    label: nodeLabel(record.id, { metadata: record.metadata, content: record.content } as SearchHit),
+    namespace: record.namespace,
+    importance: record.importance,
+    seed,
+    status: record.status,
+  };
+}
+
 /**
  * Build the model: nodes = hits, then for the first `seedExpansion` hits
  * add relation neighbors and edges. Node cap `maxNodes` cuts the growth;
@@ -79,6 +101,11 @@ export function buildGraphModel(
   options: Partial<GraphOptions> = {},
 ): GraphModel {
   const { seedExpansion, maxNodes } = { ...DEFAULT_GRAPH_OPTIONS, ...options };
+
+  // Full search index: neighbors pulled in by relations are often present
+  // in the search results themselves — inherit their real layer, size and
+  // status instead of rendering them as anonymous slate dots.
+  const hitById = new Map(hits.map((hit) => [hit.id, hit]));
 
   const nodes = new Map<string, GraphNode>();
   for (const hit of hits) {
@@ -116,8 +143,20 @@ export function buildGraphModel(
       ...relations.incoming.map((r): Pair => [r.source_id, hit.id, r.link_type, r.weight]),
     ];
     const ensureNode = (id: string) => {
-      if (!nodes.has(id) && nodes.size < maxNodes) {
-        // Neighbor granule: metadata unknown — a slate satellite node
+      if (nodes.has(id) || nodes.size >= maxNodes) return;
+      const hit = hitById.get(id);
+      if (hit) {
+        // Known granule from the search results: full star with its real layer
+        nodes.set(id, {
+          id,
+          label: nodeLabel(id, hit),
+          namespace: hit.namespace,
+          importance: hit.importance,
+          seed: false,
+          status: hit.status,
+        });
+      } else {
+        // True stranger: no metadata known — a slate satellite node
         nodes.set(id, { id, label: id.slice(0, 8), namespace: null, importance: null, seed: false, status: null });
       }
     };
