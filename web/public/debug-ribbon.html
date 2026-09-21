@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>debug-ribbon — минимальное воспроизведение лент</title>
+<style>
+  body { margin: 0; background: #060a12; color: #9dacc6; font: 12px/1.6 monospace; }
+  #panel { position: fixed; top: 12px; left: 12px; z-index: 10; padding: 10px 14px;
+           background: rgba(10,14,22,.9); border: 1px solid rgba(56,189,248,.3);
+           white-space: pre-wrap; max-width: 70vw; }
+  #panel b { color: #38bdf8; }
+  #panel .bad { color: #ff7a8a; }
+  #panel .good { color: #5fe8c8; }
+</style>
+<script type="importmap">
+  { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.186.0/build/three.module.js" } }
+</script>
+</head>
+<body>
+<div id="panel">init…</div>
+<script type="module">
+import * as THREE from "three";
+
+const panel = document.getElementById("panel");
+const lines = [];
+const say = (text, cls = "") => { lines.push(cls ? `<span class="${cls}">${text}</span>` : text); };
+
+// ── рендерер/камера как в основной сцене ──
+let renderer;
+try {
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
+} catch (e) {
+  say(`WebGLRenderer FAILED: ${e.message}`, "bad");
+  panel.innerHTML = lines.join("\n");
+  throw e;
+}
+renderer.setPixelRatio(1);
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 2, 20000);
+camera.position.set(0, 620, 950);
+camera.lookAt(0, 0, 0);
+
+// ── копия вершинного/фрагментного шейдера лент (1:1 из shaders.ts) ──
+const EDGE_VERTEX = `
+attribute vec3 aOther;
+attribute vec3 aColor;
+attribute float aWeight;
+attribute float aKind;
+attribute float aEnd;
+attribute float aSide;
+attribute float aHighlight;
+
+uniform vec2 uViewport;
+uniform float uEdgeWidth;
+
+varying vec3 vColor;
+varying float vAlpha;
+varying float vKind;
+varying float vEnd;
+varying float vPhase;
+
+const float FADE_START = 1100.0;
+const float FADE_END = 2400.0;
+
+void main() {
+  vec4 clipA = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  vec4 clipB = projectionMatrix * modelViewMatrix * vec4(aOther, 1.0);
+  vec4 clipSelf = mix(clipA, clipB, aEnd);
+  float dist = -mix(modelViewMatrix * vec4(position, 1.0), modelViewMatrix * vec4(aOther, 1.0), aEnd).z;
+
+  vec2 ndcA = clipA.xy / max(clipA.w, 0.0001);
+  vec2 ndcB = clipB.xy / max(clipB.w, 0.0001);
+  vec2 screenDir = ndcB - ndcA;
+  screenDir.x *= uViewport.x * 0.5;
+  screenDir.y *= uViewport.y * 0.5;
+  float len = length(screenDir);
+  vec2 perpPx = (len > 0.0001) ? vec2(-screenDir.y, screenDir.x) / len : vec2(1.0, 0.0);
+  vec2 ndcPerp = perpPx / vec2(uViewport.x * 0.5, uViewport.y * 0.5);
+  float halfWidth = uEdgeWidth * 0.5;
+
+  vec4 clip = clipSelf + vec4(ndcPerp * aSide * halfWidth * 2.0 * clipSelf.w, 0.0, 0.0);
+
+  float fade = 1.0 - smoothstep(FADE_START, FADE_END, dist);
+  float base = mix(0.75, 1.0, clamp((aWeight - 1.0) / 2.0, 0.0, 1.0));
+  if (aKind > 1.5) base = 1.0;
+
+  vAlpha = base * fade * (1.0 + aHighlight * 1.6);
+  vPhase = dot(position, vec3(0.0137, 0.0171, 0.0113));
+  vEnd = aEnd;
+  vKind = aKind;
+  vColor = aColor;
+
+  gl_Position = clip;
+}
+`;
+
+const EDGE_FRAGMENT_SOLID = `
+precision highp float;
+uniform float uTime;
+uniform float uDebugSolid;
+varying vec3 vColor;
+varying float vAlpha;
+varying float vKind;
+varying float vEnd;
+varying float vPhase;
+void main() {
+  if (uDebugSolid > 0.5) { gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0); return; }
+  float alpha = vAlpha;
+  if (vKind > 0.5 && vKind < 1.5) {
+    float phase = fract(vEnd * 6.0);
+    alpha *= mix(0.15, 1.0, step(phase, 0.55));
+  }
+  if (vKind > 1.5) alpha *= 0.55 + 0.45 * sin(uTime * 2.6 + vPhase);
+  gl_FragColor = vec4(vColor * alpha, alpha);
+}
+`;
+
+// ── геометрия: 3 ленты через тот же buildRibbonEdges-паттерн ──
+const VERTS = [
+  // [A xyz, B xyz, colorA, colorB, weight, kind]
+  { a: [-350, 0, 200], b: [200, 0, -250], ca: [1.0, 0.76, 0.37], cb: [0.65, 0.55, 1.0], w: 1, k: 0 }, // янтарь → ирис
+  { a: [-200, 60, -100], b: [320, -40, 120], ca: [0.3, 0.79, 1.0], cb: [0.53, 0.89, 0.63], w: 2, k: 1 }, // azure → mint, dashed
+  { a: [100, -60, 260], b: [-120, 80, -60], ca: [1.0, 0.48, 0.54], cb: [1.0, 0.48, 0.54], w: 3, k: 2 }, // contradicts
+];
+
+function buildRibbon(count, vertexData) {
+  const V = count * 4;
+  const positions = new Float32Array(V * 3);
+  const others = new Float32Array(V * 3);
+  const colors = new Float32Array(V * 3);
+  const weights = new Float32Array(V);
+  const kinds = new Float32Array(V);
+  const ends = new Float32Array(V);
+  const sides = new Float32Array(V);
+  const highlights = new Float32Array(V);
+  const wc = (v, p, o, c, w, k, end, side, hl) => {
+    positions.set(p, v * 3); others.set(o, v * 3); colors.set(c, v * 3);
+    weights[v] = w; kinds[v] = k; ends[v] = end; sides[v] = side; highlights[v] = hl;
+  };
+  for (let e = 0; e < count; e++) {
+    const d = vertexData(e);
+    const b = e * 4;
+    wc(b, d.a, d.b, d.colorA, d.weight, d.kind, 0, 1, d.highlight);
+    wc(b + 1, d.a, d.b, d.colorA, d.weight, d.kind, 0, -1, d.highlight);
+    wc(b + 2, d.b, d.a, d.colorB, d.weight, d.kind, 1, 1, d.highlight);
+    wc(b + 3, d.b, d.a, d.colorB, d.weight, d.kind, 1, -1, d.highlight);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute("aOther", new THREE.BufferAttribute(others, 3));
+  geo.setAttribute("aColor", new THREE.BufferAttribute(colors, 3));
+  geo.setAttribute("aWeight", new THREE.BufferAttribute(weights, 1));
+  geo.setAttribute("aKind", new THREE.BufferAttribute(kinds, 1));
+  geo.setAttribute("aEnd", new THREE.BufferAttribute(ends, 1));
+  geo.setAttribute("aSide", new THREE.BufferAttribute(sides, 1));
+  geo.setAttribute("aHighlight", new THREE.BufferAttribute(highlights, 1));
+  const index = new Uint32Array(count * 6);
+  for (let e = 0; e < count; e++) {
+    const b = e * 4, o = e * 6;
+    index[o] = b; index[o + 1] = b + 2; index[o + 2] = b + 1;
+    index[o + 3] = b + 2; index[o + 4] = b + 3; index[o + 5] = b + 1;
+  }
+  geo.setIndex(new THREE.BufferAttribute(index, 1));
+  return geo;
+}
+
+const geometry = buildRibbon(VERTS.length, (e) => VERTS[e]);
+const material = new THREE.ShaderMaterial({
+  vertexShader: EDGE_VERTEX,
+  fragmentShader: EDGE_FRAGMENT_SOLID,
+  uniforms: {
+    uTime: { value: 0 },
+    uViewport: { value: new THREE.Vector2(innerWidth, innerHeight) },
+    uEdgeWidth: { value: 8.0 },   // толсто: чтобы не промахнуться калибровкой
+    uDebugSolid: { value: 1.0 },  // ШАГ 1: сплошной белый
+  },
+  transparent: true,
+  depthWrite: false,
+  depthTest: false,
+  side: THREE.DoubleSide,
+  blending: THREE.AdditiveBlending,
+});
+
+const mesh = new THREE.Mesh(geometry, material);
+mesh.frustumCulled = false;
+scene.add(mesh);
+
+// контроль: те же отрезки обычными линиями (должны светиться всегда)
+const lineGeo = new THREE.BufferGeometry();
+const linePos = new Float32Array(VERTS.length * 6);
+VERTS.forEach((v, e) => { linePos.set([...v.a], e * 6); linePos.set([...v.b], e * 6 + 3); });
+lineGeo.setAttribute("position", new THREE.BufferAttribute(linePos, 3));
+const lines3d = new THREE.LineSegments(lineGeo, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6, depthTest: false }));
+scene.add(lines3d);
+
+// точки-маркеры концов
+const dotGeo = new THREE.BufferGeometry();
+const dotPos = new Float32Array(VERTS.length * 2 * 3);
+VERTS.forEach((v, e) => { dotPos.set([...v.a], e * 6); dotPos.set([...v.b], e * 6 + 3); });
+dotGeo.setAttribute("position", new THREE.BufferAttribute(dotPos, 3));
+scene.add(new THREE.Points(dotGeo, new THREE.PointsMaterial({ color: 0x5fe8c8, size: 10, sizeAttenuation: false, depthTest: false })));
+
+const report = () => {
+  const info = renderer.info.render;
+  const bs = geometry.boundingSphere;
+  lines.length = 2; // keep header
+  say(`drawRange=${geometry.drawRange.count} tris=${info.triangles} calls=${info.calls}`);
+  say(`edgeMesh visible=${mesh.visible} frustumCulled=${mesh.frustumCulled} bs=${bs ? bs.radius.toFixed(0) : "null"}`);
+  say(`uViewport=(${material.uniforms.uViewport.value.x}x${material.uniforms.uViewport.value.y}) uEdgeWidth=${material.uniforms.uEdgeWidth.value}`);
+  say(`vertex[0..5]=${[...geometry.getIndex().array.slice(0, 6)].join(",")}`);
+  const p0 = geometry.getAttribute("position");
+  say(`vertex0 pos=(${p0.getX(0).toFixed(0)},${p0.getY(0).toFixed(0)},${p0.getZ(0).toFixed(0)}) other=(${p0.getX(0) !== undefined ? "set" : "unset"})`);
+  if (info.triangles > 0) say("RIBBONS RENDERED (tris>0) — если белых полос на экране нет, они растеризуются вне вьюпорта/NaN", "good");
+  panel.innerHTML = `<b>debug-ribbon</b>\n${lines.join("\n")}`;
+};
+
+report();
+let frames = 0;
+renderer.setAnimationLoop(() => {
+  material.uniforms.uTime.value += 0.016;
+  scene.rotation.y += 0.003; // вращение: ленты проходят любые ориентации
+  renderer.render(scene, camera);
+  frames++;
+  if (frames === 10 || frames % 120 === 0) report();
+});
+
+addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  material.uniforms.uViewport.value.set(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
