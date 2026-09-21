@@ -583,3 +583,17 @@
 @media (prefers-reduced-motion: reduce) {
   .map-label { transition: none; }
 }
+
+/* ?debug=1 — живая диагностика конвейера рёбер */
+#fullmap-debug {
+  position: absolute; left: var(--sl-s-4); bottom: var(--sl-s-4); z-index: 8;
+  max-width: 60%;
+  padding: 6px 10px;
+  background: var(--sl-hud-panel);
+  border: 1px solid var(--sl-hud-frame-soft);
+  border-radius: var(--sl-r-sm);
+  font: 500 10px/1.5 var(--sl-font-mono);
+  color: var(--sl-hud-cyan);
+  pointer-events: none;
+  white-space: pre-wrap;
+}

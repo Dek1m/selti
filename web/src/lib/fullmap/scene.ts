@@ -86,6 +86,29 @@ export class FullMapScene {
   private lastNodeCull = 0;
   private edgeDebug = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("debug");
   private lastEdgeDebugLog = 0;
+  private lastEdgeStats = { candidates: 0, bothVisible: 0, drawn: 0 };
+
+  /**
+   * HUD-диагностика (?debug=1 → #fullmap-debug): всё, что нужно, чтобы
+   * за один взгляд понять, где рёбра теряются — отбор, drawRange,
+   * boundingSphere, актуальные uniforms и счётчик пайплайна.
+   */
+  getDebugInfo(): string {
+    if (!this.fullEdges || !this.packed) return "no edge mesh";
+    const geo = this.fullEdges.geometry;
+    const bs = geo.boundingSphere;
+    const material = this.fullEdges.material as THREE.ShaderMaterial;
+    const uViewport = material.uniforms.uViewport.value as THREE.Vector2;
+    const info = this.renderer.info.render;
+    return [
+      `nodes ${this.nodeVisibleCount}/${this.packed.nodeCount}`,
+      `edges cand/drawn/both ${this.lastEdgeStats.candidates}/${this.lastEdgeStats.drawn}/${this.lastEdgeStats.bothVisible}`,
+      `edgeMesh visible=${this.fullEdges.visible} drawRange=${geo.drawRange.count}`,
+      `bs=${bs ? bs.radius.toFixed(0) : "null"}`,
+      `uViewport=(${uViewport.x | 0}x${uViewport.y | 0}) uEdgeWidth=${material.uniforms.uEdgeWidth.value.toFixed(1)}`,
+      `pipeline calls=${info.calls} tris=${info.triangles} points=${info.points}`,
+    ].join(" · ");
+  }
   private lastEdgeCull = 0;
   private lastLabelRefresh = 0;
   private cameraDirty = true;
@@ -351,6 +374,7 @@ export class FullMapScene {
       },
       transparent: true,
       depthWrite: false,
+      depthTest: false, // рёбра — свет: не перекрываются атомами (мастер-фикс)
       // ленты строятся в screen space — обход зависит от знака перпендикуляра,
       // без DoubleSide половина квадов culled как back-facing (симптом:
       // «рёбра исчезают при движении камеры»)
@@ -778,7 +802,8 @@ export class FullMapScene {
       importance[i] = this.packed.nodeMeta[i * 4 + 2];
     }
     this.edgeImportance = importance;
-    const stats = this.edgeDebug ? { candidates: 0, bothVisible: 0, drawn: 0 } : undefined;
+    const stats = { candidates: 0, bothVisible: 0, drawn: 0 };
+    this.lastEdgeStats = stats;
     const selected = selectVisibleEdges(
       this.packed.edgeData,
       this.packed.edgeWeights,
@@ -787,7 +812,7 @@ export class FullMapScene {
       this.nodeVisible,
       { showAuxiliary: this.showAuxiliaryEdges, cap: EDGE_VISIBLE_CAP, stats },
     );
-    if (stats && now !== null && now - this.lastEdgeDebugLog > 2000) {
+    if (this.edgeDebug && stats && now !== null && now - this.lastEdgeDebugLog > 2000) {
       this.lastEdgeDebugLog = now;
       console.debug(
         '[fullmap] nodes ' + this.nodeVisibleCount + '/' + this.packed.nodeCount +

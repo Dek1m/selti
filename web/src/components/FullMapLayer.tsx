@@ -226,6 +226,20 @@ export function FullMapLayer({ mode = "full", constellationSnapshot = null, quer
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, constellationSnapshot]);
 
+  // ── HUD-диагностика (?debug=1): живые цифры конвейера в DOM ──
+  const debugRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!new URLSearchParams(window.location.search).has("debug")) return;
+    const push = () => {
+      if (debugRef.current && sceneRef.current) {
+        debugRef.current.textContent = sceneRef.current.getDebugInfo();
+      }
+    };
+    push();
+    const timer = window.setInterval(push, 500);
+    return () => window.clearInterval(timer);
+  }, []);
+
   // ── selection → glass ──
   useEffect(() => {
     const scene = sceneRef.current;
@@ -299,6 +313,10 @@ export function FullMapLayer({ mode = "full", constellationSnapshot = null, quer
           <h3>Снапшот не собрался</h3>
           <p>{error}</p>
         </div>
+      )}
+
+      {debugRef && (
+        <div id="fullmap-debug" ref={debugRef} aria-hidden="true" />
       )}
 
       <div className="map-cam-buttons" role="group" aria-label="Камера">
