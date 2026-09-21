@@ -7,6 +7,10 @@ const apiTarget = process.env.SELTI_API_TARGET ?? "http://localhost:8000";
 
 export default defineConfig({
   base: "/ui/",
+  // маркер сборки для ?debug=1: мгновенно отличить свежий бандл от старого выката
+  define: {
+    __BUILD_ID__: JSON.stringify(new Date().toISOString().slice(0, 19).replace("T", " ")),
+  },
   plugins: [react()],
   server: {
     proxy: {

@@ -100,14 +100,71 @@ export class FullMapScene {
     const material = this.fullEdges.material as THREE.ShaderMaterial;
     const uViewport = material.uniforms.uViewport.value as THREE.Vector2;
     const info = this.renderer.info.render;
+
+    // parent-цепочка до сцены (пункт 1): Mesh обязан висеть на Scene
+    const parents: string[] = [];
+    let node: THREE.Object3D | null = this.fullEdges;
+    while (node) {
+      parents.push(node.type + (node.name ? `:${node.name}` : ""));
+      node = node.parent;
+    }
+
+    // фактические вершины ПЕРВОГО квада из живого буфера (пункт 2)
+    let quad = "quad: none";
+    const posAttr = geo.getAttribute("position") as THREE.BufferAttribute | undefined;
+    const otherAttr = geo.getAttribute("aOther") as THREE.BufferAttribute | undefined;
+    const sideAttr = geo.getAttribute("aSide") as THREE.BufferAttribute | undefined;
+    const index = geo.getIndex();
+    if (posAttr && otherAttr && sideAttr && index && geo.drawRange.count > 0) {
+      const f = (v: number) => v.toFixed(1);
+      const parts: string[] = [];
+      const corners = [0, 1, 2, 3].map((c) => {
+        const v = index.array[c];
+        const px = posAttr.getX(v);
+        const py = posAttr.getY(v);
+        const pz = posAttr.getZ(v);
+        const ox = otherAttr.getX(v);
+        const oy = otherAttr.getY(v);
+        const oz = otherAttr.getZ(v);
+        parts.push(
+          `v${c}[i=${v}] pos=(${f(px)},${f(py)},${f(pz)}) other=(${f(ox)},${f(oy)},${f(oz)}) side=${sideAttr.getX(v)}`,
+        );
+        const bad = ![px, py, pz, ox, oy, oz].every(Number.isFinite);
+        return bad ? "NaN!" : "ok";
+      });
+      // CPU-эмуляция вершинного шейдера: итоговые экранные px углов
+      this.camera.updateMatrixWorld();
+      const vp = new THREE.Matrix4().multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse);
+      const ve = vp.elements;
+      const vw = this.renderer.domElement.width;
+      const vh = this.renderer.domElement.height;
+      const projPx = (x: number, y: number, z: number) => {
+        const w = ve[3] * x + ve[7] * y + ve[11] * z + ve[15];
+        if (!Number.isFinite(w) || Math.abs(w) < 1e-6) return "w~0";
+        const nx = (ve[0] * x + ve[4] * y + ve[8] * z + ve[12]) / w;
+        const ny = (ve[1] * x + ve[5] * y + ve[9] * z + ve[13]) / w;
+        return `${(((nx + 1) / 2) * vw).toFixed(0)},${(((1 - ny) / 2) * vh).toFixed(0)}`;
+      };
+      const q0 = index.array[0];
+      const q3 = index.array[3];
+      const cornersPx = [
+        projPx(posAttr.getX(q0), posAttr.getY(q0), posAttr.getZ(q0)),
+        projPx(posAttr.getX(q0 + 2), posAttr.getY(q0 + 2), posAttr.getZ(q0 + 2)),
+        projPx(posAttr.getX(q3), posAttr.getY(q3), posAttr.getZ(q3)),
+      ].join(" / ");
+      quad = `quad: ${corners.join(",")} | cornersPx(A/B/B') ${cornersPx} | ${parts.slice(0, 1).join(" | ")}`;
+    }
+
+    const parentChain = parents.join(" < ");
     return [
+      `build ${__BUILD_ID__}`,
       `nodes ${this.nodeVisibleCount}/${this.packed.nodeCount}`,
       `edges cand/drawn/both ${this.lastEdgeStats.candidates}/${this.lastEdgeStats.drawn}/${this.lastEdgeStats.bothVisible}`,
-      `edgeMesh visible=${this.fullEdges.visible} drawRange=${geo.drawRange.count}`,
-      `bs=${bs ? bs.radius.toFixed(0) : "null"}`,
+      `edgeMesh visible=${this.fullEdges.visible} drawRange=${geo.drawRange.count} bs=${bs ? bs.radius.toFixed(0) : "null"} parent=${parentChain}`,
       `uViewport=(${uViewport.x | 0}x${uViewport.y | 0}) uEdgeWidth=${material.uniforms.uEdgeWidth.value.toFixed(1)}`,
       `pipeline calls=${info.calls} tris=${info.triangles} points=${info.points}`,
-    ].join(" · ");
+      quad,
+    ].join(" | ");
   }
   private lastEdgeCull = 0;
   private lastLabelRefresh = 0;
