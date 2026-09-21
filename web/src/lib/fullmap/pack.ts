@@ -67,12 +67,20 @@ export function packSnapshot(raw: RawMapSnapshot, withPreview: boolean): PackedM
   const m = raw.edges.length;
   if (n === 0) throw new Error("empty snapshot");
 
+  // Wire cluster ids are arbitrary ints (DB ids with gaps — прод отдаёт
+  // именно такие). Normalize to compact slots 0..c-1 ONCE here, so every
+  // downstream typed-array index stays in range: Float64Array writes past
+  // the end silently no-op and would rot centroids to [0,0,0].
+  const slotOfId = new Map<number, number>();
+  raw.clusters.forEach((c, slot) => slotOfId.set(c.id, slot));
+
   const nodeMeta = new Float32Array(n * 4);
   const nodePositions = new Float32Array(n * 3);
   for (let i = 0; i < n; i++) {
     const node = raw.nodes[i];
     nodeMeta[i * 4] = node[3]; // nsIdx
-    nodeMeta[i * 4 + 1] = node[4]; // clusterIdx (-1 = loose star)
+    const rawCluster = node[4]; // wire id | -1
+    nodeMeta[i * 4 + 1] = rawCluster >= 0 ? (slotOfId.get(rawCluster) ?? -1) : -1;
     nodeMeta[i * 4 + 2] = node[5]; // size (importance 1..5)
     nodeMeta[i * 4 + 3] = node[6]; // flags bitfield
     nodePositions[i * 3] = node[7];
@@ -116,11 +124,13 @@ export function packSnapshot(raw: RawMapSnapshot, withPreview: boolean): PackedM
     adjList[fill[tgt]++] = src;
   }
 
-  // cluster centroids in snapshot space + dominant namespace per cluster
+  // cluster centroids in snapshot space + dominant namespace per cluster,
+  // all indexed by the compact slot (PackedCluster.index)
   const clusterCount = raw.clusters.length;
   const clusters: PackedCluster[] = raw.clusters
-    .map((c) => ({
-      index: c.id,
+    .map((c, slot) => ({
+      index: slot,
+      id: c.id,
       ns: c.ns,
       label: c.label ?? null,
       members: c.size,

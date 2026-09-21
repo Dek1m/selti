@@ -36,8 +36,10 @@ export interface RawMapSnapshot {
 
 /** Cluster record after packing — sorted by size desc, label optional. */
 export interface PackedCluster {
-  /** cluster id from the wire (parallel to nodeMeta clusterIdx) */
+  /** compact slot 0..c-1 — what nodeMeta clusterIdx holds after packing */
   index: number;
+  /** raw wire id (DB id, may be gapped) — kept for HUD/round-trips */
+  id: number;
   ns: number;
   label: string | null;
   members: number;

@@ -370,8 +370,11 @@ export class FullMapScene {
     gateKeys.forEach((key, gi) => {
       const a = Math.floor(key / c);
       const b = key % c;
-      const ca = this.clusterByIndex.get(a)!.centroid;
-      const cb = this.clusterByIndex.get(b)!.centroid;
+      // slots are compact after packing — get() can't miss; the optional
+      // chain is a cheap guard against malformed future payloads anyway
+      const ca = this.clusterByIndex.get(a)?.centroid;
+      const cb = this.clusterByIndex.get(b)?.centroid;
+      if (!ca || !cb) return;
       gatePositions.set(ca, gi * 6);
       gatePositions.set(cb, gi * 6 + 3);
       const rgbA = nsRgb[packed.clusterNs[a] | 0] ?? [0.54, 0.59, 0.67];
@@ -467,8 +470,8 @@ export class FullMapScene {
     if (this.clusterHighlightAttr) {
       const clusterArray = this.clusterHighlightAttr.array as Float32Array;
       clusterArray.fill(0);
-      litClusters.forEach((clusterIdx) => {
-        const slot = this.packed!.clusters.findIndex((cl) => cl.index === clusterIdx);
+      // nodeMeta clusterIdx is a compact slot == position in packed.clusters
+      litClusters.forEach((slot) => {
         if (slot >= 0 && slot < clusterArray.length) clusterArray[slot] = 2;
       });
       this.clusterHighlightAttr.needsUpdate = true;
