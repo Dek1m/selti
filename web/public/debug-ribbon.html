@@ -12,6 +12,16 @@
   #panel .bad { color: #ff7a8a; }
   #panel .good { color: #5fe8c8; }
 </style>
+<script>
+  window.addEventListener("error", function (e) {
+    var p = document.getElementById("panel");
+    if (p) p.innerHTML = '<span class="bad">ERROR: ' + ((e.error && e.error.stack) || e.message) + '</span>';
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    var p = document.getElementById("panel");
+    if (p) p.innerHTML = '<span class="bad">REJECTION: ' + ((e.reason && e.reason.stack) || e.reason) + '</span>';
+  });
+</script>
 <script type="importmap">
   { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.186.0/build/three.module.js" } }
 </script>
@@ -24,6 +34,8 @@ import * as THREE from "three";
 const panel = document.getElementById("panel");
 const lines = [];
 const say = (text, cls = "") => { lines.push(cls ? `<span class="${cls}">${text}</span>` : text); };
+
+try { // ==== весь модуль под стек-ловушкой ====
 
 // ── рендерер/камера как в основной сцене ──
 let renderer;
@@ -233,6 +245,9 @@ addEventListener("resize", () => {
   renderer.setSize(innerWidth, innerHeight);
   material.uniforms.uViewport.value.set(innerWidth, innerHeight);
 });
+} catch (e) { // ==== конец try ====
+  panel.innerHTML = '<span class="bad">ERROR: ' + ((e && e.stack) || e) + '</span>';
+}
 </script>
 </body>
 </html>
