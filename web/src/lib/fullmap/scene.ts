@@ -370,7 +370,8 @@ export class FullMapScene {
       uniforms: {
         uTime: { value: 0 },
         uViewport: { value: new THREE.Vector2(1, 1) },
-        uEdgeWidth: { value: 3.5 },
+        uEdgeWidth: { value: 4.0 },
+        uDebugSolid: { value: this.edgeDebug ? 1 : 0 },
       },
       transparent: true,
       depthWrite: false,
@@ -951,7 +952,7 @@ export class FullMapScene {
       const material = edges?.material as THREE.ShaderMaterial | undefined;
       if (!material) continue;
       (material.uniforms.uViewport.value as THREE.Vector2).set(width * pixelRatio, height * pixelRatio);
-      material.uniforms.uEdgeWidth.value = 3.5 * pixelRatio;
+      material.uniforms.uEdgeWidth.value = 4.0 * pixelRatio;
     }
   }
 

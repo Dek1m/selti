@@ -175,10 +175,11 @@ void main() {
   // per-vertex fade: an edge is as strong as its fainter endpoint (§4.4)
   float fade = 1.0 - smoothstep(FADE_START, FADE_END, dist);
 
-  // валентные стержни (кристалл): толсто и заметно, полупрозрачно
-  float base = mix(0.3, 0.55, clamp((aWeight - 1.0) / 2.0, 0.0, 1.0));
+  // калибровка финала: база 0.75-1.0, fade линейный → итог 0.55-0.9 ближние,
+  // ≥0.35 дальние (по замерам Мастера с прода)
+  float base = mix(0.75, 1.0, clamp((aWeight - 1.0) / 2.0, 0.0, 1.0));
   // contradicts burns red regardless of endpoint layers (сияние — в пульсе)
-  if (aKind > 1.5) base = 0.7;
+  if (aKind > 1.5) base = 1.0;
 
   vAlpha = base * fade * (1.0 + aHighlight * 1.6);
   // phase from position → per-edge desynced pulse waves
@@ -195,6 +196,7 @@ export const EDGE_FRAGMENT = /* glsl */ `
 precision highp float;
 
 uniform float uTime;
+uniform float uDebugSolid; // ?debug=1: белые непрозрачные ленты — проверка канала
 
 varying vec3 vColor;
 varying float vAlpha;
@@ -203,6 +205,12 @@ varying float vEnd;
 varying float vPhase;
 
 void main() {
+  // ШАГ 1 диагностики: доказать глазами, что геометрия/канал верны
+  if (uDebugSolid > 0.5) {
+    gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);
+    return;
+  }
+
   float alpha = vAlpha;
 
   // dashed jump routes for supersedes: six dim gaps along the gate
