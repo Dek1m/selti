@@ -556,6 +556,20 @@
 .map-edge-toggle:hover .map-edge-toggle-label { color: var(--sl-text-2); }
 .map-edge-toggle:has(input:checked) .map-edge-toggle-label { color: var(--sl-hud-cyan); }
 
+/* M4: слайдер глубины BFS */
+.map-depth input[type="range"] {
+  width: 84px; height: 3px;
+  accent-color: var(--sl-hud-cyan);
+  cursor: pointer;
+}
+.map-depth-value {
+  min-width: 14px;
+  text-align: center;
+  font: 600 11px/1 var(--sl-font-mono);
+  color: var(--sl-hud-cyan);
+  text-shadow: 0 0 8px rgba(56, 189, 248, 0.35);
+}
+
 /* Search screen → full map cross-link (§4.6) */
 .results-head .map-jump {
   flex: 0 0 auto;

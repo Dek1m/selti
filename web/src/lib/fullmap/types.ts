@@ -20,8 +20,8 @@ export interface MapMeta {
  *   x, y, z]` — everything numeric is int-rounded by the server.
  * Only asserted granules ship (no superseded/retracted in the map at all).
  * Edge tuples: `[srcIdx, tgtIdx, typeIdx, weight(float)]`.
- * Clusters: `{id, ns, size, ...}` (id = clusterIdx used by nodes; the
- * server may add extra fields — label is picked up when present).
+ * Clusters: сервер отдаёт поля `{i, ns, m, label?}` (прод-факт) —
+ * допускаем и `{id, ns, size}`; pack нормализует оба варианта.
  */
 export interface RawMapSnapshot {
   v: string;
@@ -29,7 +29,7 @@ export interface RawMapSnapshot {
   ns: string[];
   /** link-type uids, indexed by typeIdx */
   et: string[];
-  clusters: Array<{ id: number; ns: number; size: number; label?: string }>;
+  clusters: Array<{ id?: number; i?: number; ns: number; size?: number; m?: number; label?: string }>;
   nodes: Array<[string, string, string | null, number, number, number, number, number, number, number]>;
   edges: Array<[number, number, number, number]>;
 }

@@ -71,8 +71,12 @@ export function packSnapshot(raw: RawMapSnapshot, withPreview: boolean): PackedM
   // именно такие). Normalize to compact slots 0..c-1 ONCE here, so every
   // downstream typed-array index stays in range: Float64Array writes past
   // the end silently no-op and would rot centroids to [0,0,0].
+  // Поле-имя на проводе двоится: план обещал {id, size}, прод шлёт {i, m}.
   const slotOfId = new Map<number, number>();
-  raw.clusters.forEach((c, slot) => slotOfId.set(c.id, slot));
+  raw.clusters.forEach((c, slot) => {
+    const id = c.id ?? c.i;
+    if (typeof id === "number") slotOfId.set(id, slot);
+  });
 
   const nodeMeta = new Float32Array(n * 4);
   const nodePositions = new Float32Array(n * 3);
@@ -130,10 +134,10 @@ export function packSnapshot(raw: RawMapSnapshot, withPreview: boolean): PackedM
   const clusters: PackedCluster[] = raw.clusters
     .map((c, slot) => ({
       index: slot,
-      id: c.id,
+      id: c.id ?? c.i ?? slot,
       ns: c.ns,
       label: c.label ?? null,
-      members: c.size,
+      members: c.size ?? c.m ?? 0,
       centroid: [0, 0, 0] as [number, number, number],
     }))
     .sort((a, b) => b.members - a.members);

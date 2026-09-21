@@ -17,7 +17,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { bfsLevels } from "./bfs";
-import { EDGE_VISIBLE_CAP, selectVisibleEdges } from "./edges";
+import { EDGE_VISIBLE_CAP, selectVisibleEdges, selectVisibleNodes } from "./edges";
 import { lodModeFor, selectLabeledNodes, type LabelCandidate, type LodMode } from "./lod";
 import { unpackNodeString } from "./pack";
 import { EDGE_FRAGMENT, EDGE_VERTEX, STAR_FRAGMENT, STAR_VERTEX } from "./shaders";
@@ -244,8 +244,7 @@ export class FullMapScene {
       uniforms: {
         uPixelRatio: { value: this.renderer.getPixelRatio() },
         uSizeScale: { value: 1 },
-        uTime: { value: 0 },
-        uTwinkle: { value: this.reducedMotion ? 0 : 1 },
+        uDepthCap: { value: 99 },
         uFogColor: { value: this.palette?.fog ?? new THREE.Color("#060a12") },
         uIceColor: { value: this.palette?.ice ?? new THREE.Color("#7dd3fc") },
       },
@@ -338,7 +337,7 @@ export class FullMapScene {
       uniforms: {
         uTime: { value: 0 },
         uViewport: { value: new THREE.Vector2(1, 1) },
-        uEdgeWidth: { value: 2.0 },
+        uEdgeWidth: { value: 3.5 },
       },
       transparent: true,
       depthWrite: false,
@@ -838,6 +837,8 @@ export class FullMapScene {
         if (level === 0) score += 1000;
         else if (level === 1) score += 200;
         else if (level > 0) score += Math.max(0, 30 - level * 3);
+        // M4: растворённые уровни — в конец приоритета отбора
+        if (level > this.depthCap) score -= 60;
       }
       if (highlight) {
         if (highlight[i] >= 2) score += 500;
@@ -847,16 +848,28 @@ export class FullMapScene {
       candScore.push(score);
     }
 
-    // cap 280: приоритет по score — ближе/ярче важнее (фидбек 7)
-    let drawCount = candIdx.length;
-    if (drawCount > NODE_VISIBLE_CAP) {
-      const order = candIdx.map((_, k) => k).sort((a, b) => candScore[b] - candScore[a]);
-      for (let k = 0; k < NODE_VISIBLE_CAP; k++) {
-        this.nodeIndexArray[k] = candIdx[order[k]];
-      }
-      drawCount = NODE_VISIBLE_CAP;
-    } else {
-      for (let k = 0; k < drawCount; k++) this.nodeIndexArray[k] = candIdx[k];
+    // связный отбор (итерация 4): seeds + добор соседей выбранных — кадр
+    // собирается в «молекулы», у большинства звёзд есть стержень внутрь
+    const importance = this.edgeImportance ?? new Float32Array(this.packed.nodeCount);
+    for (let i = 0; i < this.packed.nodeCount; i++) {
+      importance[i] = meta[i * 4 + 2];
+    }
+    this.edgeImportance = importance;
+    const candIdxTyped = Int32Array.from(candIdx);
+    const candScoreTyped = Float32Array.from(candScore);
+    const selection = selectVisibleNodes(
+      candIdxTyped,
+      candScoreTyped,
+      this.packed.adjOffsets,
+      this.packed.adjList,
+      importance,
+      Math.floor(NODE_VISIBLE_CAP / 2),
+      NODE_VISIBLE_CAP,
+    );
+    const visible = selection.visible;
+    let drawCount = 0;
+    for (let i = 0; i < this.packed.nodeCount; i++) {
+      if (visible[i]) this.nodeIndexArray[drawCount++] = i;
     }
 
     this.nodeVisibleCount = drawCount;
@@ -867,9 +880,7 @@ export class FullMapScene {
     if (!this.nodeVisible || this.nodeVisible.length < this.packed.nodeCount) {
       this.nodeVisible = new Uint8Array(this.packed.nodeCount);
     }
-    const visible = this.nodeVisible;
-    visible.fill(0);
-    for (let k = 0; k < drawCount; k++) visible[this.nodeIndexArray[k]] = 1;
+    this.nodeVisible.set(visible);
   }
 
   private candIdx: number[] | null = null;
@@ -930,6 +941,25 @@ export class FullMapScene {
     this.showAuxiliaryEdges = show;
     this.cameraDirty = true;
     this.cullEdges(null); // немедленная перестройка
+  }
+
+  private depthCap = Number.POSITIVE_INFINITY;
+
+  /**
+   * M4: слайдер глубины 1-6/∞. Кап уровней BFS от выбранной звезды:
+   * уровни глубже капа растворяются продолжением glass-кривой (uniform,
+   * мгновенно, без сети); отбор узлов опускает их в конец приоритета.
+   */
+  setDepth(cap: number | null): void {
+    const next = cap ?? Number.POSITIVE_INFINITY;
+    if (this.depthCap === next) return;
+    this.depthCap = next;
+    const uniformValue = Number.isFinite(next) ? next : 99;
+    for (const points of [this.fullPoints, this.clusterPoints]) {
+      const material = points?.material as THREE.ShaderMaterial | undefined;
+      if (material) material.uniforms.uDepthCap.value = uniformValue;
+    }
+    this.cameraDirty = true;
   }
 
   /** Top-K DOM labels (§7): только видимые звёзды, throttle 140 мс. */
@@ -1001,13 +1031,7 @@ export class FullMapScene {
     this.controls.update();
     this.updateLodVisibility();
 
-    // размер звёзд — экранные px без дистанционной аттенюации (фидбек 2),
-    // uSizeScale остаётся 1: глубину читают fade + culling, не мельчание
-    for (const points of [this.fullPoints, this.clusterPoints]) {
-      const material = points?.material as THREE.ShaderMaterial | undefined;
-      if (material) material.uniforms.uTime.value = elapsed;
-    }
-    // пульс contradicts (фидбек 6) — время в рёберный материал
+    // пульс contradicts — время в рёберный материал (звёзды-атомы статичны)
     for (const edges of [this.fullEdges, this.clusterEdges]) {
       const material = edges?.material as THREE.ShaderMaterial | undefined;
       if (material) material.uniforms.uTime.value = elapsed;
@@ -1051,7 +1075,7 @@ export class FullMapScene {
       const material = edges?.material as THREE.ShaderMaterial | undefined;
       if (!material) continue;
       (material.uniforms.uViewport.value as THREE.Vector2).set(width * pixelRatio, height * pixelRatio);
-      material.uniforms.uEdgeWidth.value = 2.0 * pixelRatio;
+      material.uniforms.uEdgeWidth.value = 3.5 * pixelRatio;
     }
   }
 

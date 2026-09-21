@@ -16,58 +16,47 @@ attribute float aBfs;        // BFS level from selection (-1 = no selection)
 attribute float aHighlight;  // search segment: 0 none, 1 cluster member, 2 hit
 
 uniform float uPixelRatio;
-uniform float uSizeScale;    // LOD sprite scale by zoom
-uniform float uTime;
-uniform float uTwinkle;      // 0 when prefers-reduced-motion
+uniform float uSizeScale;
+uniform float uDepthCap;     // M4: кап уровней BFS (99 = бесконечность)
 
 varying vec3 vColor;
-varying float vGlow;
-varying float vFrozen;
-varying float vGlass;        // final alpha multiplier from the glass curve
+varying float vGlass;
 varying float vDesat;
+varying float vFrozen;
 varying float vHighlight;
-varying float vFade;         // distance fade to camera
-varying float vTwinklePhase;
+varying float vFade;
 
 const float FADE_START = 900.0;
 const float FADE_END = 2200.0;
 
 void main() {
   vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-  float dist = -mvPosition.z;                       // camera-space depth
+  float dist = -mvPosition.z;
 
-  // Screen-constant star size, эталон созвездия (итерация 3): базовый
-  // спрайт 14.5..32.5 px диаметра — крупная графичная точка, дальше
-  // глубину читают fade/culling, не мельчание.
+  // атомы эталонного размера: базовый спрайт 14.5..32.5 px, экранно-постоянный
   float sizePx = (10.0 + aSize * 4.5) * uSizeScale * uPixelRatio;
 
-  // camera distance fade (§4.4, усилен по фидбеку): near = solid, far = gone
   float fade = 1.0 - smoothstep(FADE_START, FADE_END, dist);
   vFade = fade * fade;
 
-  // glass curve (§4.2) — BFS level drives opacity/desaturation
+  // glass curve (§4.2) + M4: уровни глубже капа растворяются продолжением кривой
   float level = aBfs;
   float glass = (level < 0.0) ? 1.0 : mix(0.95, 0.12, smoothstep(0.0, 6.0, level));
   if (level == 0.0) glass = 1.0;
+  if (level >= 0.0 && level > uDepthCap) {
+    float over = smoothstep(uDepthCap, uDepthCap + 2.0, level);
+    glass *= 1.0 - 0.88 * over;
+  }
   vGlass = glass;
   vDesat = (level < 0.0) ? 0.0 : smoothstep(0.0, 6.0, level) * 0.85;
 
-  // search segment emphasis: hits burn brighter and larger
   vHighlight = aHighlight;
   float highlightBoost = (aHighlight >= 2.0) ? 1.7 : (aHighlight >= 1.0) ? 1.3 : 1.0;
   sizePx *= highlightBoost;
 
-  // importance glow, same mapping family as the 2D starGlow()
-  float glow = (aSize <= 0.0) ? 0.3 : 0.2 + clamp((aSize - 1.0) / 4.0, 0.0, 1.0) * 0.8;
-  vGlow = glow * highlightBoost;
-
-  // frozen eternal facts read as ice-tinted stars
   vFrozen = step(0.5, mod(aFlags, 2.0));
 
-  // gentle twinkle: slow per-star phase, disabled for reduced motion
-  vTwinklePhase = fract(sin(dot(position.xy, vec2(12.9898, 78.233))) * 43758.5453);
-
-  gl_PointSize = clamp(sizePx, 2.0 * uPixelRatio, 64.0 * uPixelRatio);
+  gl_PointSize = clamp(sizePx, 3.0 * uPixelRatio, 64.0 * uPixelRatio);
   gl_Position = projectionMatrix * mvPosition;
 
   vColor = aColor;
@@ -77,64 +66,47 @@ void main() {
 export const STAR_FRAGMENT = /* glsl */ `
 precision highp float;
 
-uniform float uTime;
-uniform float uTwinkle;
 uniform vec3 uFogColor;
 uniform vec3 uIceColor;
 
 varying vec3 vColor;
-varying float vGlow;
-varying float vFrozen;
 varying float vGlass;
 varying float vDesat;
+varying float vFrozen;
 varying float vHighlight;
 varying float vFade;
-varying float vTwinklePhase;
 
 void main() {
-  // gl_PointCoord: [-0..1]² → centered [-1..1]
   vec2 uv = gl_PointCoord * 2.0 - 1.0;
   float dist = length(uv);
   if (dist > 1.0) discard;
 
-  float twinkle = 1.0 - uTwinkle * 0.28 * (0.5 + 0.5 * sin(uTime * 1.7 + vTwinklePhase * 6.2831));
-
-  // desaturated tint for glassy stars: mix toward luma (§4.2)
   float luma = dot(vColor, vec3(0.2126, 0.7152, 0.0722));
-  vec3 color = mix(vColor, vec3(luma), vDesat);
-  // frozen granules carry an ice sheen on top of their layer color
-  color = mix(color, uIceColor, vFrozen * 0.55);
+  vec3 body = mix(vColor, vec3(luma), vDesat);
+  body = mix(body, uIceColor, vFrozen * 0.55);
 
-  // графичное ядро (итерация 3): ~50% диаметра спрайта, резкий край —
-  // яркое цветное ядро, не размытый шар; деликатный white-hot только в центре
-  float coreR = 0.5;
-  float core = 1.0 - smoothstep(coreR * 0.82, coreR * 1.06, dist);
-  float hot = 1.0 - smoothstep(0.0, coreR * 0.55, dist);
-  vec3 coreColor = mix(color, vec3(1.0), 0.28 * hot);
+  // кристаллический атом: сферический шейдинг, светлое пятно смещено
+  // вверх-влево, лимб темнеет к кромке, жёсткий узкий блик сверху
+  vec3 N = vec3(uv, sqrt(max(0.0, 1.0 - dist * dist)));
+  vec3 L = normalize(vec3(-0.45, 0.6, 0.66));
+  float diff = max(dot(N, L), 0.0);
+  float rim = smoothstep(0.7, 1.0, dist);
 
-  // мягкий СВЕТЯЩИЙСЯ ореол (итерация 3): от кромки ядра до края спрайта
-  // с плавным квадратичным спадом — сила 0.75, аддитивные перекрытия
-  // соседних ореолов читаются туманностью
-  float haloT = clamp((dist - coreR) / (1.0 - coreR), 0.0, 1.0);
-  float halo = pow(1.0 - haloT, 2.0) * min(vGlow, 1.0);
+  vec3 shaded = body * (0.4 + 0.75 * diff);
+  shaded *= 1.0 - rim * 0.5;
+  shaded += vec3(1.0) * pow(diff, 26.0) * 0.85;
 
-  float alpha = max(core, halo * 0.75);
-  // search hits get a warm rim so they read above their cluster
-  float rim = (vHighlight >= 2.0) ? (1.0 - smoothstep(0.55, 1.0, dist)) * 0.35 : 0.0;
-  alpha = max(alpha, rim);
-  alpha *= vGlass * vFade * twinkle;
+  // чёткая кромка — графичный шарик, не размытый глоу
+  float disc = 1.0 - smoothstep(0.94, 1.0, dist);
+  float alpha = disc * (0.5 + 0.5 * diff);
+  alpha = max(alpha, disc * 0.28);
+  alpha *= vGlass * vFade;
 
-  // fog toward the abyss color melts the far plane (§4.4)
-  color = mix(color, uFogColor, (1.0 - vFade) * 0.6);
-
-  gl_FragColor = vec4(mix(coreColor, color, haloT) * alpha, alpha);
+  vec3 color = mix(shaded, uFogColor, (1.0 - vFade) * 0.6);
+  gl_FragColor = vec4(color * alpha, alpha);
 }
 `;
 
-// Ribbon edges (итерация 3): glLineWidth в WebGL мёртв (1px), поэтому каждое
-// ребро — экранный квад: 4 вершины (концы A/B × сторона ±1), 6 индексов.
-// Vertex строит прямоугольник шириной uEdgeWidth*2 в ЭКРАННЫХ пикселях —
-// связи читаются как тонкие цветные нити постоянной толщины.
 export const EDGE_VERTEX = /* glsl */ `
 attribute vec3 aOther;   // позиция противоположного конца ребра
 attribute vec3 aColor;   // per-vertex: gradient across the segment
@@ -181,10 +153,10 @@ void main() {
   // per-vertex fade: an edge is as strong as its fainter endpoint (§4.4)
   float fade = 1.0 - smoothstep(FADE_START, FADE_END, dist);
 
-  // читаемость без паутины (итерация 2): с капом рёбер хватает скромной базы
-  float base = mix(0.15, 0.45, clamp((aWeight - 1.0) / 2.0, 0.0, 1.0));
+  // валентные стержни (кристалл): толсто и заметно, полупрозрачно
+  float base = mix(0.3, 0.55, clamp((aWeight - 1.0) / 2.0, 0.0, 1.0));
   // contradicts burns red regardless of endpoint layers (сияние — в пульсе)
-  if (aKind > 1.5) base = 0.5;
+  if (aKind > 1.5) base = 0.7;
 
   vAlpha = base * fade * (1.0 + aHighlight * 1.6);
   // phase from position → per-edge desynced pulse waves

@@ -5,6 +5,7 @@
 // /api/map/meta + /api/map/full are not deployed — same downstream path.
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router";
 import * as THREE from "three";
 import { searchGranules, type SearchFilters } from "../api/selti";
 import { FullMapScene, type ScenePalette } from "../lib/fullmap/scene";
@@ -85,6 +86,21 @@ export function FullMapLayer({ query, selected, onSelect, onStats }: FullMapLaye
   const [lodMode, setLodMode] = useState<"full" | "clusters">("full");
   // служебный co_occurrence-слой (related_to weight < 1) — off по умолчанию
   const [auxEdges, setAuxEdges] = useState(false);
+  // M4: слайдер глубины BFS 1-6/∞ (7 = ∞, дефолт), предустановка ?depth=
+  const [searchParams, setSearchParams] = useSearchParams();
+  const depthParam = Number(searchParams.get("depth") ?? "");
+  const [depth, setDepth] = useState<number>(
+    Number.isFinite(depthParam) && depthParam >= 1 && depthParam <= 6 ? depthParam : 7,
+  );
+
+  const applyDepth = (value: number) => {
+    setDepth(value);
+    sceneRef.current?.setDepth(value >= 7 ? null : value);
+    const params = new URLSearchParams(searchParams);
+    if (value >= 7) params.delete("depth");
+    else params.set("depth", String(value));
+    setSearchParams(params, { replace: true });
+  };
 
   // ── snapshot load (worker) + scene lifetime ──
   useEffect(() => {
@@ -255,6 +271,21 @@ export function FullMapLayer({ query, selected, onSelect, onStats }: FullMapLaye
           />
           <span className="map-edge-toggle-label">служебные связи</span>
         </label>
+
+        <label className="map-edge-toggle map-depth" title="Глубина связей от выбранной звезды (M4)">
+          <span className="map-edge-toggle-label">глубина</span>
+          <input
+            type="range"
+            min={1}
+            max={7}
+            step={1}
+            value={depth}
+            onChange={(e) => applyDepth(Number(e.target.value))}
+            aria-label="Глубина связей: 1-6 уровней или бесконечность"
+          />
+          <span className="map-depth-value">{depth >= 7 ? "∞" : depth}</span>
+        </label>
+
         <span className={`map-lod-badge${lodMode === "clusters" ? " far" : ""}`}>
           {lodMode === "clusters" ? "звёздные системы" : "полный граф"}
         </span>
