@@ -517,8 +517,19 @@ export function eveDrawNodeHover(
   const lineHeight = Math.ceil(settings.labelSize * 1.4);
   const textWidth = Math.max(...lines.map((line) => context.measureText(line).width));
 
+  // Real glyph metrics: canvas fills text from the baseline, and the em-box
+  // (labelSize) has nothing to do with how tall the glyphs actually are.
+  // Centering on actualBoundingBox keeps the frame symmetric around the ink.
+  let ascent = settings.labelSize * 0.82; // fallback if metrics are missing
+  let descent = settings.labelSize * 0.28;
+  for (const line of lines) {
+    const metrics = context.measureText(line);
+    ascent = Math.max(ascent, metrics.actualBoundingBoxAscent || 0);
+    descent = Math.max(descent, metrics.actualBoundingBoxDescent || 0);
+  }
+
   const boxW = Math.ceil(Math.min(textWidth + HOVER_TAG_PAD_X * 2, HOVER_TAG_MAX_WIDTH));
-  const boxH = lines.length * lineHeight + HOVER_TAG_PAD_Y * 2;
+  const boxH = Math.ceil(ascent + descent + (lines.length - 1) * lineHeight + HOVER_TAG_PAD_Y * 2);
 
   // flip to the left side when the tag would cross the right edge
   let x = data.x + size + HOVER_TAG_MARGIN;
@@ -547,7 +558,8 @@ export function eveDrawNodeHover(
   context.stroke();
 
   context.fillStyle = resolveCssColor("var(--sl-text)");
+  const firstBaseline = y + HOVER_TAG_PAD_Y + ascent;
   lines.forEach((line, i) => {
-    context.fillText(line, x + HOVER_TAG_PAD_X, y + HOVER_TAG_PAD_Y + settings.labelSize * 0.82 + i * lineHeight);
+    context.fillText(line, x + HOVER_TAG_PAD_X, firstBaseline + i * lineHeight);
   });
 }

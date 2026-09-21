@@ -399,9 +399,11 @@
   opacity: 0.75;
 }
 
-/* Granule panel floats over the canvas on this screen */
+/* Granule panel floats over the canvas on this screen. Explicit z: the
+   canvas layer is z-index 1 and beats z-auto regardless of DOM order. */
 .graph-root .panel {
   position: absolute; top: var(--sl-s-4); right: var(--sl-s-4); bottom: var(--sl-s-4);
   width: 440px;
   max-height: none;
+  z-index: 10;
 }
