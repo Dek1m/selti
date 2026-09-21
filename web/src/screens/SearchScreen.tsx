@@ -181,6 +181,16 @@ export function SearchScreen({ panelId }: { panelId?: string }) {
                     Показаны <b>{(page - 1) * 20 + 1}–{(page - 1) * 20 + results.length}</b>
                   </span>
                   <span className="took">{((search.data?.tookMs ?? 0) / 1000).toFixed(2)} с</span>
+                  {/* §4.6: cross-link to the 3D full map — ?q= is the shared contract */}
+                  <button
+                    className="btn map-jump"
+                    onClick={() =>
+                      navigate({ pathname: "/graph", search: `?q=${encodeURIComponent(filters.query)}&view=full` })
+                    }
+                    title="Показать этот запрос сегментом на полной карте"
+                  >
+                    <i className="bi bi-globe2" aria-hidden="true" /> Показать на карте
+                  </button>
                   <span className="formula" title="Разложение релевантности">
                     score = <i>rrf</i> × <i>decay</i> × <i>importance</i>
                   </span>

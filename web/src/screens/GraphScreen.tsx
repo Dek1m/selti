@@ -15,6 +15,7 @@ import type { Sigma } from "sigma";
 import "@react-sigma/core/lib/style.css";
 import { getMemory, getRelations, searchGranules, type SearchFilters } from "../api/selti";
 import type { MemoryRecord } from "../api/types";
+import { FullMapLayer, type MapStats } from "../components/FullMapLayer";
 import { GranulePanel } from "../components/GranulePanel";
 import { GraphErrorBoundary } from "../components/GraphErrorBoundary";
 import { namespaceColor, resolveCssColor, toRgba } from "../lib/colors";
@@ -267,6 +268,19 @@ export function GraphScreen() {
   const [sigma, setSigma] = useState<Sigma | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const zoomStepRef = useRef(0);
+  // M3: "full" renders the 3D whole-memory map, "constellation" — the 2D search graph
+  const view: "constellation" | "full" = searchParams.get("view") === "full" ? "full" : "constellation";
+  const [mapStats, setMapStats] = useState<MapStats | null>(null);
+
+  const setView = useCallback(
+    (next: "constellation" | "full") => {
+      const params = new URLSearchParams(searchParams);
+      if (next === "full") params.set("view", "full");
+      else params.delete("view");
+      setSearchParams(params, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
 
   // Shareable links: ?q= mirrors the debounced query (replace → no history spam)
   useEffect(() => {
@@ -283,7 +297,7 @@ export function GraphScreen() {
   const search = useQuery({
     queryKey: ["graph-search", query],
     queryFn: () => searchGranules({ ...GRAPH_FILTERS, query }, 1),
-    enabled: query.length > 0,
+    enabled: query.length > 0 && view === "constellation",
     staleTime: 60_000,
   });
 
@@ -441,7 +455,11 @@ export function GraphScreen() {
         role="application"
         aria-label="Визуальный граф знаний, используйте экран Поиск"
       >
-        {query === "" ? (
+        {view === "full" ? (
+          <GraphErrorBoundary>
+            <FullMapLayer query={query} selected={selected} onSelect={setSelected} onStats={setMapStats} />
+          </GraphErrorBoundary>
+        ) : query === "" ? (
           <div className="state-block graph-empty">
             <i className="bi bi-diagram-3" aria-hidden="true" />
             <h3>Введите запрос — построю созвездие</h3>
@@ -509,6 +527,25 @@ export function GraphScreen() {
           </span>
         </header>
 
+        <div className="graph-view-toggle" role="tablist" aria-label="Режим карты">
+          <button
+            className={`view-tab${view === "constellation" ? " on" : ""}`}
+            role="tab"
+            aria-selected={view === "constellation"}
+            onClick={() => setView("constellation")}
+          >
+            <i className="bi bi-stars" aria-hidden="true" /> Созвездие
+          </button>
+          <button
+            className={`view-tab${view === "full" ? " on" : ""}`}
+            role="tab"
+            aria-selected={view === "full"}
+            onClick={() => setView("full")}
+          >
+            <i className="bi bi-globe2" aria-hidden="true" /> Полная карта
+          </button>
+        </div>
+
         <div className="graph-searchbox">
           <i className="bi bi-search icon" aria-hidden="true" />
           <input
@@ -516,27 +553,53 @@ export function GraphScreen() {
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Спроси глубину — построю созвездие…"
+            placeholder={
+              view === "full" ? "Поиск по полной карте — сегмент кластеров…" : "Спроси глубину — построю созвездие…"
+            }
             aria-label="Запрос для созвездия"
             autoComplete="off"
             spellCheck={false}
           />
         </div>
         <div className="graph-controls">
-          <button className="btn" onClick={() => setLayoutSeed((s) => s + 1)} disabled={!graph}>
-            <i className="bi bi-arrow-repeat" aria-hidden="true" /> Раскладка
-          </button>
-          <button className="btn" onClick={reset} disabled={!input && !selected}>
-            <i className="bi bi-x-circle" aria-hidden="true" /> Сброс
-          </button>
+          {view === "constellation" ? (
+            <>
+              <button className="btn" onClick={() => setLayoutSeed((s) => s + 1)} disabled={!graph}>
+                <i className="bi bi-arrow-repeat" aria-hidden="true" /> Раскладка
+              </button>
+              <button className="btn" onClick={reset} disabled={!input && !selected}>
+                <i className="bi bi-x-circle" aria-hidden="true" /> Сброс
+              </button>
+            </>
+          ) : (
+            <button className="btn" onClick={reset} disabled={!input && !selected}>
+              <i className="bi bi-x-circle" aria-hidden="true" /> Сброс
+            </button>
+          )}
         </div>
-        {enrichedModel && (
-          <p className="graph-count">
-            {enrichedModel.nodes.length} узлов · {enrichedModel.edges.length} связей
-            {hoveredLabel && <span className="graph-hover"> · {hoveredLabel}</span>}
-          </p>
+        {view === "full" ? (
+          <>
+            {mapStats && (
+              <p className="graph-count">
+                {mapStats.nodes.toLocaleString("ru-RU")} узлов · {mapStats.edges.toLocaleString("ru-RU")} связей ·{" "}
+                {mapStats.clusters.toLocaleString("ru-RU")} кластеров
+              </p>
+            )}
+            {mapStats?.mock && (
+              <p className="graph-map-mock" title="Эндпоинты /api/map/meta и /api/map/full ещё не развёрнуты">
+                <i className="bi bi-flask" aria-hidden="true" /> мок-снапшот (бэкенд M1 в пути)
+              </p>
+            )}
+          </>
+        ) : (
+          enrichedModel && (
+            <p className="graph-count">
+              {enrichedModel.nodes.length} узлов · {enrichedModel.edges.length} связей
+              {hoveredLabel && <span className="graph-hover"> · {hoveredLabel}</span>}
+            </p>
+          )
         )}
-        {regions.length > 0 && (
+        {view === "constellation" && regions.length > 0 && (
           <div className="graph-legend">
             <button
               className="graph-legend-toggle"

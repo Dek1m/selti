@@ -407,3 +407,143 @@
   max-height: none;
   z-index: 10;
 }
+
+/* ═══════════ Full map (M3) — three.js deep chart ═══════════ */
+/* Sits inside .graph-canvas (z 1); HUD chrome above via .graph-float (z 10). */
+
+.graph-view-toggle {
+  display: flex; gap: 2px;
+  padding: 2px;
+  background: var(--sl-bg-inset);
+  border: 1px solid var(--sl-border);
+  border-radius: var(--sl-r-md);
+}
+.graph-view-toggle .view-tab {
+  flex: 1;
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: 30px;
+  background: none; border: none; border-radius: var(--sl-r-sm);
+  font: 500 11.5px/1 var(--sl-font-display);
+  letter-spacing: 0.02em;
+  color: var(--sl-text-3);
+  cursor: pointer;
+  transition: background var(--sl-dur-fast) var(--sl-ease), color var(--sl-dur-fast) var(--sl-ease);
+}
+.graph-view-toggle .view-tab:hover { color: var(--sl-text); }
+.graph-view-toggle .view-tab.on {
+  background: var(--sl-bg-raised);
+  color: var(--sl-hud-cyan);
+  box-shadow: inset 0 0 0 1px var(--sl-hud-frame-soft), 0 0 12px rgba(56, 189, 248, 0.12);
+}
+.graph-view-toggle .view-tab i { font-size: 12px; }
+
+.graph-map-mock {
+  display: inline-flex; align-items: center; gap: 6px;
+  margin: 0;
+  padding: 5px 8px;
+  border: 1px dashed rgba(255, 193, 94, 0.4);
+  border-radius: var(--sl-r-sm);
+  font: 500 10.5px/1 var(--sl-font-mono);
+  letter-spacing: 0.04em;
+  color: var(--sl-warn);
+}
+
+.map-root { position: absolute; inset: 0; overflow: hidden; cursor: grab; }
+.map-root:active { cursor: grabbing; }
+
+.map-canvas-host { position: absolute; inset: 0; }
+.map-canvas { display: block; width: 100%; height: 100%; }
+
+/* DOM label layer — pure chrome, never interactive */
+.map-labels {
+  position: absolute; inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+.map-label {
+  position: absolute; top: 0; left: 0;
+  padding: 2px 7px;
+  background: rgba(10, 14, 22, 0.72);
+  border: 1px solid var(--sl-hud-frame-soft);
+  border-radius: var(--sl-r-sm);
+  font: 500 10px/1.4 var(--sl-font-mono);
+  letter-spacing: 0.03em;
+  color: var(--sl-text-2);
+  white-space: nowrap;
+  display: none;
+  will-change: transform;
+}
+
+/* hover tooltip: HUD tag with name + preview, follows the cursor */
+.map-tooltip {
+  position: absolute; z-index: 5;
+  max-width: 320px;
+  padding: var(--sl-s-2) var(--sl-s-3);
+  background: var(--sl-hud-panel);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--sl-hud-frame);
+  border-radius: var(--sl-r-sm);
+  box-shadow: var(--sl-shadow-2);
+  transform: translate(14px, 12px);
+  pointer-events: none;
+}
+.map-tooltip-name {
+  margin: 0 0 4px;
+  font: 600 12px/1.45 var(--sl-font-display);
+  color: var(--sl-text);
+  overflow-wrap: anywhere;
+}
+.map-tooltip-preview {
+  margin: 0;
+  font: 400 11px/1.55 var(--sl-font-body);
+  color: var(--sl-text-2);
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.map-loading {
+  position: absolute; inset: 0; z-index: 4;
+  justify-content: center;
+  background: rgba(5, 8, 14, 0.55);
+}
+.map-progress {
+  font: 500 11px/1 var(--sl-font-mono);
+  letter-spacing: 0.08em;
+  color: var(--sl-hud-cyan);
+}
+
+.map-cam-buttons {
+  position: absolute; right: var(--sl-s-4); bottom: var(--sl-s-4); z-index: 6;
+  display: flex; align-items: center; gap: var(--sl-s-2);
+}
+/* GranulePanel is 440px on the right — tuck the buttons out of its way */
+.graph-root:has(.panel) .map-cam-buttons { right: 472px; }
+.map-cam-buttons .btn { height: 32px; min-width: 0; flex: 0 0 auto; font-size: 12px; padding: 0 12px; }
+.map-cam-buttons .btn:disabled { opacity: 0.4; cursor: default; }
+
+.map-lod-badge {
+  padding: 5px 10px;
+  border: 1px solid var(--sl-hud-frame-soft);
+  border-radius: var(--sl-r-full);
+  background: var(--sl-hud-panel);
+  font: 600 9.5px/1 var(--sl-font-mono);
+  letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--sl-hud-cyan);
+  text-shadow: 0 0 10px rgba(56, 189, 248, 0.35);
+  white-space: nowrap;
+}
+.map-lod-badge.far { color: var(--sl-warn); text-shadow: 0 0 10px rgba(255, 193, 94, 0.3); }
+
+/* Search screen → full map cross-link (§4.6) */
+.results-head .map-jump {
+  flex: 0 0 auto;
+  height: 30px; min-width: 0;
+  padding: 0 12px;
+  font-size: 12px;
+  color: var(--sl-hud-cyan);
+}
+.results-head .map-jump:hover { border-color: var(--sl-hud-cyan); color: var(--sl-hud-cyan-bright); }
+
+@media (prefers-reduced-motion: reduce) {
+  .map-label { transition: none; }
+}

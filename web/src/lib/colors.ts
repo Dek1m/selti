@@ -54,7 +54,7 @@ export function resolveCssColor(color: string): string {
 }
 
 /** hsl(h s% l%) → rgb triple (the ladder emits this format). */
-function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+export function hslToRgb(h: number, s: number, l: number): [number, number, number] {
   const c = (1 - Math.abs(2 * l - 1)) * s;
   const hp = ((h % 360) + 360) % 360 / 60;
   const x = c * (1 - Math.abs((hp % 2) - 1));
