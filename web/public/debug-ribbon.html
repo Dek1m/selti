@@ -254,6 +254,7 @@ const report = () => {
   const vp = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
   const e = vp.elements;
   const oAttr = geometry.getAttribute("aOther");
+  const p0 = geometry.getAttribute("position");
   const sAttr = geometry.getAttribute("aSide");
   const eAttr = geometry.getAttribute("aEnd");
   const idx = [...geometry.getIndex().array.slice(0, 6)];
