@@ -448,7 +448,9 @@ export class FullMapScene {
 
       const dist = Math.sqrt(distSq);
       const sizePx = (4.5 + meta[i * 4 + 2] * 1.9) * this.renderer.getPixelRatio();
-      const scale = Math.min(6, Math.max(1.5, (sizePx * dist) / 1276));
+      // выбранная звезда — вдвое крупнее (фидбек Мастера)
+      const selectedBoost = i === this.selectedNode ? 2.0 : 1.0;
+      const scale = Math.min(12, Math.max(1.5, (sizePx * dist) / 1276)) * selectedBoost;
 
       matrix.makeScale(scale, scale, scale);
       matrix.setPosition(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
@@ -588,10 +590,13 @@ export class FullMapScene {
 
   // ── interaction state (called from React) ──
 
+  private selectedNode = -1;
+
   /** Click glass: BFS from the star, continuous fade by level (§4.2). */
   select(index: number | null): void {
     if (!this.packed) return;
     if (!this.bfsAttr) return;
+    this.selectedNode = index ?? -1;
     this.cameraDirty = true; // выбор пробивается сквозь visible-cap
     // стеклянный расфокус (фидбек Мастера): невыбранные — размытые пятна
     const starMaterial = this.fullPoints?.material as THREE.ShaderMaterial | undefined;
@@ -1180,9 +1185,10 @@ export class FullMapScene {
     // render, база восстанавливается после — OrbitControls не ломается,
     // во время fly-to дрейф приостановлен, reduced-motion — off.
     const basePos = this.camera.position.clone();
-    if (!this.reducedMotion && !this.flyAnimation && !this.framedPrev) {
+    if (!this.reducedMotion && !this.flyAnimation) {
+      // дрейф живёт и при выделенной звезде, но вдвое тише — «плавает в кадре»
       const camDist = this.camera.position.distanceTo(this.controls.target);
-      const amp = 12 * Math.min(1.5, Math.max(0.35, camDist / 1500));
+      const amp = 12 * Math.min(1.5, Math.max(0.35, camDist / 1500)) * (this.framedPrev ? 0.5 : 1);
       this.camera.position.set(
         basePos.x + Math.sin(elapsed * 0.47 + 1.3) * amp * 0.6 + Math.sin(elapsed * 0.94 + 4.1) * amp * 0.25,
         basePos.y + Math.sin(elapsed * 0.31 + 2.7) * amp * 0.5 + Math.sin(elapsed * 0.83 + 0.6) * amp * 0.3,

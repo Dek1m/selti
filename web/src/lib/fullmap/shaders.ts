@@ -158,8 +158,8 @@ void main() {
  * и лёгкий шифт оттенка по периметру («огонь дышит»).
  */
 export const CORONA_VERTEX = /* glsl */ `
-attribute mat4 instanceMatrix; // от InstancedMesh
-attribute vec3 instanceColor;
+// NB: instanceMatrix/instanceColor объявляет сам three (USE_INSTANCING
+// prefix для InstancedMesh) — свои объявления ломают компиляцию
 attribute float aInstSeed;
 
 uniform float uTime;
@@ -172,9 +172,8 @@ void main() {
   // масштаб инстанса (радиус сферы в юнитах) — из первой колонки матрицы
   float instScale = length(vec3(instanceMatrix[0][0], instanceMatrix[0][1], instanceMatrix[0][2]));
   vec4 mvCenter = modelViewMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
-  // billboard: квад в view-space вокруг центра, радиус короны = 2× сферы
-  // (в ЮНИТАХ — перспективно корректно: корона растёт с солнцем)
-  mvCenter.xy += position.xy * instScale * 2.0;
+  // billboard: квад в view-space, радиус короны = 2.2× радиуса сферы (юниты)
+  mvCenter.xy += position.xy * instScale * 2.2;
   vLayerColor = instanceColor;
   vSeed = aInstSeed;
   vQuad = position.xy;
@@ -192,18 +191,28 @@ varying float vSeed;
 varying vec2 vQuad;
 
 void main() {
-  float r = length(vQuad);          // 0..~1.41
   float ang = atan(vQuad.y, vQuad.x);
 
-  // радиальный градиент: плотно у сферы, спад к краю
-  float body = smoothstep(1.15, 0.42, r);
-  // «огонь дышит»: мерцание 0.3-0.6 Гц + шифт оттенка по периметру
-  float flicker = 0.78 + 0.22 * sin(uTime * 2.8 + vSeed * 6.2831 + ang * 2.0);
+  // рандомная форма: уникальные лепестки per-star (угловой шум радиуса)
+  float petalFreq = 3.0 + floor(fract(vSeed * 5.17) * 4.0) * 1.7;
+  float deform = 1.0
+    + 0.13 * sin(ang * petalFreq + vSeed * 6.2831)
+    + 0.07 * sin(ang * 7.3 - vSeed * 3.1);
+  float r = length(vQuad) / deform;
+
+  // СВЕЧЕНИЕ ВОКРУГ диска: кольцо с кромки сферы (сфера занимает r<0.45
+  // при короне 2.2×) + мягкая внешняя дымка
+  float ring = smoothstep(0.34, 0.60, r) * (1.0 - smoothstep(0.60, 0.96, r));
+  float outer = (1.0 - smoothstep(0.5, 1.02, r)) * 0.3;
+
+  // рандом per-star: интенсивность 0.5-1.0, мерцание 0.3-0.7 Гц
+  float intensity = 0.5 + fract(vSeed * 7.13) * 0.5;
+  float freq = 1.88 + fract(vSeed * 3.71) * 2.51;
+  float flicker = 0.75 + 0.25 * sin(uTime * freq + vSeed * 6.2831 + ang * 2.2);
   float hueShift = 0.5 + 0.5 * sin(uTime * 0.9 + ang * 3.0 + vSeed * 4.0);
   vec3 tint = mix(vLayerColor, vec3(1.0), 0.25 + 0.2 * hueShift);
 
-  float alpha = body * flicker * 0.55;
-  alpha *= smoothstep(0.05, 0.5, r); // дырка в центре: сфера сама даёт свет
+  float alpha = (ring * 0.8 + outer * 0.25) * intensity * flicker;
   gl_FragColor = vec4(tint * alpha, alpha);
 }
 `;
