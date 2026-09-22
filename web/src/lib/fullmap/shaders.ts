@@ -233,8 +233,10 @@ void main() {
   // в атмосфере) — тонкая чёткая линия цвета слоя с белым нагревом, alpha ~0.9.
   // max-композиция, а не сумма: кольцо видно всегда.
   vec3 ringTint = mix(vLayerColor, vec3(1.0), 0.55);
-  float ringAlpha = haloRing * 0.9 * intensity; // flicker на линии едва заметен
-  float glowAlpha = (atmo * 0.33 + outer * 0.08) * intensity * flicker; // приглушено ×1/3
+  // живое кольцо: лёгкий пульс 0.3-0.6 Гц по per-star freq — не статичная линия
+  float ringPulse = 0.62 + 0.28 * sin(uTime * freq * 0.7 + vSeed * 6.2831 + ang * 1.4);
+  float ringAlpha = haloRing * ringPulse * intensity;
+  float glowAlpha = (atmo * 0.55 + outer * 0.12) * intensity * flicker; // живая дымка
   float alpha = max(glowAlpha, ringAlpha);
   vec3 col = mix(tint, atmoTint, atmoRise);
   col = mix(col, ringTint, clamp(haloRing + ringAlpha * 0.5, 0.0, 1.0));
@@ -326,7 +328,7 @@ vec3 spin(vec3 p, float ang) {
 
 void main() {
   // вращающаяся турбулентная поверхность (плазма)
-  vec3 sp = spin(vObjPos * 2.2, uTime * 0.12 + vSeed * 6.2831);
+  vec3 sp = spin(vObjPos * 2.2, uTime * 0.35 + vSeed * 6.2831);
   float n = fbm(sp + vec3(uTime * 0.04));
   float n2 = fbm(sp * 3.1 - vec3(uTime * 0.06));
 
