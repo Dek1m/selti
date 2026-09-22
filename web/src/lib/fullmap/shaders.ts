@@ -129,9 +129,8 @@ void main() {
 }
 `;
 
-// ═══ БИСЕКТ (итерация мастера): все ленты — маленькие квадраты в центре
-// экрана. Валидирует: draw → вершины → фрустум. Старое тело — в
-// scripts/edge-vertex-backup.glsl (вернуть после диагностики).
+// ═══ Итоговое тело (канон LineSegments2): смещение в px → ndc → × w
+// своей вершины; вершины за камерой (w≤0) выбрасываются за клип.
 export const EDGE_VERTEX = /* glsl */ `
 attribute vec3 aOther;
 attribute vec3 aColor;
@@ -141,8 +140,8 @@ attribute float aEnd;
 attribute float aSide;
 attribute float aHighlight;
 
-uniform vec2 uViewport;
-uniform float uEdgeWidth;
+uniform vec2 uViewport;   // px
+uniform float uEdgeWidth; // полная толщина в px
 
 varying vec3 vColor;
 varying float vAlpha;
@@ -150,30 +149,39 @@ varying float vKind;
 varying float vEnd;
 varying float vPhase;
 
+const float FADE_START = 1100.0;
+// узлы выбираются до 2200 — лента с видимым концом доживает до дальнего
+const float FADE_END = 2400.0;
+
 void main() {
   vec4 clipA = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   vec4 clipB = projectionMatrix * modelViewMatrix * vec4(aOther, 1.0);
+  // разворот за камерой: лента с w≤0 выворачивается гигантской трапецией —
+  // выбрасываем целиком за клип
+  if (clipA.w <= 0.0 || clipB.w <= 0.0) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    vColor = vec3(0.0); vAlpha = 0.0; vKind = 0.0; vEnd = 0.0; vPhase = 0.0;
+    return;
+  }
   vec4 clipSelf = mix(clipA, clipB, aEnd);
   float dist = -mix(modelViewMatrix * vec4(position, 1.0), modelViewMatrix * vec4(aOther, 1.0), aEnd).z;
 
-  // screen-space perpendicular: ndc -> px -> back to ndc
-  vec2 ndcA = clipA.xy / max(clipA.w, 0.0001);
-  vec2 ndcB = clipB.xy / max(clipB.w, 0.0001);
+  vec2 ndcA = clipA.xy / clipA.w;
+  vec2 ndcB = clipB.xy / clipB.w;
   vec2 screenDir = ndcB - ndcA;
   screenDir.x *= uViewport.x * 0.5;
   screenDir.y *= uViewport.y * 0.5;
   float len = length(screenDir);
   vec2 perpPx = (len > 0.0001) ? vec2(-screenDir.y, screenDir.x) / len : vec2(1.0, 0.0);
-  vec2 ndcPerp = perpPx / vec2(uViewport.x * 0.5, uViewport.y * 0.5);
-  float halfWidth = uEdgeWidth * 0.5;
 
-  // ndc-offset до перспективного деления -> умножаем на w вершины
-  vec4 clip = clipSelf + vec4(ndcPerp * aSide * halfWidth * 2.0 * clipSelf.w, 0.0, 0.0);
+  // канон LineSegments2: per-vertex offset в px → ndc → × w этой вершины
+  vec2 ndcPerpPx = perpPx * aSide * (uEdgeWidth * 0.5);
+  vec4 clip = clipSelf + vec4((ndcPerpPx / (uViewport * 0.5)) * clipSelf.w, 0.0, 0.0);
 
-  // per-vertex fade: an edge is as strong as its fainter endpoint
   float fade = 1.0 - smoothstep(FADE_START, FADE_END, dist);
   float base = mix(0.75, 1.0, clamp((aWeight - 1.0) / 2.0, 0.0, 1.0));
   if (aKind > 1.5) base = 1.0;
+
   vAlpha = base * fade * (1.0 + aHighlight * 1.6);
   vPhase = dot(position, vec3(0.0137, 0.0171, 0.0113));
   vEnd = aEnd;

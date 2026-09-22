@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { selectLabeledNodes, type LabelCandidate } from "./lod";
-import { CONSTELLATION_LAYOUT, FULL_LAYOUT, ellipseLayout, hashUuid } from "./layout";
+import { FULL_LAYOUT, CONSTELLATION_LAYOUT, FULL_SPIRAL, ellipseLayout, spiralLayout, hashUuid } from "./layout";
 
 const candidate = (over: Partial<LabelCandidate>): LabelCandidate => ({
   index: 0,
@@ -105,5 +105,29 @@ describe("ellipseLayout — детерминированный 3D-объём", (
     expect(hashUuid("000e4e05-cbde-4e5a-aa08-cb2577bf1c15")).toBe(
       hashUuid("000e4e05-cbde-4e5a-aa08-cb2577bf1c15"),
     );
+  });
+});
+
+describe("spiralLayout — спираль full-карты", () => {
+  const uuids = Array.from({ length: 15_000 }, (_, i) => `${i.toString(16).padStart(8, "0")}-g`);
+
+  it("is deterministic and stays inside the spiral bounds", () => {
+    const a = spiralLayout(uuids, new Float32Array(uuids.length * 3), FULL_SPIRAL);
+    const b = spiralLayout(uuids, new Float32Array(uuids.length * 3), FULL_SPIRAL);
+    expect([...a]).toEqual([...b]);
+    for (let i = 0; i < uuids.length; i++) {
+      expect(Number.isNaN(a[i * 3])).toBe(false);
+      expect(Math.abs(a[i * 3 + 1])).toBeLessThanOrEqual(FULL_SPIRAL.thickness);
+      expect(Math.hypot(a[i * 3], a[i * 3 + 2])).toBeLessThan(FULL_SPIRAL.radius * 1.05);
+    }
+  });
+
+  it("reads as a spiral: most points far from center, none clumped at origin", () => {
+    const a = spiralLayout(uuids, new Float32Array(uuids.length * 3), FULL_SPIRAL);
+    let nearCenter = 0;
+    for (let i = 0; i < uuids.length; i++) {
+      if (Math.hypot(a[i * 3], a[i * 3 + 2]) < 60) nearCenter++;
+    }
+    expect(nearCenter).toBeLessThan(300); // 2% — не «каша в центре»
   });
 });

@@ -171,7 +171,7 @@ export function FullMapLayer({ mode = "full", constellationSnapshot = null, quer
         palette.namespaceRgb = packed.namespaces.map((uid) => nsToRgb(uid));
         indexByIdRef.current = buildUuidIndex(packed);
         scene.setPalette(palette);
-        scene.load(packed, CONSTELLATION_LAYOUT);
+        scene.load(packed, { kind: "ellipse", bounds: CONSTELLATION_LAYOUT });
         onStats({
           nodes: packed.nodeCount,
           edges: packed.edgeCount,

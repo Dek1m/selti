@@ -41,14 +41,30 @@ export function useUrlSync(): void {
 
   // Store → URL. Runs after the hydrate effect (declaration order), so the
   // immediate write already sees hydrated state and shared links stay put.
+  // Набор запроса синкается с debounce 400мс (§ сквозной поиск Поиск→Граф):
+  // replace не спамит историю, но и не дёргает URL на каждом keystroke.
   useEffect(() => {
+    let timer: number | undefined;
+    let first = true;
     const write = (state: FiltersSnapshot) => {
-      const nextStr = snapshotToParams(state);
-      if (nextStr !== window.location.search.slice(1)) {
-        setParams(nextStr ? new URLSearchParams(nextStr) : new URLSearchParams(), { replace: true });
+      const commit = () => {
+        const nextStr = snapshotToParams(state);
+        if (nextStr !== window.location.search.slice(1)) {
+          setParams(nextStr ? new URLSearchParams(nextStr) : new URLSearchParams(), { replace: true });
+        }
+      };
+      if (first) {
+        first = false;
+        commit();
+        return;
       }
+      window.clearTimeout(timer);
+      timer = window.setTimeout(commit, 400);
     };
     write(useFilters.getState());
-    return useFilters.subscribe(write);
+    return () => {
+      useFilters.subscribe(write)();
+      window.clearTimeout(timer);
+    };
   }, [setParams]);
 }

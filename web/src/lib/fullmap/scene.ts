@@ -18,7 +18,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { bfsLevels } from "./bfs";
 import { EDGE_VISIBLE_CAP, selectVisibleEdges, selectVisibleNodes } from "./edges";
 import { selectLabeledNodes, type LabelCandidate } from "./lod";
-import { ellipseLayout, type LayoutBounds, FULL_LAYOUT } from "./layout";
+import { ellipseLayout, spiralLayout, FULL_SPIRAL, type LayoutBounds } from "./layout";
 import { unpackNodeString } from "./pack";
 import { EDGE_FRAGMENT, EDGE_VERTEX, STAR_FRAGMENT, STAR_VERTEX } from "./shaders";
 import type { PackedCluster, PackedMapSnapshot } from "./types";
@@ -156,8 +156,16 @@ export class FullMapScene {
     }
 
     const parentChain = parents.join(" < ");
+    // позиционный буфер: первые два узла + NaN-скан (диагноз Мастера)
+    let nanCount = 0;
+    const npos = this.packed.nodePositions;
+    for (let i = 0; i < npos.length; i++) if (Number.isNaN(npos[i])) nanCount++;
+    const f3 = (i: number) =>
+      `[${npos[i * 3].toFixed(0)},${npos[i * 3 + 1].toFixed(0)},${npos[i * 3 + 2].toFixed(0)}]`;
+
     return [
       `build ${__BUILD_ID__}`,
+      `pos0=${f3(0)} pos1=${f3(1)} len=${npos.length} nan=${nanCount}`,
       `nodes ${this.nodeVisibleCount}/${this.packed.nodeCount}`,
       `edges cand/drawn/both ${this.lastEdgeStats.candidates}/${this.lastEdgeStats.drawn}/${this.lastEdgeStats.bothVisible}`,
       `edgeMesh visible=${this.fullEdges.visible} drawRange=${geo.drawRange.count} bs=${bs ? bs.radius.toFixed(0) : "null"} parent=${parentChain}`,
@@ -250,19 +258,41 @@ export class FullMapScene {
   }
 
   /** Build/replace the GPU buffers from a packed snapshot. */
-  load(packed: PackedMapSnapshot, bounds: LayoutBounds = FULL_LAYOUT): void {
+  load(packed: PackedMapSnapshot, layout: { kind: "spiral" | "ellipse"; bounds: LayoutBounds } = { kind: "spiral", bounds: FULL_SPIRAL }): void {
     this.disposeMap();
     this.packed = packed;
     this.levels = null;
     this.hoverIndex = null;
 
-    // разворот Мастера: клиентская детерминированная раскладка — компактный
-    // 3D-объём по хэшу uuid; серверные координаты full-снапшота игнорируем
+    // разворот Мастера: клиентская детерминированная раскладка — full =
+    // спираль («галактическая рука»), созвездие = компактный объём;
+    // серверные координаты full-снапшота игнорируем
     const uuids: string[] = [];
     for (let i = 0; i < packed.nodeCount; i++) {
       uuids.push(unpackNodeString(packed, i, 0));
     }
-    ellipseLayout(uuids, packed.nodePositions, bounds);
+    if (layout.kind === "spiral") {
+      spiralLayout(uuids, packed.nodePositions, { ...layout.bounds, gap: 40, spread: 15 });
+    } else {
+      ellipseLayout(uuids, packed.nodePositions, layout.bounds);
+    }
+    // центроиды кластеров (оболочки-туманности) — по НОВЫМ позициям
+    const accX = new Float64Array(packed.clusters.length);
+    const accY = new Float64Array(packed.clusters.length);
+    const accZ = new Float64Array(packed.clusters.length);
+    const accN = new Float64Array(packed.clusters.length);
+    for (let i = 0; i < packed.nodeCount; i++) {
+      const slot = packed.nodeMeta[i * 4 + 1] | 0;
+      if (slot < 0 || slot >= packed.clusters.length) continue;
+      accX[slot] += packed.nodePositions[i * 3];
+      accY[slot] += packed.nodePositions[i * 3 + 1];
+      accZ[slot] += packed.nodePositions[i * 3 + 2];
+      accN[slot] += 1;
+    }
+    for (const cluster of packed.clusters) {
+      const c = accN[cluster.index] || 1;
+      cluster.centroid = [accX[cluster.index] / c, accY[cluster.index] / c, accZ[cluster.index] / c];
+    }
 
     const n = packed.nodeCount;
     const colors = new Float32Array(n * 3);

@@ -98,3 +98,79 @@ export function ellipseLayout(uuids: string[], output: Float32Array, bounds: Lay
   }
   return output;
 }
+
+
+// ── Спиральная раскладка full-карты (разворот Мастера): Archimedean
+// spiral по XZ — «галактическая рука», точки вдоль каркаса с джиттером.
+// Детерминировано индексом (порядок снапшота стабилен) + хэшем uuid.
+
+export interface SpiralBounds {
+  /** внешний радиус спирали */
+  radius: number;
+  /** вертикальный шум ±thickness */
+  thickness: number;
+  /** межвиток (расстояние между витками) */
+  gap: number;
+  /** поперечный джиттер ±spread */
+  spread: number;
+}
+
+export const FULL_SPIRAL: SpiralBounds = { radius: 560, thickness: 40, gap: 40, spread: 15 };
+
+/**
+ * Спираль Архимеда r = r0 + b·θ: точки идут вдоль каркаса равномерно по
+ * дуге (шаг = длина спирали / N), поперечный и вертикальный джиттер — из
+ * хэша uuid. b = gap / 2π. Детерминировано индексом + uuid.
+ */
+export function spiralLayout(uuids: string[], output: Float32Array, bounds: SpiralBounds): Float32Array {
+  const r0 = 40;
+  const b = bounds.gap / (2 * Math.PI);
+  const rMax = bounds.radius;
+  const totalLength = (rMax * rMax - r0 * r0) / (2 * b);
+  const step = totalLength / Math.max(1, uuids.length);
+
+  let theta = 0;
+  let arc = 0;
+  const gauss = (h: number) => {
+    // грубая сумма хэш-дробей — устойчивый квази-гаусс
+    const a = (h & 0xffff) / 0x10000;
+    const b2 = (((h >>> 8) ^ (h >>> 16)) & 0xffff) / 0x10000; // маска 16 бит!
+    return (a + b2 - 1);
+  };
+
+  for (let i = 0; i < uuids.length; i++) {
+    const h = hashUuid(uuids[i]);
+    const r = r0 + b * theta;
+    if (arc + step > totalLength) {
+      // спираль кончилась — оставшиеся на внешнем кольце с джиттером
+      const ringAngle = (h & 0xffff) / 0x10000 * Math.PI * 2;
+      output[i * 3] = Math.cos(ringAngle) * rMax * (0.96 + 0.04 * (h2(h)));
+      output[i * 3 + 1] = (h3(h) - 0.5) * 2 * bounds.thickness;
+      output[i * 3 + 2] = Math.sin(ringAngle) * rMax * (0.96 + 0.04 * (h2(h)));
+      continue;
+    }
+    const sinT = Math.sin(theta);
+    const cosT = Math.cos(theta);
+    // поперечная нормаль спирали ≈ радиальное направление
+    const radial = bounds.spread * gauss(h);
+    const along = bounds.spread * 0.4 * gauss(h ^ 0x9e3779b9);
+    const x = cosT * (r + radial) - sinT * along;
+    const z = sinT * (r + radial) + cosT * along;
+    const y = (h3(h) - 0.5) * 2 * bounds.thickness;
+
+    output[i * 3] = x;
+    output[i * 3 + 1] = y;
+    output[i * 3 + 2] = z;
+
+    arc += step;
+    theta += step / Math.max(r, r0);
+  }
+  return output;
+}
+
+function h2(h: number): number {
+  return ((h >>> 4) & 0xffff) / 0x10000;
+}
+function h3(h: number): number {
+  return ((h >>> 8) ^ (h >>> 20)) / 0x1000000;
+}
