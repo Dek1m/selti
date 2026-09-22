@@ -185,6 +185,26 @@ class MemoryService:
         })
         return confirmed
 
+    async def _place_manual_position(
+        self, memory_id: str, position: dict | None
+    ) -> None:
+        """Ручные координаты map_layout (миграция 025): новая гранула или
+        подъём существующей звезды при дедуп-попадании (confirm/skip).
+
+        Best-effort по БД (гранула дороже позиции — store не роняем),
+        но не по аргументам: мусорный position — громкий ValueError,
+        молча терять координаты Мастера нельзя.
+        """
+        if position is None:
+            return
+        x, y, z = float(position["x"]), float(position["y"]), float(position["z"])
+        try:
+            await self.repository.map_layout_manual(memory_id, x, y, z)
+        except Exception:
+            logger.exception(
+                "store: manual position FAILED (non-fatal)", extra={"id": memory_id}
+            )
+
     async def store(
         self,
         content: str,
@@ -193,6 +213,7 @@ class MemoryService:
         namespace: str | None = None,
         importance: int | None = None,
         project_id: str | None = None,
+        position: dict | None = None,
     ) -> tuple[MemoryRecord, DedupAction]:
         namespace = namespace or "default"
         async with async_measure_duration(logger, "store", namespace=namespace, user_id=user_id):
@@ -223,6 +244,9 @@ class MemoryService:
                         reason=f"semantic:{decision.existing_score}",
                         action="skip",
                     )
+                    # Дедуп-попадание с position: Мастер двигает СУЩЕСТВУЮЩУЮ
+                    # звезду — координаты обновляются у найденной гранулы.
+                    await self._place_manual_position(record.id, position)
                     return confirmed, DedupAction.SKIP
 
                 if decision.action == DedupAction.UPDATE:
@@ -236,6 +260,9 @@ class MemoryService:
                         record, metadata, reason="exact", action="update"
                     )
                     await self._mark_context_dirty(confirmed.project_id)
+                    # Exact-дубль с position — тот же случай: координаты
+                    # едут на существующую гранулу, не на новую.
+                    await self._place_manual_position(record.id, position)
                     return confirmed, DedupAction.UPDATE
 
             if embedding is None:
@@ -270,6 +297,7 @@ class MemoryService:
                 except Exception:
                     logger.exception("store: linker enqueue FAILED (non-fatal)", extra={"id": memory_id})
 
+            await self._place_manual_position(memory_id, position)
             return record, DedupAction.INSERT
 
     async def search(

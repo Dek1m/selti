@@ -214,6 +214,27 @@ class PostgreSQLRepository:
             result = await conn.execute(q.BUMP_ACCESS_MEMORIES, memory_ids)
             return int(result.split()[-1])
 
+    async def map_layout_manual(
+        self, node_id: str, x: float, y: float, z: float
+    ) -> bool:
+        """Ручные координаты гранулы на 3D-карте (миграция 025, UPSERT).
+
+        Новая строка — rev=0 (вне поколений galactic: version-hash снапшота
+        не дёргается), существующая — только x/y/z + source/updated_at.
+        False = миграция 025 ещё не применена — координаты фича карты,
+        не ядра памяти: тихая деградация, store не ронять.
+        """
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(q.MAP_LAYOUT_MANUAL_UPSERT_SQL, node_id, x, y, z)
+            return True
+        except asyncpg.UndefinedColumnError:
+            logger.warning(
+                "map_layout_manual: column 'source' missing (migration 025 pending)",
+                extra={"node_id": node_id},
+            )
+            return False
+
     async def fetch_by_ids(
         self,
         ids: list[str],

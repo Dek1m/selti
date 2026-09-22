@@ -235,6 +235,16 @@ class MemoryRepository:
 
         return memory_ids
 
+    async def map_layout_manual(
+        self, node_id: str, x: float, y: float, z: float
+    ) -> bool:
+        """Ручные координаты на 3D-карте — делегат PG (миграция 025).
+
+        Векторов нет — Qdrant не участвует; bool = применено ли (025 pending
+        → False, тихая деградация).
+        """
+        return await self.pg.map_layout_manual(node_id, x, y, z)
+
     # ════════════════════════════════════════════════════════════
     # SEARCH
     # ════════════════════════════════════════════════════════════

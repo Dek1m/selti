@@ -441,15 +441,21 @@ class MapService:
         """Астрофизическая раскладка (спираль + балдж + гало) вместо DrL.
 
         force=False (beat): только гранулы без строки map_layout — правила
-        инкремента §4; размещённые строки не пересчитываются НИКОГДА.
+        инкремента §4; размещённые строки (включая ручные source='manual')
+        не пересчитываются НИКОГДА.
         force=True: полный побитово детерминированный пересев (перноудовые
-        RNG §3) — только ручной запуск по команде Мастера/Рэя. Снапшот и
-        API не меняются: rev в version-хэше сам инвалидирует ETag.
+        RNG §3) — только ручной запуск по команде Мастера/Рэя. Сносятся
+        лишь automatic-строки: manual-координаты перманентны (025). Снапшот
+        и API не меняются: rev в version-хэше сам инвалидирует ETag.
         """
         started = time.monotonic()
         async with self._pool.acquire() as conn:
             if not await conn.fetchval(q.MAP_LAYOUT_EXISTS_SQL):
                 return {"ok": False, "reason": "migration 024 pending"}
+            # Ручные координаты (025) перманентны: force сносит только
+            # автоматические строки. До 025 колонки source нет — manual
+            # позиций быть не может, честен старый TRUNCATE.
+            manual_guard = await conn.fetchval(q.MAP_LAYOUT_SOURCE_EXISTS_SQL)
             # ПЕРВОЙ фазой — дешёвые COUNTы: воркер жив, даже если корпус
             # перерос память-профиль таски (прод-OOM 20.09). Карта остаётся
             # на сфере; порог поднять после подтверждения прод-замеров.
@@ -513,15 +519,21 @@ class MapService:
                     "seconds": round(elapsed, 3)}
 
         # Расчёт вне транзакции (секунды eigh/релаксации не держат блокировки);
-        # TRUNCATE+INSERT атомарны, rev читается ДО сноса — поколение живёт
+        # снос+INSERT атомарны, rev читается ДО сноса — поколение живёт
         # через пересев. ON CONFLICT DO NOTHING: конкурент уже разместил —
-        # пропускаем, старые строки неприкосновенны.
+        # пропускаем, старые строки неприкосновенны. Force после 025 сносит
+        # только galactic-строки (DELETE): ручные координаты переживают
+        # пересев; INSERT прогона на них натыкается на конфликт → DO NOTHING.
         inserted, rev = 0, 0
         async with self._pool.acquire() as conn:
             async with conn.transaction():
                 rev = int(await conn.fetchval(q.MAP_LAYOUT_NEXT_REV_SQL))
                 if force:
-                    await conn.execute(q.MAP_LAYOUT_TRUNCATE_SQL)
+                    await conn.execute(
+                        q.MAP_LAYOUT_TRUNCATE_SQL
+                        if not manual_guard
+                        else q.MAP_LAYOUT_DELETE_NON_MANUAL_SQL
+                    )
                 for start in range(0, len(todo_indices), _LAYOUT_BATCH):
                     stop = start + _LAYOUT_BATCH
                     status = await conn.execute(

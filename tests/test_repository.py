@@ -487,6 +487,43 @@ class TestPgBatchOperations:
         conn.execute.assert_not_awaited()
 
 
+class TestMapLayoutManual:
+    """Ручные координаты 3D-карты (миграция 025): UPSERT-контракт и graceful
+
+    pending-025 (нет колонки source — тихая деградация, store не ронять).
+    """
+
+    @pytest.mark.asyncio
+    async def test_upsert_contract(self, repo, conn):
+        conn.execute = AsyncMock(return_value="INSERT 0 1")
+
+        ok = await repo.map_layout_manual(
+            "00000000-0000-0000-0000-000000000001", 120.5, -40.0, 7.0
+        )
+
+        assert ok is True
+        conn.execute.assert_awaited_once_with(
+            q.MAP_LAYOUT_MANUAL_UPSERT_SQL,
+            "00000000-0000-0000-0000-000000000001", 120.5, -40.0, 7.0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_migration_pending_degrades_quietly(self, repo, conn):
+        import asyncpg
+
+        conn.execute = AsyncMock(
+            side_effect=asyncpg.UndefinedColumnError(
+                'column "source" of relation "map_layout" does not exist'
+            )
+        )
+
+        ok = await repo.map_layout_manual(
+            "00000000-0000-0000-0000-000000000001", 1.0, 2.0, 3.0
+        )
+
+        assert ok is False
+
+
 class TestFetchByIdsSemantics:
     """Регрессия инверсии актив-фильтра FETCH_MEMORIES_BY_IDS (приёмка Фазы 1).
 

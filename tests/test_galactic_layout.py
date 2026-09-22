@@ -412,7 +412,7 @@ GAL_EDGES = [{"source_id": uid(0), "target_id": uid(1), "weight": 1.0}]
 
 
 def galaxy_pool(nodes, edges, old_rows=None, layout_exists=True, next_rev=9,
-                executed=None, scale_row=None):
+                executed=None, scale_row=None, source_exists=True):
     if executed is None:
         executed = []
     from tests.test_map_snapshot import version_row
@@ -434,6 +434,8 @@ def galaxy_pool(nodes, edges, old_rows=None, layout_exists=True, next_rev=9,
     async def fetchval(sql, *args):
         if sql is ms_q.MAP_LAYOUT_EXISTS_SQL:
             return layout_exists
+        if sql is ms_q.MAP_LAYOUT_SOURCE_EXISTS_SQL:
+            return source_exists
         if sql is ms_q.MAP_LAYOUT_NEXT_REV_SQL:
             return next_rev
         raise AssertionError(sql)
@@ -451,6 +453,8 @@ def galaxy_pool(nodes, edges, old_rows=None, layout_exists=True, next_rev=9,
         executed.append((sql, args))
         if sql is ms_q.MAP_LAYOUT_TRUNCATE_SQL:
             return "TRUNCATE TABLE"
+        if sql is ms_q.MAP_LAYOUT_DELETE_NON_MANUAL_SQL:
+            return "DELETE 2"
         if sql is ms_q.MAP_LAYOUT_INSERT_IGNORE_SQL:
             return f"INSERT 0 {len(args[0])}"
         raise AssertionError(sql)
@@ -488,7 +492,12 @@ def make_galaxy_service(pool, redis):
 
 class TestServiceLayoutGalaxy:
     @pytest.mark.asyncio
-    async def test_force_truncates_and_ignores_conflicts(self):
+    async def test_force_deletes_only_galactic_keeps_manual(self):
+        """Force-пересев после 025: DELETE source <> 'manual', НЕ TRUNCATE —
+
+        ручные координаты Мастера перманентны (переживают любой пересев);
+        INSERT прогона на manual-строки натыкается на ON CONFLICT DO NOTHING.
+        """
         from tests.test_map_snapshot import FakeRedis
 
         executed: list = []
@@ -501,7 +510,8 @@ class TestServiceLayoutGalaxy:
         assert result["ok"] is True and result["mode"] == "full"
         assert result["rev"] == 9
         sqls = [sql for sql, _ in executed]
-        assert ms_q.MAP_LAYOUT_TRUNCATE_SQL in sqls  # force сносит сферу (§3)
+        assert ms_q.MAP_LAYOUT_DELETE_NON_MANUAL_SQL in sqls  # manual жив
+        assert ms_q.MAP_LAYOUT_TRUNCATE_SQL not in sqls       # не тотальный снос
         inserts = [(sql, args) for sql, args in executed
                    if sql is ms_q.MAP_LAYOUT_INSERT_IGNORE_SQL]
         assert inserts and all(len(args) == 5 for _, args in inserts)
@@ -512,23 +522,47 @@ class TestServiceLayoutGalaxy:
         assert ms.LAYOUT_GRAPH_KEY.encode() in redis.data
 
     @pytest.mark.asyncio
-    async def test_increment_touches_only_new_nodes(self):
+    async def test_force_before_025_falls_back_to_truncate(self):
+        """025 pending (колонки source нет): manual-позиций не существует —
+
+        старый TRUNCATE честен, force работает без 025.
+        """
         from tests.test_map_snapshot import FakeRedis
 
         executed: list = []
-        old = [{"node_id": uid(0), "x": 1.0, "y": 2.0, "z": 3.0}]
         result = await make_galaxy_service(
-            galaxy_pool(GAL_NODES, GAL_EDGES, old_rows=old, executed=executed),
+            galaxy_pool(GAL_NODES, GAL_EDGES, executed=executed, source_exists=False),
+            FakeRedis(),
+        ).layout_galaxy(force=True)
+
+        assert result["ok"] is True
+        sqls = [sql for sql, _ in executed]
+        assert ms_q.MAP_LAYOUT_TRUNCATE_SQL in sqls
+        assert ms_q.MAP_LAYOUT_DELETE_NON_MANUAL_SQL not in sqls
+
+    @pytest.mark.asyncio
+    async def test_increment_never_touches_placed_rows(self):
+        """Инкремент (beat) manual-строку считает размещённой — координаты
+
+        из map_layout (любого source) не пересеиваются, только досев новых.
+        """
+        from tests.test_map_snapshot import FakeRedis
+
+        executed: list = []
+        manual = [{"node_id": uid(0), "x": 42.0, "y": -7.5, "z": 100.0}]
+        result = await make_galaxy_service(
+            galaxy_pool(GAL_NODES, GAL_EDGES, old_rows=manual, executed=executed),
             FakeRedis(),
         ).layout_galaxy()
 
         assert result["ok"] is True and result["mode"] == "incremental"
         sqls = [sql for sql, _ in executed]
-        assert ms_q.MAP_LAYOUT_TRUNCATE_SQL not in sqls  # старые неприкосновенны
+        assert ms_q.MAP_LAYOUT_TRUNCATE_SQL not in sqls
+        assert ms_q.MAP_LAYOUT_DELETE_NON_MANUAL_SQL not in sqls
         inserted_ids = [i for sql, args in executed
                         if sql is ms_q.MAP_LAYOUT_INSERT_IGNORE_SQL
                         for i in args[0]]
-        assert uid(0) not in inserted_ids            # размещённый не трогаем
+        assert uid(0) not in inserted_ids            # manual неприкосновенна
         assert set(inserted_ids) == {uid(1), uid(2)}  # только новые
 
     @pytest.mark.asyncio

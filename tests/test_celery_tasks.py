@@ -219,6 +219,29 @@ class TestStoreMemory:
         with pytest.raises(ValidationError):
             store_memory(content="   ", user_id="u1")
 
+    def test_position_passed_through_to_service(self, mock_memory_service):
+        """Координаты 3D-карты (025) доходят до service.store без потерь —
+
+        тул-слой уже отвалидировал, таска — чистый транспорт.
+        """
+        from memory_server.tasks.memory_tasks import store_memory
+
+        position = {"x": 120.5, "y": -40.0, "z": 7.0}
+        result = store_memory(
+            content="star position", user_id="u1", position=position
+        )
+
+        assert result["id"] == "mem-1"
+        mock_memory_service.store.assert_awaited_once_with(
+            content="star position",
+            user_id="u1",
+            metadata=None,
+            namespace=None,
+            importance=None,
+            project_id=None,
+            position=position,
+        )
+
 
 class TestGetMemory:
     def test_happy_path(self):

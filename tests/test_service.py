@@ -249,6 +249,140 @@ class TestStore:
         )
 
 
+class TestStoreManualPosition:
+    """Ручные координаты 3D-карты memory_store(position) — миграция 025.
+
+    Контракт: INSERT-путь сажает новую звезду; дедуп-пути (SKIP/UPDATE)
+    двигают СУЩЕСТВУЮЩУЮ; без position поведение прежнее; сбой записи БД
+    не роняет store (гранула дороже позиции); мусорный position — громко.
+    """
+
+    POSITION = {"x": 120.5, "y": -40.0, "z": 7}
+
+    @pytest.mark.asyncio
+    async def test_insert_path_places_new_star(self, service):
+        now = datetime.now(timezone.utc)
+        record = MemoryRecord(id="mem-new", user_id="u1", content="x",
+                              created_at=now, updated_at=now)
+        service.embedding.embed = AsyncMock(return_value=[0.1, 0.2, 0.3])
+        service.repository.insert = AsyncMock(return_value="mem-new")
+        service.repository.get_by_id = AsyncMock(return_value=record)
+        service.repository.map_layout_manual = AsyncMock(return_value=True)
+
+        result, action = await service.store(
+            content="x", user_id="u1", position=self.POSITION
+        )
+
+        assert action == DedupAction.INSERT and result.id == "mem-new"
+        service.repository.map_layout_manual.assert_awaited_once_with(
+            "mem-new", 120.5, -40.0, 7.0
+        )
+
+    @pytest.mark.asyncio
+    async def test_exact_dup_moves_existing_star(self, service):
+        """UPDATE-ветка (exact-hash): координаты едут на существующую гранулу —
+
+        Мастер двигает звезду повторным store того же факта с position.
+        """
+        now = datetime.now(timezone.utc)
+        existing = MemoryRecord(id="mem-old", user_id="u1", content="fact",
+                                created_at=now, updated_at=now, confidence=0.5)
+        decision = DedupDecision(
+            action=DedupAction.UPDATE, existing_id="mem-old",
+            content_hash=hashlib.sha256(b"fact").hexdigest(),
+            embedding=[0.9, 0.9, 0.9],
+        )
+        service.config = Settings(dedup_enabled=True, hybrid_search_enabled=False)
+        service.dedup.check = AsyncMock(return_value=decision)
+        service.repository.get_by_id = AsyncMock(return_value=existing)
+        service.repository.update = AsyncMock(
+            return_value=existing.model_copy(update={"confidence": 0.55})
+        )
+        service.repository.bump_access = AsyncMock(return_value=1)
+        service.repository.map_layout_manual = AsyncMock(return_value=True)
+
+        _, action = await service.store(
+            content="fact", user_id="u1", position=self.POSITION
+        )
+
+        assert action == DedupAction.UPDATE
+        service.repository.map_layout_manual.assert_awaited_once_with(
+            "mem-old", 120.5, -40.0, 7.0
+        )
+
+    @pytest.mark.asyncio
+    async def test_semantic_dup_moves_existing_star(self, service):
+        """SKIP-ветка (semantic): тот же контракт — существующая звезда едет."""
+        now = datetime.now(timezone.utc)
+        existing = MemoryRecord(id="mem-sem", user_id="u1", content="факт",
+                                created_at=now, updated_at=now, confidence=0.4)
+        decision = DedupDecision(
+            action=DedupAction.SKIP, existing_id="mem-sem",
+            content_hash=hashlib.sha256("иначе".encode()).hexdigest(),
+            existing_score=0.93,
+        )
+        service.config = Settings(dedup_enabled=True, hybrid_search_enabled=False)
+        service.dedup.check = AsyncMock(return_value=decision)
+        service.repository.get_by_id = AsyncMock(return_value=existing)
+        service.repository.update = AsyncMock(
+            return_value=existing.model_copy(update={"confidence": 0.46})
+        )
+        service.repository.bump_access = AsyncMock(return_value=1)
+        service.repository.map_layout_manual = AsyncMock(return_value=True)
+
+        _, action = await service.store(
+            content="факт по-другому", user_id="u1", position=self.POSITION
+        )
+
+        assert action == DedupAction.SKIP
+        service.repository.map_layout_manual.assert_awaited_once_with(
+            "mem-sem", 120.5, -40.0, 7.0
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_position_keeps_behavior(self, service):
+        now = datetime.now(timezone.utc)
+        record = MemoryRecord(id="mem-plain", user_id="u1", content="x",
+                              created_at=now, updated_at=now)
+        service.embedding.embed = AsyncMock(return_value=[0.1, 0.2, 0.3])
+        service.repository.insert = AsyncMock(return_value="mem-plain")
+        service.repository.get_by_id = AsyncMock(return_value=record)
+        service.repository.map_layout_manual = AsyncMock(return_value=True)
+
+        await service.store(content="x", user_id="u1")
+
+        service.repository.map_layout_manual.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_position_db_failure_non_fatal(self, service):
+        """Слой БД упал (не валидация) — гранула сохранена, store не роняем."""
+        now = datetime.now(timezone.utc)
+        record = MemoryRecord(id="mem-db", user_id="u1", content="x",
+                              created_at=now, updated_at=now)
+        service.embedding.embed = AsyncMock(return_value=[0.1, 0.2, 0.3])
+        service.repository.insert = AsyncMock(return_value="mem-db")
+        service.repository.get_by_id = AsyncMock(return_value=record)
+        service.repository.map_layout_manual = AsyncMock(
+            side_effect=RuntimeError("pool exhausted")
+        )
+
+        result, action = await service.store(
+            content="x", user_id="u1", position=self.POSITION
+        )
+
+        assert action == DedupAction.INSERT and result.id == "mem-db"
+
+    @pytest.mark.asyncio
+    async def test_position_garbage_raises_loud(self, service):
+        """Мусорный position мимо тул-валидации — ValueError, не тихая потеря
+
+        координат Мастера.
+        """
+        service.embedding.embed = AsyncMock(return_value=[0.1, 0.2, 0.3])
+        with pytest.raises((ValueError, KeyError, TypeError)):
+            await service.store(content="x", user_id="u1", position={"x": "abc"})
+
+
 class TestSearch:
     @pytest.mark.asyncio
     async def test_search_generates_query_embedding(self, service):

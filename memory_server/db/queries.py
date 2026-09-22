@@ -1211,6 +1211,13 @@ GALACTIC_NODES_SQL = """
 # расти и через пересев.
 MAP_LAYOUT_TRUNCATE_SQL = "TRUNCATE TABLE map_layout"
 
+# Force-пересев после 025: ручные координаты (source='manual') перманентны —
+# сносится только автоматика. DELETE вместо TRUNCATE: TRUNCATE не умеет
+# WHERE, а спасение manual-строк во временную таблицу — лишний round-trip
+# ради микроэкономии; DELETE по 15k строк — миллисекунды, зато одна
+# атомарная транзакция с последующим INSERT прогона.
+MAP_LAYOUT_DELETE_NON_MANUAL_SQL = "DELETE FROM map_layout WHERE source <> 'manual'"
+
 # Посадка новых (§4): конфликт = строку уже разместил кто-то другой —
 # пропускаем молча. Размещённые узлы не пересчитываются НИКОГДА.
 MAP_LAYOUT_INSERT_IGNORE_SQL = """
@@ -1218,4 +1225,28 @@ MAP_LAYOUT_INSERT_IGNORE_SQL = """
     SELECT u.node_id, u.x, u.y, u.z, $5::int
     FROM unnest($1::uuid[], $2::real[], $3::real[], $4::real[]) AS u(node_id, x, y, z)
     ON CONFLICT (node_id) DO NOTHING
+"""
+
+# ── Ручные координаты memory_store(position) — миграция 025 ──
+
+# Колонка source есть → 025 применена; паттерн MAP_LAYOUT_EXISTS_SQL
+# (graceful pending). pg_attribute вместо information_schema — без
+# permission-зависимого представления, одна строчка каталога.
+MAP_LAYOUT_SOURCE_EXISTS_SQL = """
+    SELECT count(*) > 0
+    FROM pg_attribute
+    WHERE attrelid = 'map_layout'::regclass
+      AND attname = 'source' AND NOT attisdropped
+"""
+
+# Ручная позиция (Мастер двигает звезду): UPSERT поверх любой строки —
+# новая гранула получает INSERT (rev=0, вне поколений: MAX(rev) снапшота
+# не дёргается), существующая — обновление координат без смены rev
+# (rev в SET не входит — поколение раскладки не трогаем).
+MAP_LAYOUT_MANUAL_UPSERT_SQL = """
+    INSERT INTO map_layout (node_id, x, y, z, rev, source)
+    VALUES ($1::uuid, $2::real, $3::real, $4::real, 0, 'manual')
+    ON CONFLICT (node_id) DO UPDATE SET
+        x = EXCLUDED.x, y = EXCLUDED.y, z = EXCLUDED.z,
+        source = 'manual', updated_at = now()
 """

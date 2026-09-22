@@ -65,8 +65,14 @@ def store_memory(
     namespace: str | None = None,
     importance: int | None = None,
     project_id: str | None = None,
+    position: dict | None = None,
 ) -> dict[str, Any]:
-    """Store a new memory record with deduplication."""
+    """Store a new memory record with deduplication.
+
+    position: ручные координаты 3D-карты {x, y, z} (миграция 025) —
+    валидированы тул-слоем; дедуп-попадание переносит их на существующую
+    гранулу (Мастер двигает существующую звезду).
+    """
     if not content or not content.strip():
         raise ValidationError("content cannot be empty")
     if not user_id or not user_id.strip():
@@ -81,6 +87,7 @@ def store_memory(
         namespace=namespace,
         importance=importance,
         project_id=project_id,
+        position=position,
     )
     result = record.model_dump(mode="json")
     result["_dedup_action"] = action.value

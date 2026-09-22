@@ -8,7 +8,13 @@ import json
 from typing import Any, get_args
 
 from fastmcp import Context
-from pydantic import TypeAdapter, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+)
 
 from memory_server.config import settings
 from memory_server.metrics import (
@@ -22,6 +28,42 @@ from memory_server.utils.metrics_decorator import tool_handler
 
 # Валидатор link_type без сборки полного RelationCreate
 _LINK_TYPE_ADAPTER = TypeAdapter(LinkType)
+
+
+# Ручные координаты 3D-карты memory_store(position): строгое число на
+# ось — bool/строки/NaN/inf и лишние ключи отбрасываются с понятной
+# ошибкой (Celery-путь дальше несёт чистый JSON-словарь).
+class MapPosition(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    x: float
+    y: float
+    z: float
+
+    @field_validator("x", "y", "z", mode="before")
+    @classmethod
+    def _number_strict(cls, value: Any) -> float:
+        # pydantic lax молча конвертит bool→1.0 — координата «истина»
+        # на карте недопустима; до конвертации отсекаем не-числа
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("must be a number (bool/strings are not coordinates)")
+        return value
+
+
+_POSITION_ADAPTER = TypeAdapter(MapPosition | None)
+
+
+def _validate_position(position) -> dict | None:
+    """position тулa → словарь для Celery; мусор → ValueError (422/INVALID_PARAMS)."""
+    if position is None:
+        return None
+    try:
+        parsed = _POSITION_ADAPTER.validate_python(position)
+    except ValidationError:
+        raise ValueError(
+            "position must be an object of three numbers: {x: float, y: float, z: float}"
+        ) from None
+    return parsed.model_dump()
 
 
 def _validate_link_type(link_type: str) -> None:
@@ -93,6 +135,7 @@ async def memory_store(
     namespace: str | None = None,
     importance: int | None = None,
     project_id: str | None = None,
+    position: dict | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Store a new memory record.
@@ -102,8 +145,12 @@ async def memory_store(
 
     project_id: optional project slug (e.g. 'akame') or UUID; binds the granule
     to the project registry. Omit for global (cross-project) knowledge.
+    position: optional manual 3D-map coordinates {x, y, z} — permanent,
+    survives every galactic layout reseed; on a dedup hit the coordinates
+    move the EXISTING granule's star. Invalid input (non-numeric) → 422.
     """
     metadata = _coerce_metadata(metadata)
+    position = _validate_position(position)
     return await celery_call(
         TASK_STORE,
         content=content,
@@ -112,6 +159,7 @@ async def memory_store(
         namespace=namespace,
         importance=importance,
         project_id=project_id,
+        position=position,
     )
 
 

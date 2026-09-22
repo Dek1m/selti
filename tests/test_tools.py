@@ -14,6 +14,7 @@ from memory_server.tools.memory_tools import (
     memory_find_similar,
     memory_ingest_batch,
     memory_stats,
+    memory_store,
 )
 
 
@@ -40,6 +41,60 @@ def mock_metrics():
             "search": search,
             "count": count,
         }
+
+
+# ---------------------------------------------------------------------------
+# memory_store: ручные координаты 3D-карты (миграция 025)
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryStorePosition:
+    @pytest.mark.asyncio
+    async def test_valid_position_sent_to_celery(self, mock_celery_call):
+        """position {x,y,z} → валидированный словарь в kwargs задачи."""
+        mock_celery_call.return_value = {"id": "mem-1", "_dedup_action": "insert"}
+
+        await memory_store(
+            content="star", user_id="u1",
+            position={"x": 120.5, "y": -40.0, "z": 7},
+        )
+
+        mock_celery_call.assert_awaited_once()
+        kwargs = mock_celery_call.call_args.kwargs
+        assert kwargs["position"] == {"x": 120.5, "y": -40.0, "z": 7.0}
+
+    @pytest.mark.asyncio
+    async def test_no_position_backward_compatible(self, mock_celery_call):
+        """Без position контракт прежний: position=None в kwargs."""
+        mock_celery_call.return_value = {"id": "mem-1", "_dedup_action": "insert"}
+
+        await memory_store(content="plain", user_id="u1")
+
+        kwargs = mock_celery_call.call_args.kwargs
+        assert kwargs["position"] is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            {"x": "abc", "y": 0, "z": 0},   # не число
+            {"x": True, "y": 0, "z": 0},    # bool — не координата
+            {"x": 1, "y": 2},               # недобор осей
+            {"x": 1, "y": 2, "z": 3, "w": 4},  # лишний ключ
+            {"x": float("nan"), "y": 0, "z": 0},  # NaN испортил бы карту
+            [1, 2, 3],                      # не объект
+            "12,-40,7",                     # строка вместо объекта
+        ],
+    )
+    async def test_invalid_position_rejected(self, mock_celery_call, bad):
+        """Мусорный position → ошибка валидации (tool_handler оборачивает в
+
+        RuntimeError; транспорт MCP: INVALID_PARAMS/422), задача не отправляется.
+        """
+        with pytest.raises(RuntimeError, match="position"):
+            await memory_store(content="star", user_id="u1", position=bad)
+
+        mock_celery_call.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
