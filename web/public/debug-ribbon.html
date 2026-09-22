@@ -81,39 +81,21 @@ const float FADE_END = 2400.0;
 void main() {
   vec4 clipA = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   vec4 clipB = projectionMatrix * modelViewMatrix * vec4(aOther, 1.0);
-  // разворот за камерой: лента с w≤0 выворачивается гигантской трапецией —
-  // выбрасываем целиком за клип
   if (clipA.w <= 0.0 || clipB.w <= 0.0) {
     gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
-    vColor = vec3(0.0); vAlpha = 0.0; vKind = 0.0; vEnd = 0.0; vPhase = 0.0;
+    vAlpha = 0.0;
     return;
   }
   vec4 clipSelf = mix(clipA, clipB, aEnd);
-  float dist = -mix(modelViewMatrix * vec4(position, 1.0), modelViewMatrix * vec4(aOther, 1.0), aEnd).z;
-
-  vec2 ndcA = clipA.xy / clipA.w;
-  vec2 ndcB = clipB.xy / clipB.w;
-  vec2 screenDir = ndcB - ndcA;
-  screenDir.x *= uViewport.x * 0.5;
-  screenDir.y *= uViewport.y * 0.5;
-  float len = length(screenDir);
-  vec2 perpPx = (len > 0.0001) ? vec2(-screenDir.y, screenDir.x) / len : vec2(1.0, 0.0);
-
-  // канон LineSegments2: per-vertex offset в px → ndc → × w этой вершины
-  vec2 ndcPerpPx = perpPx * aSide * (uEdgeWidth * 0.5);
-  vec4 clip = clipSelf + vec4((ndcPerpPx / (uViewport * 0.5)) * clipSelf.w, 0.0, 0.0);
-
-  float fade = 1.0 - smoothstep(FADE_START, FADE_END, dist);
-  float base = mix(0.75, 1.0, clamp((aWeight - 1.0) / 2.0, 0.0, 1.0));
-  if (aKind > 1.5) base = 1.0;
-
-  vAlpha = base * fade * (1.0 + aHighlight * 1.6);
-  vPhase = dot(position, vec3(0.0137, 0.0171, 0.0113));
-  vEnd = aEnd;
-  vKind = aKind;
+  // ВНУТРЕННИЙ БИСЕКТ: тривиальное вертикальное смещение ±1% экрана.
+  // NB: вариант с * clipSelf.w (как в ТЗ) даёт ndc = 0.02×w ≈ 20 при w=1000 —
+  // ленты за экраном, тест невалиден. Поэтому смещение в ndc БЕЗ ×w.
+  gl_Position = vec4(clipSelf.xy + vec2(0.0, aSide * 0.02), clipSelf.zw);
   vColor = aColor;
-
-  gl_Position = clip;
+  vAlpha = 1.0;
+  vKind = aKind;
+  vEnd = aEnd;
+  vPhase = 0.0;
 }
 `;
 
@@ -267,8 +249,26 @@ const report = () => {
   say(`edgeMesh visible=${mesh.visible} frustumCulled=${mesh.frustumCulled} bs=${bs ? bs.radius.toFixed(0) : "null"}`);
   say(`uViewport=(${material.uniforms.uViewport.value.x}x${material.uniforms.uViewport.value.y}) uEdgeWidth=${material.uniforms.uEdgeWidth.value}`);
   say(`vertex[0..5]=${[...geometry.getIndex().array.slice(0, 6)].join(",")}`);
-  const p0 = geometry.getAttribute("position");
-  say(`vertex0 pos=(${p0.getX(0).toFixed(0)},${p0.getY(0).toFixed(0)},${p0.getZ(0).toFixed(0)}) other=(${p0.getX(0) !== undefined ? "set" : "unset"})`);
+  // CPU-расчёт clip/NDC/side всех 4 вершин квада №0 (пп. 1 и 3)
+  camera.updateMatrixWorld();
+  const vp = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  const e = vp.elements;
+  const oAttr = geometry.getAttribute("aOther");
+  const sAttr = geometry.getAttribute("aSide");
+  const eAttr = geometry.getAttribute("aEnd");
+  const idx = [...geometry.getIndex().array.slice(0, 6)];
+  for (let c = 0; c < 4; c++) {
+    const v = idx[c] ?? -1;
+    const x = p0.getX(v), y = p0.getY(v), z = p0.getZ(v);
+    const cw = e[3]*x + e[7]*y + e[11]*z + e[15];
+    const cx = (e[0]*x + e[4]*y + e[8]*z + e[12]) / cw;
+    const cy = (e[1]*x + e[5]*y + e[9]*z + e[13]) / cw;
+    const bad = ![x, y, z, cw, cx, cy].every(Number.isFinite);
+    say(
+      `v${c}[i=${v}] clip=(${cx.toFixed(2)},${cy.toFixed(2)},w=${cw.toFixed(2)}) side=${sAttr ? sAttr.getX(v) : "?"} end=${eAttr ? eAttr.getX(v) : "?"} other=(${oAttr ? oAttr.getX(v).toFixed(0) : "?"},${oAttr ? oAttr.getY(v).toFixed(0) : "?"}) ${bad ? '<span class="bad">NaN/DEGENERATE</span>' : '<span class="good">ok</span>'}`,
+      bad ? "bad" : "",
+    );
+  }
   if (info.triangles > 0) say("RIBBONS RENDERED (tris>0) — если белых полос на экране нет, они растеризуются вне вьюпорта/NaN", "good");
   panel.innerHTML = `<b>debug-ribbon</b>\n${lines.join("\n")}`;
 };
