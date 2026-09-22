@@ -16,6 +16,7 @@ import re
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
+import numpy as np
 import pytest
 
 from memory_server.config import Settings
@@ -30,6 +31,8 @@ BELOW = "44444444-4444-4444-4444-444444444444"  # cos чуть ниже поро
 FAR = "77777777-7777-7777-7777-777777777777"    # ортогонален источнику, cos=0.0
 EDGE_STRONG = "55555555-5555-5555-5555-555555555555"
 EDGE_WEAK = "66666666-6666-6666-6666-666666666666"
+BOUND65 = "88888888-8888-8888-8888-888888888888"   # cos к источнику ровно 0.65
+UNDER65 = "99999999-9999-9999-9999-999999999999"   # cos 0.6499 — ниже порога 0.65
 
 _VEC_SRC = [1.0, 0.0]
 _VEC_NEAR = [0.8, 0.0]
@@ -38,6 +41,11 @@ _VEC_FAR = [0.0, 1.0]
 # float — граница порога проверяется с запасом ±1e-6 (не flaky на округлении)
 _VEC_ABOVE = [0.30 + 1e-6, math.sqrt(1.0 - (0.30 + 1e-6) ** 2)]
 _VEC_BELOW = [0.30 - 1e-6, math.sqrt(1.0 - (0.30 - 1e-6) ** 2)]
+# Граница вердикта Эны 0.65 — ТОЧНАЯ, без запаса: float64-косинус этого
+# вектора бит-в-бит равен литералу 0.65 (доказательство — в докстринге
+# test_threshold_065_boundary_inclusive_exact_passes_just_below_rejected)
+_VEC_BOUND65 = [0.65, math.sqrt(1.0 - 0.65 ** 2)]
+_VEC_UNDER65 = [0.6499, math.sqrt(1.0 - 0.6499 ** 2)]
 
 
 def gate_config(**overrides) -> Settings:
@@ -110,6 +118,57 @@ class TestGateAcceptance:
 
         assert outcome["fail_closed"] is False
         assert conn.fetchrow.await_args_list[0].args[2] == [ABOVE]
+
+    @pytest.mark.asyncio
+    async def test_threshold_065_boundary_inclusive_exact_passes_just_below_rejected(
+        self, mock_pool
+    ):
+        """Вердикт Эны (деплой 22.09): LINKER_L1C_GATE_MIN=0.65. Граница
+        ИНКЛЮЗИВНАЯ (>=): пара одной сессии с косинусом ровно 0.6500 →
+        ребро создаётся; 0.6499 → сосед отсеян гейтом (ребро не рождается,
+        в prune-кампании такие пары — кандидаты на смерть).
+
+        float-погрешность на границе ОТСУТСТВУЕТ (фактическое поведение,
+        проверено численно; сравнение — numpy float64, linker.py:352):
+        dot источника [1.0, 0.0] с [0.65, sqrt(0.5775)] даёт бит-в-бит
+        литерал float64(0.65), а норма соседа округляется ровно к 1.0 —
+        вычисленный косинус == gate, >= держится без ULP-виляний. У 0.6499
+        фактический косинус 0.6499000000000001: зазор ~1e-4 против ULP
+        ~1e-16 — отсев детерминирован. Оракул ниже фиксирует это в самом
+        тесте: если на другой платформе факт-косинус просел под gate,
+        assert оракула отличит float-сдвиг границы от бага сравнения.
+
+        Мост с косинусом 0.40 отдельно НЕ тестируем: иммунитет моста — не
+        граница, он исключён из prune-выборки ДО оценки косинуса — покрыт
+        test_bridges_immune_never_selected_for_prune ниже по файлу."""
+        conn = mock_pool.acquire.return_value.__aenter__.return_value
+        conn.fetch = AsyncMock(return_value=neighbors(BOUND65, UNDER65))
+        conn.fetchrow = AsyncMock(return_value={"created": 1, "reinforced": 0})
+        conn.execute = AsyncMock()
+        linker = make_linker(
+            mock_pool,
+            qdrant=gate_qdrant(
+                vectors={GID: _VEC_SRC, BOUND65: _VEC_BOUND65, UNDER65: _VEC_UNDER65}
+            ),
+            linker_l1c_gate_min=0.65,
+        )
+
+        # Оракул: фактический float64-косинус BOUND65 не ниже порога
+        gate = linker.config.linker_l1c_gate_min
+        src_arr = np.asarray(_VEC_SRC, dtype=np.float64)
+        arr = np.asarray(_VEC_BOUND65, dtype=np.float64)
+        actual = float(src_arr @ arr) / (
+            float(np.linalg.norm(src_arr)) * float(np.linalg.norm(arr))
+        )
+        assert actual == gate  # бит-в-бит граница (см. докстринг)
+
+        async with mock_pool.acquire() as c:
+            outcome = await linker._process_cooccurrence(c, GID, None, "ns", "s1")
+
+        assert outcome == {"created": 1, "reinforced": 0, "fail_closed": False}
+        # В INSERT уходит ТОЛЬКО граничный сосед; 0.6499 отсеян гейтом
+        assert conn.fetchrow.await_args_list[0].args[2] == [BOUND65]
+        assert conn.execute.await_args_list[0].args[0] == q.MARK_L1C_DONE
 
     @pytest.mark.asyncio
     async def test_gate_zero_off_all_neighbors_linked_without_qdrant(self, mock_pool):

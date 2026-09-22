@@ -746,6 +746,31 @@ class MemoryRepository:
     async def get_by_id(self, memory_id: str) -> MemoryRecord | None:
         return await self.pg.get_by_id(memory_id)
 
+    async def fetch_by_ids(
+        self,
+        ids: list[str],
+        include_historical: bool = False,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+        status: str | None = None,
+        entity_type: str | None = None,
+    ) -> list[dict]:
+        """Batch-карточки по IDs — делегат PG (прод-баг d64ce48: service звал
+        его на фасаде, которого не было — AttributeError на activation-пути).
+
+        Прямой прокси pg_repository.fetch_by_ids: activation search/traverse
+        читают сырые row-словари (проекция _MEMORY_COLUMNS), конвертация в
+        MemoryRecord не нужна. Qdrant не участвует — метаданные целиком в PG.
+        """
+        return await self.pg.fetch_by_ids(
+            ids,
+            include_historical=include_historical,
+            created_after=created_after,
+            created_before=created_before,
+            status=status,
+            entity_type=entity_type,
+        )
+
     async def find_by_entity_name(self, entity_name: str) -> MemoryRecord | None:
         return await self.pg.find_by_entity_name(entity_name)
 
