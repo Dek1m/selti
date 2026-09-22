@@ -443,7 +443,7 @@ coronaMesh.frustumCulled = false;
 coronaMesh.renderOrder = 5;
 scene.add(coronaMesh);
 
-const sunColor = new THREE.Color(1.0, 0.76, 0.37); // янтарь infrastructure
+const sunColor = new THREE.Color(0xffffff); // тест различимости: белый шар
 const m4 = new THREE.Matrix4();
 let sunTime = 0;
 function updateSun(dt) {
@@ -474,6 +474,15 @@ const report = () => {
   say(`edgeMesh visible=${mesh.visible} frustumCulled=${mesh.frustumCulled} bs=${bs ? bs.radius.toFixed(0) : "null"}`);
   say(`uViewport=(${material.uniforms.uViewport.value.x}x${material.uniforms.uViewport.value.y}) uEdgeWidth=${material.uniforms.uEdgeWidth.value}`);
   say(`vertex[0..5]=${[...geometry.getIndex().array.slice(0, 6)].join(",")}`);
+  // sun-статы: count/цвет/матрица + программы
+  const m = coronaMesh.matrixWorld.elements;
+  say(`sun.count=${sunMesh.count} corona.count=${coronaMesh.count} hasColor=${!!sunMesh.instanceColor} matrixPos=(${m[12].toFixed(0)},${m[13].toFixed(0)},${m[14].toFixed(0)})`);
+  say("sunColor: БЕЛЫЙ (тест различимости на тёмном)", "good");
+  const programs = (renderer.info.programs || []).map((pr) =>
+    pr.diagnostics ? "PROGRAM " + pr.name + ": " + JSON.stringify(pr.diagnostics).slice(0, 200) : "ok",
+  );
+  say("programs: " + (programs.length ? programs.join(" | ") : "none"), programs.some((t) => t !== "ok") ? "bad" : "");
+
   // CPU-расчёт clip/NDC/side всех 4 вершин квада №0 (пп. 1 и 3)
   camera.updateMatrixWorld();
   const vp = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
@@ -497,6 +506,8 @@ const report = () => {
   }
   if (info.triangles > 0) say("RIBBONS RENDERED (tris>0) — если белых полос на экране нет, они растеризуются вне вьюпорта/NaN", "good");
   panel.innerHTML = `<b>debug-ribbon</b>\n${lines.join("\n")}`;
+  const shot = renderer.domElement.toDataURL("image/png");
+  say(`<img src="${shot}" style="width:100%;border:1px solid #38bdf8">`, "");
 };
 
 report();
