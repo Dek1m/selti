@@ -14,13 +14,14 @@ attribute vec3 aColor;       // namespace spectrum
 attribute float aFlags;      // bit0 = frozen, bit1 = погасшая (созвездие)
 attribute float aBfs;        // BFS level from selection (-1 = no selection)
 attribute float aHighlight;  // search segment: 0 none, 1 cluster member, 2 hit
+attribute float aPhase;      // per-star twinkle phase (hash uuid)
 
 uniform float uPixelRatio;
 uniform float uSizeScale;
 uniform float uTime;
 uniform float uTwinkle;      // 0 when prefers-reduced-motion
 uniform float uDepthCap;     // M4: кап уровней BFS (99 = бесконечность)
-uniform float uFocusBlur;    // 1 = стеклянный расфокус невыбранных (фидбек)
+uniform float uFocusBlur;    // 1 = стеклянный расфокус невыбранных
 
 varying vec3 vColor;
 varying float vGlow;
@@ -31,22 +32,29 @@ varying float vDimmed;
 varying float vHighlight;
 varying float vFade;
 varying float vTwinklePhase;
-varying float vBlur;         // 1 = спрайт рендерится как размытое пятно
+varying float vTwinkleAmp;
+varying float vTwinkleFreq;
+varying float vBlur;
+varying float vSunCross;     // кроссфейд Points → 3D-солнце вблизи
 
 const float FADE_START = 1500.0;
-const float FADE_END = 3200.0;
+const float FADE_END = 3200.0; // == VIEW_SPHERE_R (стык сферы видимости)
 
 void main() {
   vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
   float dist = -mvPosition.z;
 
-  // эталон EVE: мелкие отчётливые точки, читаются сквозь линии
+  // эталон EVE: мелкие отчётливые точки; магнификация ×4 вплотную (60..400)
   float sizePx = (4.5 + aSize * 1.9) * uSizeScale * uPixelRatio;
+  float mag = mix(1.0, 4.0, 1.0 - smoothstep(60.0, 400.0, dist));
+  sizePx *= mag;
 
   float fade = 1.0 - smoothstep(FADE_START, FADE_END, dist);
-  vFade = pow(fade, 1.4); // мягче квадрата — дальний край живёт
+  vFade = pow(fade, 1.4);
 
-  // glass curve (§4.2) + M4: уровни глубже капа растворяются
+  // кроссфейд с объёмным солнцем: точка тает ближе 250, на 120 уступает сферу
+  vSunCross = smoothstep(120.0, 250.0, dist);
+
   float level = aBfs;
   float glass = (level < 0.0) ? 1.0 : mix(0.95, 0.12, smoothstep(0.0, 6.0, level));
   if (level == 0.0) glass = 1.0;
@@ -61,25 +69,23 @@ void main() {
   float highlightBoost = (aHighlight >= 2.0) ? 1.7 : (aHighlight >= 1.0) ? 1.3 : 1.0;
   sizePx *= highlightBoost;
 
-  // стеклянный расфокус: невыбранные звёзды — увеличенный спрайт без ядра
-  // (спрайтовый blur, ноль дополнительного GPU)
-  float blur = (uFocusBlur > 0.5 && level >= 1.0) ? 1.0 : 0.0;
-  sizePx *= mix(1.0, 2.2, blur);
-  vBlur = blur;
-
-  // importance glow — сила ореола, та же семья что и 2D starGlow()
-  float glow = (aSize <= 0.0) ? 0.3 : 0.2 + clamp((aSize - 1.0) / 4.0, 0.0, 1.0) * 0.8;
-  vGlow = glow * highlightBoost;
-
   vFrozen = step(0.5, mod(aFlags, 2.0));
   vDimmed = step(1.5, mod(floor(aFlags / 2.0), 2.0));
 
-  vTwinklePhase = fract(sin(dot(position.xy, vec2(12.9898, 78.233))) * 43758.5453);
+  // перемигивание (фидбек Мастера): заметная амплитуда ±35%, 0.5-1.5 Гц,
+  // фаза/частота уникальны per-star; выбранная не мигает; reduced-motion off
+  vTwinklePhase = fract(sin(dot(position.xy, vec2(12.9898, 78.233))) * 43758.5453) + aPhase;
+  vTwinkleFreq = 3.14 + fract(aPhase * 0.1591549) * 6.2831; // 0.5-1.5 Гц
+  vTwinkleAmp = uTwinkle * 0.35 * step(0.5, level);
 
-  gl_PointSize = clamp(sizePx, 3.0 * uPixelRatio, 64.0 * uPixelRatio);
+  vBlur = (uFocusBlur > 0.5 && level >= 1.0) ? 1.0 : 0.0;
+
+  gl_PointSize = clamp(sizePx, 3.0 * uPixelRatio, 128.0 * uPixelRatio);
   gl_Position = projectionMatrix * mvPosition;
 
   vColor = aColor;
+  float glow = (aSize <= 0.0) ? 0.3 : 0.2 + clamp((aSize - 1.0) / 4.0, 0.0, 1.0) * 0.8;
+  vGlow = glow * highlightBoost;
 }
 `;
 
@@ -87,11 +93,8 @@ export const STAR_FRAGMENT = /* glsl */ `
 precision highp float;
 
 uniform float uTime;
-uniform float uTwinkle;
 uniform vec3 uFogColor;
 uniform vec3 uIceColor;
-
-varying float vBlur;         // 1 = расфокус: ядро исчезает, только пятно
 
 varying vec3 vColor;
 varying float vGlow;
@@ -102,20 +105,22 @@ varying float vDimmed;
 varying float vHighlight;
 varying float vFade;
 varying float vTwinklePhase;
+varying float vTwinkleAmp;
+varying float vTwinkleFreq;
+varying float vBlur;
+varying float vSunCross;
 
 void main() {
   vec2 uv = gl_PointCoord * 2.0 - 1.0;
   float dist = length(uv);
   if (dist > 1.0) discard;
 
-  float twinkle = 1.0 - uTwinkle * 0.24 * (0.5 + 0.5 * sin(uTime * 1.7 + vTwinklePhase * 6.2831));
-
   float luma = dot(vColor, vec3(0.2126, 0.7152, 0.0722));
   vec3 color = mix(vColor, vec3(luma), vDesat);
   color = mix(color, uIceColor, vFrozen * 0.55);
 
   // эталон EVE: чёткое яркое ядро ~55% диаметра + ЛЁГКИЙ маленький ореол;
-  // при расфокусе ядро исчезает — остаётся мягкое пятно (vBlur)
+  // при расфокусе ядро исчезает — остаётся мягкое пятно
   float coreR = 0.55;
   float core = 1.0 - smoothstep(coreR * 0.86, coreR * 1.04, dist);
   float hot = 1.0 - smoothstep(0.0, coreR * 0.6, dist);
@@ -124,22 +129,126 @@ void main() {
 
   float haloT = clamp((dist - coreR) / (1.0 - coreR), 0.0, 1.0);
   float halo = pow(1.0 - haloT, 1.8) * min(vGlow, 1.0);
-  halo = mix(halo, halo * 1.15 + 0.06, vBlur); // пятно чуть плотнее в расфокусе
+  halo = mix(halo, halo * 1.15 + 0.06, vBlur);
 
   float alpha = max(core, halo * mix(0.6, 0.75, vBlur));
   float rim = (vHighlight >= 2.0) ? (1.0 - smoothstep(0.55, 1.0, dist)) * 0.35 : 0.0;
   alpha = max(alpha, rim);
-  // погасшие гранулы созвездия: тлеющий контур вместо полноценной звезды
-  float ember = vDimmed * (1.0 - smoothstep(0.3, 1.0, dist)) * 0.28;
-  alpha = mix(alpha, ember, vDimmed * 0.75);
-  color = mix(color, vec3(luma), vDimmed * 0.6);
 
-  alpha *= vGlass * vFade * twinkle;
+  // заметное перемигивание фоновых звёзд (±35% альфы), выбранная не мигает
+  alpha *= 1.0 + vTwinkleAmp * sin(uTime * vTwinkleFreq + vTwinklePhase);
+
+  alpha *= vGlass * vFade;
+  // кроссфейд с 3D-солнцем вблизи
+  alpha *= vSunCross;
 
   vec3 fogged = mix(color, uFogColor, (1.0 - vFade) * 0.6);
   gl_FragColor = vec4(mix(coreColor, fogged, haloT) * alpha, alpha);
 }
 `;
 
-// ═══ Итоговое тело (канон LineSegments2): смещение в px → ndc → × w
-// своей вершины; вершины за камерой (w≤0) выбрасываются за клип.
+/**
+ * 3D-солнце (головная фича): InstancedMesh-сфера с fbm-плазмой.
+ * Палитра — из per-instance цвета слоя (dark/bright производятся тут),
+ * вращение поверхности по uTime + per-instance seed, лимб-свечение
+ * и кроссфейд с Points по дистанции камеры (появляется ближе 250).
+ */
+export const SUN_VERTEX = /* glsl */ `
+attribute mat4 instanceMatrix; // от InstancedMesh
+attribute vec3 instanceColor;  // цвет слоя (three связывает автоматически)
+attribute float aInstSeed;
+
+varying vec3 vObjPos;
+varying vec3 vNormal;
+varying vec3 vLayerColor;
+varying float vSeed;
+varying float vAlpha;
+
+void main() {
+  vec4 world = instanceMatrix * vec4(position, 1.0);
+  vec4 mv = modelViewMatrix * world;
+  float dist = length(mv.xyz);
+  // кроссфейд: полная видимость ближе ~130, ноль на 250+ (Points берут своё)
+  vAlpha = smoothstep(130.0, 250.0, dist);
+  vObjPos = position;
+  vNormal = normalize(mat3(instanceMatrix) * normal);
+  vLayerColor = instanceColor;
+  vSeed = aInstSeed;
+  gl_Position = projectionMatrix * mv;
+}
+`;
+
+export const SUN_FRAGMENT = /* glsl */ `
+precision highp float;
+
+uniform float uTime;
+
+varying vec3 vObjPos;
+varying vec3 vNormal;
+varying vec3 vLayerColor;
+varying float vSeed;
+varying float vAlpha;
+
+float hash13(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.zyx + 31.32);
+  return fract((p.x + p.y) * p.z);
+}
+
+float vnoise(vec3 p) {
+  vec3 i = floor(p);
+  vec3 f = fract(p);
+  vec3 u = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(mix(hash13(i), hash13(i + vec3(1.0, 0.0, 0.0)), u.x),
+        mix(hash13(i + vec3(0.0, 1.0, 0.0)), hash13(i + vec3(1.0, 1.0, 0.0)), u.x), u.y),
+    mix(mix(hash13(i + vec3(0.0, 0.0, 1.0)), hash13(i + vec3(1.0, 0.0, 1.0)), u.x),
+        mix(hash13(i + vec3(0.0, 1.0, 1.0)), hash13(i + vec3(1.0, 1.0, 1.0)), u.x), u.y),
+    u.z);
+}
+
+float fbm(vec3 p) {
+  float v = 0.0;
+  float a = 0.5;
+  for (int i = 0; i < 4; i++) {
+    v += a * vnoise(p);
+    p = p * 2.1 + vec3(11.7);
+    a *= 0.5;
+  }
+  return v;
+}
+
+// медленное вращение поверхности вокруг Y (по uTime + seed)
+vec3 spin(vec3 p, float ang) {
+  float c = cos(ang);
+  float s = sin(ang);
+  return vec3(c * p.x + s * p.z, p.y, -s * p.x + c * p.z);
+}
+
+void main() {
+  // вращающаяся турбулентная поверхность (плазма)
+  vec3 sp = spin(vObjPos * 2.2, uTime * 0.12 + vSeed * 6.2831);
+  float n = fbm(sp + vec3(uTime * 0.04));
+  float n2 = fbm(sp * 3.1 - vec3(uTime * 0.06));
+
+  vec3 dark = vLayerColor * 0.22;
+  vec3 mid = vLayerColor;
+  vec3 bright = mix(vLayerColor, vec3(1.0), 0.62);
+
+  vec3 surface = mix(dark, mid, smoothstep(0.28, 0.55, n));
+  surface = mix(surface, bright, smoothstep(0.55, 0.85, n));
+  // яркие прожилки плазмы
+  surface += bright * pow(max(0.0, n2 - 0.45), 2.0) * 2.4;
+
+  vec3 N = normalize(vNormal);
+  vec3 V = vec3(0.0, 0.0, 1.0); // к камере в view-space
+  float facing = max(dot(N, V), 0.0);
+  // лимб-свечение: край солнца ярче центра (как на эталоне)
+  float limb = pow(1.0 - facing, 2.0);
+  surface += bright * limb * 0.85;
+  // лёгкая тень центра для объёма
+  surface *= 0.55 + 0.45 * facing;
+
+  gl_FragColor = vec4(surface, vAlpha);
+}
+`;

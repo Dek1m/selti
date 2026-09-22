@@ -18,9 +18,9 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { bfsLevels } from "./bfs";
 import { EDGE_VISIBLE_CAP, selectVisibleEdges, selectVisibleNodes } from "./edges";
 import { selectLabeledNodes, type LabelCandidate } from "./lod";
-import { ellipseLayout, mixedLayout, FULL_VOLUME, type LayoutBounds, type VolumeBounds } from "./layout";
+import { ellipseLayout, mixedLayout, FULL_VOLUME, hashUuid, type LayoutBounds, type VolumeBounds } from "./layout";
 import { unpackNodeString } from "./pack";
-import { STAR_FRAGMENT, STAR_VERTEX } from "./shaders";
+import { STAR_FRAGMENT, STAR_VERTEX, SUN_FRAGMENT, SUN_VERTEX } from "./shaders";
 import type { PackedCluster, PackedMapSnapshot } from "./types";
 
 const CLICK_SLOP_PX = 5;
@@ -338,10 +338,16 @@ export class FullMapScene {
     geometry.setAttribute("aColor", new THREE.BufferAttribute(colors, 3));
     geometry.setAttribute("aSize", new THREE.BufferAttribute(sizes, 1));
     geometry.setAttribute("aFlags", new THREE.BufferAttribute(flags, 1));
+    // per-star twinkle phase из хэша uuid (фидбек Мастера: уникальная фаза)
+    const phases = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      phases[i] = (hashUuid(uuids[i]) >>> 8) / 0x1000000 * 6.2831;
+    }
     this.bfsAttr = new THREE.BufferAttribute(bfs, 1);
     this.highlightAttr = new THREE.BufferAttribute(highlight, 1);
     geometry.setAttribute("aBfs", this.bfsAttr);
     geometry.setAttribute("aHighlight", this.highlightAttr);
+    geometry.setAttribute("aPhase", new THREE.BufferAttribute(phases, 1));
     // viewport-culled draw set (фидбек 1): Points рисует только индексы,
     // отобранные rebuildVisibleNodes — скрытые узлы не рендерятся вовсе
     this.nodeIndexArray = new Uint32Array(n);
@@ -355,6 +361,7 @@ export class FullMapScene {
     this.scene.add(this.fullPoints);
 
     this.buildEdgeLines();
+    this.buildSuns();
     this.rebuildClusterRadii(packed);
     this.rebuildVisibleNodes(performance.now(), true);
     this.cullEdges(null);
@@ -366,6 +373,76 @@ export class FullMapScene {
 
   /** importance per node, кешируется при load — selectVisibleEdges читает её */
   private edgeImportance: Float32Array | null = null;
+
+  /** InstancedMesh сфер-солнц: 40 инстансов, палитра из цвета слоя. */
+  private buildSuns(): void {
+    const SUN_CAP = 40;
+    const geometry = new THREE.SphereGeometry(1, 20, 14);
+    const seed = new THREE.InstancedBufferAttribute(new Float32Array(SUN_CAP), 1);
+    geometry.setAttribute("aInstSeed", seed);
+    const material = new THREE.ShaderMaterial({
+      vertexShader: SUN_VERTEX,
+      fragmentShader: SUN_FRAGMENT,
+      uniforms: { uTime: { value: 0 } },
+      transparent: true,
+      depthWrite: true,
+    });
+    this.suns = new THREE.InstancedMesh(geometry, material, SUN_CAP);
+    this.suns.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.suns.count = 0;
+    this.suns.frustumCulled = false;
+    this.sunsSeed = seed;
+    this.scene.add(this.suns);
+  }
+
+  private sunsSeed: THREE.InstancedBufferAttribute | null = null;
+
+  /** Сборка близких звёзд (дист < SUN_RANGE) в инстансы солнц. */
+  private updateSuns(now: number): void {
+    if (!this.suns || !this.packed || !this.sunsSeed) return;
+    if (now - this.lastSunUpdate < 120) return;
+    this.lastSunUpdate = now;
+
+    const positions = this.packed.nodePositions;
+    const meta = this.packed.nodeMeta;
+    const nsRgb = this.palette?.namespaceRgb ?? [];
+    const cam = this.camera.position;
+    const sunRangeSq = 250 * 250;
+
+    const matrix = new THREE.Matrix4();
+    const color = new THREE.Color();
+    let used = 0;
+
+    for (let k = 0; k < this.nodeVisibleCount && used < 40; k++) {
+      const i = this.nodeIndexArray ? this.nodeIndexArray[k] : -1;
+      if (i < 0) continue;
+      const dx = positions[i * 3] - cam.x;
+      const dy = positions[i * 3 + 1] - cam.y;
+      const dz = positions[i * 3 + 2] - cam.z;
+      const distSq = dx * dx + dy * dy + dz * dz;
+      if (distSq > sunRangeSq) continue;
+
+      const dist = Math.sqrt(distSq);
+      const sizePx = (4.5 + meta[i * 4 + 2] * 1.9) * this.renderer.getPixelRatio();
+      const scale = Math.min(6, Math.max(1.5, (sizePx * dist) / 1276));
+
+      matrix.makeScale(scale, scale, scale);
+      matrix.setPosition(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
+      this.suns.setMatrixAt(used, matrix);
+
+      const nsIdx = meta[i * 4] | 0;
+      const rgb = nsRgb[nsIdx] ?? [0.54, 0.59, 0.67];
+      color.setRGB(rgb[0], rgb[1], rgb[2]);
+      this.suns.setColorAt(used, color);
+      this.sunsSeed.setX(used, (hashUuid(`${i}`) >>> 12) / 0x1000000);
+      used++;
+    }
+
+    this.suns.count = used;
+    this.suns.instanceMatrix.needsUpdate = true;
+    this.sunsSeed.needsUpdate = true;
+    if (this.suns.instanceColor) this.suns.instanceColor.needsUpdate = true;
+  }
 
   /** Радиусы кластеров для оболочек-туманностей (по числу членов). */
   private rebuildClusterRadii(packed: PackedMapSnapshot): void {
@@ -454,6 +531,8 @@ export class FullMapScene {
     }
   }
 
+  private suns: THREE.InstancedMesh | null = null;
+  private lastSunUpdate = 0;
   private mainEdges: THREE.LineSegments | null = null;
   private supersedesEdges: THREE.LineSegments | null = null;
   private contradictsEdges: THREE.LineSegments | null = null;
@@ -1032,15 +1111,14 @@ export class FullMapScene {
     this.stepFly(now);
     this.controls.update();
 
-    // время: twinkle звёзд + пульс contradicts
-    for (const points of [this.fullPoints]) {
-      const material = points?.material as THREE.ShaderMaterial | undefined;
-      if (material) material.uniforms.uTime.value = elapsed;
-    }
-    for (const edges of [this.fullEdges]) {
-      const material = edges?.material as THREE.ShaderMaterial | undefined;
-      if (material) material.uniforms.uTime.value = elapsed;
-    }
+    // время: twinkle звёзд + анимация плазмы солнц
+    const starMaterial = this.fullPoints?.material as THREE.ShaderMaterial | undefined;
+    if (starMaterial) starMaterial.uniforms.uTime.value = elapsed;
+    const sunMaterial = this.suns?.material as THREE.ShaderMaterial | undefined;
+    if (sunMaterial) sunMaterial.uniforms.uTime.value = elapsed;
+
+    // 3D-солнца: близкие звёзды (<250 юнитов) — InstancedMesh, throttle 120мс
+    this.updateSuns(now);
 
     if (this.pointerDirty) {
       this.pointerDirty = false;
@@ -1061,7 +1139,28 @@ export class FullMapScene {
 
     this.cullEdges(now);
     this.refreshLabels(now);
+
+    // камера-левитация (фидбек Мастера): медленный псевдослучайный дрейф —
+    // 3 синусоиды 0.05-0.15 Гц по диагональным осям, амплитуда ~10-14 юнитов
+    // (масштаб от дистанции до таргета). Аддитивный оффсет к position ПЕРЕД
+    // render, база восстанавливается после — OrbitControls не ломается,
+    // во время fly-to дрейф приостановлен, reduced-motion — off.
+    const basePos = this.camera.position.clone();
+    if (!this.reducedMotion && !this.flyAnimation && !this.framedPrev) {
+      const camDist = this.camera.position.distanceTo(this.controls.target);
+      const amp = 12 * Math.min(1.5, Math.max(0.35, camDist / 1500));
+      this.camera.position.set(
+        basePos.x + Math.sin(elapsed * 0.47 + 1.3) * amp * 0.6 + Math.sin(elapsed * 0.94 + 4.1) * amp * 0.25,
+        basePos.y + Math.sin(elapsed * 0.31 + 2.7) * amp * 0.5 + Math.sin(elapsed * 0.83 + 0.6) * amp * 0.3,
+        basePos.z + Math.cos(elapsed * 0.41 + 0.9) * amp * 0.6 + Math.sin(elapsed * 0.74 + 3.3) * amp * 0.25,
+      );
+      this.camera.updateMatrixWorld();
+    }
+
     this.renderer.render(this.scene, this.camera);
+
+    // вернуть базовую позицию, чтобы OrbitControls/дрейф не накапливались
+    this.camera.position.copy(basePos);
   }
 
   private resize(): void {
@@ -1085,12 +1184,13 @@ export class FullMapScene {
   }
 
   private disposeMap(): void {
-    for (const object of [this.fullPoints, this.mainEdges, this.supersedesEdges, this.contradictsEdges]) {
+    for (const object of [this.fullPoints, this.suns, this.mainEdges, this.supersedesEdges, this.contradictsEdges]) {
       if (!object) continue;
       this.scene.remove(object);
       object.geometry.dispose();
       (object.material as THREE.Material).dispose();
     }
+    this.suns = null;
     this.fullPoints = null;
     this.fullEdges = null;
     this.mainEdges = null;
