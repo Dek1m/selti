@@ -34,6 +34,13 @@ const LABEL_COOLDOWN_MS = 140;
  * fill-rate глоу под контролем — рисуем только фрустум + margin, максимум
  * NODE_VISIBLE_CAP одновременно, приоритет «ярче/ближе важнее».
  */
+/**
+ * Сфера видимости (формализация Мастера): всё за этим радиусом от камеры
+ * выгружается из draw-range. Бесшовность гарантируется тем, что fade
+ * звёзд достигает нуля ровно на этой дистанции (FADE_END шейдера = 3200).
+ */
+export const VIEW_SPHERE_R = 3200;
+
 const NODE_VISIBLE_CAP = 280;
 const NODE_CULL_COOLDOWN_MS = 150;
 /** NDC margin around the viewport before a star leaves the draw set. */
@@ -474,6 +481,10 @@ export class FullMapScene {
     if (!this.packed) return;
     if (!this.bfsAttr) return;
     this.cameraDirty = true; // выбор пробивается сквозь visible-cap
+    // стеклянный расфокус (фидбек Мастера): невыбранные — размытые пятна
+    const starMaterial = this.fullPoints?.material as THREE.ShaderMaterial | undefined;
+    if (starMaterial) starMaterial.uniforms.uFocusBlur.value = index === null ? 0 : 1;
+    this.setEdgeDimmed(index !== null);
     const attr = this.bfsAttr;
     const array = attr.array as Float32Array;
     if (index === null) {
@@ -579,7 +590,7 @@ export class FullMapScene {
 
   private flyAnimation: { fromPos: THREE.Vector3; toPos: THREE.Vector3; fromTarget: THREE.Vector3; toTarget: THREE.Vector3; start: number; duration: number } | null = null;
 
-  private flyTo(position: THREE.Vector3, target: THREE.Vector3): void {
+  private flyTo(position: THREE.Vector3, target: THREE.Vector3, duration = 650): void {
     if (this.reducedMotion) {
       this.camera.position.copy(position);
       this.controls.target.copy(target);
@@ -592,7 +603,7 @@ export class FullMapScene {
       fromTarget: this.controls.target.clone(),
       toTarget: target.clone(),
       start: performance.now(),
-      duration: 650,
+      duration,
     };
   }
 
@@ -688,10 +699,65 @@ export class FullMapScene {
 
   private emitClick(): void {
     const picked = this.pick();
-    this.callbacks.onSelect(picked === null ? null : { index: picked });
+    if (picked === null) {
+      // повторный клик в пустоту: отлёт на прежнюю рамку (если был подлёт)
+      if (this.framedPrev) {
+        const prev = this.framedPrev;
+        this.framedPrev = null;
+        this.flyTo(prev.pos, prev.target, 800);
+      }
+      this.callbacks.onSelect(null);
+      return;
+    }
+    // до-позиция запоминается один раз — до снятия выбора
+    if (!this.framedPrev) {
+      this.framedPrev = { pos: this.camera.position.clone(), target: this.controls.target.clone() };
+    }
+    this.flyToStar(picked);
+    this.callbacks.onSelect({ index: picked });
   }
 
+  /**
+   * Космический подлёт «вплотную»: камера останавливается в 50 юнитах от
+   * звезды со своей текущей стороны, звезда — центр-слева (панель справа
+   * не перекрывает). Плавная интерполяция позиции и таргета, 900 мс.
+   */
+  private flyToStar(index: number): void {
+    if (!this.packed) return;
+    const star = new THREE.Vector3(
+      this.packed.nodePositions[index * 3],
+      this.packed.nodePositions[index * 3 + 1],
+      this.packed.nodePositions[index * 3 + 2],
+    );
+    const stopDist = 50;
+    const dir = this.camera.position.clone().sub(star);
+    if (dir.lengthSq() < 1e-6) dir.set(0, 0.3, 1);
+    dir.normalize();
+
+    const camPos = star.clone().add(dir.multiplyScalar(stopDist));
+    // звезда центр-слева: таргет смещаем вправо по экрану на ~15% ширины кадра
+    const viewDir = star.clone().sub(camPos).normalize();
+    const right = new THREE.Vector3().crossVectors(viewDir, new THREE.Vector3(0, 1, 0)).normalize();
+    const halfWidth = stopDist * Math.tan((this.camera.fov * Math.PI) / 360) * this.camera.aspect;
+    const target = star.clone().add(right.multiplyScalar(halfWidth * 0.3));
+
+    this.flyTo(camPos, target, 900);
+  }
+
+  private framedPrev: { pos: THREE.Vector3; target: THREE.Vector3 } | null = null;
+
   private depthCap = Number.POSITIVE_INFINITY;
+
+  /** Связи при выделенной звезде — ×0.3 прозрачности (расфокус сцены). */
+  private setEdgeDimmed(dimmed: boolean): void {
+    const k = dimmed ? 0.3 : 1;
+    for (const mesh of [this.mainEdges, this.supersedesEdges, this.contradictsEdges]) {
+      const material = mesh?.material as THREE.LineBasicMaterial | undefined;
+      if (!material) continue;
+      const base = mesh === this.mainEdges ? 0.22 : mesh === this.supersedesEdges ? 0.6 : 0.75;
+      material.opacity = base * k;
+    }
+  }
 
   /**
    * M4: слайдер глубины 1-6/∞. Кап уровней BFS от выбранной звезды:
@@ -737,7 +803,7 @@ export class FullMapScene {
     const levels = this.levels;
     const highlight = this.highlightAttr ? (this.highlightAttr.array as Float32Array) : null;
     const margin = NODE_CULL_MARGIN;
-    const maxDistSq = 3000 * 3000;
+    const maxDistSq = VIEW_SPHERE_R * VIEW_SPHERE_R; // сфера видимости
 
     const candIdx: number[] = (this.candIdx ||= []);
     const candScore: number[] = (this.candScore ||= []);

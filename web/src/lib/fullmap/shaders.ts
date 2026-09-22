@@ -20,6 +20,7 @@ uniform float uSizeScale;
 uniform float uTime;
 uniform float uTwinkle;      // 0 when prefers-reduced-motion
 uniform float uDepthCap;     // M4: кап уровней BFS (99 = бесконечность)
+uniform float uFocusBlur;    // 1 = стеклянный расфокус невыбранных (фидбек)
 
 varying vec3 vColor;
 varying float vGlow;
@@ -30,6 +31,7 @@ varying float vDimmed;
 varying float vHighlight;
 varying float vFade;
 varying float vTwinklePhase;
+varying float vBlur;         // 1 = спрайт рендерится как размытое пятно
 
 const float FADE_START = 1500.0;
 const float FADE_END = 3200.0;
@@ -59,6 +61,12 @@ void main() {
   float highlightBoost = (aHighlight >= 2.0) ? 1.7 : (aHighlight >= 1.0) ? 1.3 : 1.0;
   sizePx *= highlightBoost;
 
+  // стеклянный расфокус: невыбранные звёзды — увеличенный спрайт без ядра
+  // (спрайтовый blur, ноль дополнительного GPU)
+  float blur = (uFocusBlur > 0.5 && level >= 1.0) ? 1.0 : 0.0;
+  sizePx *= mix(1.0, 2.2, blur);
+  vBlur = blur;
+
   // importance glow — сила ореола, та же семья что и 2D starGlow()
   float glow = (aSize <= 0.0) ? 0.3 : 0.2 + clamp((aSize - 1.0) / 4.0, 0.0, 1.0) * 0.8;
   vGlow = glow * highlightBoost;
@@ -83,6 +91,8 @@ uniform float uTwinkle;
 uniform vec3 uFogColor;
 uniform vec3 uIceColor;
 
+varying float vBlur;         // 1 = расфокус: ядро исчезает, только пятно
+
 varying vec3 vColor;
 varying float vGlow;
 varying float vGlass;
@@ -104,16 +114,19 @@ void main() {
   vec3 color = mix(vColor, vec3(luma), vDesat);
   color = mix(color, uIceColor, vFrozen * 0.55);
 
-  // эталон EVE: чёткое яркое ядро ~55% диаметра + ЛЁГКИЙ маленький ореол
+  // эталон EVE: чёткое яркое ядро ~55% диаметра + ЛЁГКИЙ маленький ореол;
+  // при расфокусе ядро исчезает — остаётся мягкое пятно (vBlur)
   float coreR = 0.55;
   float core = 1.0 - smoothstep(coreR * 0.86, coreR * 1.04, dist);
   float hot = 1.0 - smoothstep(0.0, coreR * 0.6, dist);
   vec3 coreColor = mix(color, vec3(1.0), 0.3 * hot);
+  core *= 1.0 - vBlur * 0.92;
 
   float haloT = clamp((dist - coreR) / (1.0 - coreR), 0.0, 1.0);
   float halo = pow(1.0 - haloT, 1.8) * min(vGlow, 1.0);
+  halo = mix(halo, halo * 1.15 + 0.06, vBlur); // пятно чуть плотнее в расфокусе
 
-  float alpha = max(core, halo * 0.6);
+  float alpha = max(core, halo * mix(0.6, 0.75, vBlur));
   float rim = (vHighlight >= 2.0) ? (1.0 - smoothstep(0.55, 1.0, dist)) * 0.35 : 0.0;
   alpha = max(alpha, rim);
   // погасшие гранулы созвездия: тлеющий контур вместо полноценной звезды
