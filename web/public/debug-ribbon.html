@@ -147,7 +147,7 @@ void main() {
 }
 `;
 const CORONA_VERTEX = `
-attribute mat4 instanceMatrix; // от InstancedMesh
+// instanceMatrix/instanceColor префиксует three.js для InstancedMesh — НЕ объявлять (redefinition)
 attribute float aInstSeed;
 
 uniform float uTime;
