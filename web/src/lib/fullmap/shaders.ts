@@ -131,7 +131,7 @@ void main() {
   float halo = pow(1.0 - haloT, 1.8) * min(vGlow, 1.0);
   halo = mix(halo, halo * 1.15 + 0.06, vBlur);
 
-  float alpha = max(core, halo * mix(0.6, 0.75, vBlur));
+  float alpha = max(core, halo * mix(0.85, 0.7, vBlur));
   float rim = (vHighlight >= 2.0) ? (1.0 - smoothstep(0.55, 1.0, dist)) * 0.35 : 0.0;
   alpha = max(alpha, rim);
 
@@ -143,7 +143,7 @@ void main() {
   alpha *= vSunCross;
 
   // тонкий hue-перелив ореола (только вне ядра — «не рэйв»)
-  float hueW = (0.10 + 0.10 * sin(uTime * 0.8 + vTwinklePhase)) * haloT;
+  float hueW = (0.15 + 0.15 * sin(uTime * 0.8 + vTwinklePhase)) * haloT;
   vec3 shifted = vec3(color.b, color.r, color.g);
   color = mix(color, shifted, hueW);
 
@@ -169,10 +169,12 @@ varying float vSeed;
 varying vec2 vQuad;
 
 void main() {
-  vec4 center = instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
-  vec4 mvCenter = modelViewMatrix * center;
-  // billboard: квад в view-space вокруг центра, ×2 радиуса сферы
-  mvCenter.xy += position.xy * 2.0;
+  // масштаб инстанса (радиус сферы в юнитах) — из первой колонки матрицы
+  float instScale = length(vec3(instanceMatrix[0][0], instanceMatrix[0][1], instanceMatrix[0][2]));
+  vec4 mvCenter = modelViewMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+  // billboard: квад в view-space вокруг центра, радиус короны = 2× сферы
+  // (в ЮНИТАХ — перспективно корректно: корона растёт с солнцем)
+  mvCenter.xy += position.xy * instScale * 2.0;
   vLayerColor = instanceColor;
   vSeed = aInstSeed;
   vQuad = position.xy;
@@ -201,6 +203,7 @@ void main() {
   vec3 tint = mix(vLayerColor, vec3(1.0), 0.25 + 0.2 * hueShift);
 
   float alpha = body * flicker * 0.55;
+  alpha *= smoothstep(0.05, 0.5, r); // дырка в центре: сфера сама даёт свет
   gl_FragColor = vec4(tint * alpha, alpha);
 }
 `;

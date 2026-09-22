@@ -255,6 +255,66 @@ VERTS.forEach((v, e) => { dotPos.set([...v.a], e * 6); dotPos.set([...v.b], e * 
 dotGeo.setAttribute("position", new THREE.BufferAttribute(dotPos, 3));
 scene.add(new THREE.Points(dotGeo, new THREE.PointsMaterial({ color: 0x5fe8c8, size: 10, sizeAttenuation: false, depthTest: false })));
 
+// ── солнце + корона (текущий конвейер scene.ts) ──
+const SUN_CAP = 1;
+const sunGeo = new THREE.SphereGeometry(1, 20, 14);
+const sunSeed = new THREE.InstancedBufferAttribute(new Float32Array(SUN_CAP), 1);
+sunGeo.setAttribute("aInstSeed", sunSeed);
+const sunMat = new THREE.ShaderMaterial({
+  vertexShader: SUN_VERTEX,
+  fragmentShader: SUN_FRAGMENT,
+  uniforms: { uTime: { value: 0 } },
+  transparent: true,
+  depthWrite: true,
+});
+const sunMesh = new THREE.InstancedMesh(sunGeo, sunMat, SUN_CAP);
+sunMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+sunMesh.count = 0;
+sunMesh.frustumCulled = false;
+scene.add(sunMesh);
+
+const coronaGeo = new THREE.PlaneGeometry(2, 2);
+coronaGeo.setAttribute("aInstSeed", sunSeed);
+const coronaMat = new THREE.ShaderMaterial({
+  vertexShader: CORONA_VERTEX,
+  fragmentShader: CORONA_FRAGMENT,
+  uniforms: { uTime: { value: 0 } },
+  transparent: true,
+  depthWrite: false,
+  depthTest: false,
+  side: THREE.DoubleSide,
+  blending: THREE.AdditiveBlending,
+});
+const coronaMesh = new THREE.InstancedMesh(coronaGeo, coronaMat, SUN_CAP);
+coronaMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+coronaMesh.count = 0;
+coronaMesh.frustumCulled = false;
+coronaMesh.renderOrder = 5;
+scene.add(coronaMesh);
+
+const sunColor = new THREE.Color(1.0, 0.76, 0.37); // янтарь infrastructure
+const m4 = new THREE.Matrix4();
+let sunTime = 0;
+function updateSun(dt) {
+  sunTime += dt;
+  const scale = 12.0; // юниты (дист ~190 → диск ~80px)
+  m4.makeScale(scale, scale, scale);
+  m4.setPosition(-30, 500, 800); // дист ~190 от камеры (0,620,950)
+  sunMesh.setMatrixAt(0, m4);
+  coronaMesh.setMatrixAt(0, m4);
+  sunMesh.setColorAt(0, sunColor);
+  coronaMesh.setColorAt(0, sunColor);
+  sunSeed.setX(0, 0.42);
+  sunMesh.count = 1;
+  coronaMesh.count = 1;
+  sunMesh.instanceMatrix.needsUpdate = true;
+  coronaMesh.instanceMatrix.needsUpdate = true;
+  if (sunMesh.instanceColor) sunMesh.instanceColor.needsUpdate = true;
+  if (coronaMesh.instanceColor) coronaMesh.instanceColor.needsUpdate = true;
+  sunMat.uniforms.uTime.value = sunTime;
+  coronaMat.uniforms.uTime.value = sunTime;
+}
+
 const report = () => {
   const info = renderer.info.render;
   const bs = geometry.boundingSphere;
@@ -292,7 +352,8 @@ report();
 let frames = 0;
 renderer.setAnimationLoop(() => {
   material.uniforms.uTime.value += 0.016;
-  scene.rotation.y += 0.003; // вращение: ленты проходят любые ориентации
+  scene.rotation.y += 0.003;
+  updateSun(0.016);
   renderer.render(scene, camera);
   frames++;
   if (frames === 10 || frames % 120 === 0) report();
@@ -307,6 +368,157 @@ addEventListener("resize", () => {
 } catch (e) { // ==== конец try ====
   panel.innerHTML = '<span class="bad">ERROR: ' + ((e && e.stack) || e) + '</span>';
 }
+
+const SUN_VERTEX = `
+// NB: instanceMatrix/instanceColor объявляет сам three (USE_INSTANCING
+// prefix для InstancedMesh) — свои объявления ломают компиляцию
+attribute float aInstSeed;
+
+uniform float uTime; // пульс масштаба («солнце дышит»)
+
+varying vec3 vObjPos;
+varying vec3 vNormal;
+varying vec3 vLayerColor;
+varying float vSeed;
+varying float vAlpha;
+
+void main() {
+  // ПРИГОВОР: vAlpha инвертирована — полная вблизи (подлёт в 50 юнитов),
+  // плавное растворение к 250, где Points уже берут своё
+  vec4 local = vec4(position * (1.0 + 0.04 * sin(uTime * 1.3 + aInstSeed * 6.2831)), 1.0);
+  vec4 world = instanceMatrix * local;
+  vec4 mv = modelViewMatrix * world;
+  float dist = length(mv.xyz);
+  vAlpha = 1.0 - smoothstep(130.0, 250.0, dist);
+  vObjPos = position;
+  vNormal = normalize(mat3(instanceMatrix) * normal);
+  vLayerColor = instanceColor;
+  vSeed = aInstSeed;
+  gl_Position = projectionMatrix * mv;
+}
+`;
+const SUN_FRAGMENT = `
+precision highp float;
+
+uniform float uTime;
+
+varying vec3 vObjPos;
+varying vec3 vNormal;
+varying vec3 vLayerColor;
+varying float vSeed;
+varying float vAlpha;
+
+float hash13(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.zyx + 31.32);
+  return fract((p.x + p.y) * p.z);
+}
+
+float vnoise(vec3 p) {
+  vec3 i = floor(p);
+  vec3 f = fract(p);
+  vec3 u = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(mix(hash13(i), hash13(i + vec3(1.0, 0.0, 0.0)), u.x),
+        mix(hash13(i + vec3(0.0, 1.0, 0.0)), hash13(i + vec3(1.0, 1.0, 0.0)), u.x), u.y),
+    mix(mix(hash13(i + vec3(0.0, 0.0, 1.0)), hash13(i + vec3(1.0, 0.0, 1.0)), u.x),
+        mix(hash13(i + vec3(0.0, 1.0, 1.0)), hash13(i + vec3(1.0, 1.0, 1.0)), u.x), u.y),
+    u.z);
+}
+
+float fbm(vec3 p) {
+  float v = 0.0;
+  float a = 0.5;
+  for (int i = 0; i < 4; i++) {
+    v += a * vnoise(p);
+    p = p * 2.1 + vec3(11.7);
+    a *= 0.5;
+  }
+  return v;
+}
+
+// медленное вращение поверхности вокруг Y (по uTime + seed)
+vec3 spin(vec3 p, float ang) {
+  float c = cos(ang);
+  float s = sin(ang);
+  return vec3(c * p.x + s * p.z, p.y, -s * p.x + c * p.z);
+}
+
+void main() {
+  // вращающаяся турбулентная поверхность (плазма)
+  vec3 sp = spin(vObjPos * 2.2, uTime * 0.12 + vSeed * 6.2831);
+  float n = fbm(sp + vec3(uTime * 0.04));
+  float n2 = fbm(sp * 3.1 - vec3(uTime * 0.06));
+
+  vec3 dark = vLayerColor * 0.22;
+  vec3 mid = vLayerColor;
+  vec3 bright = mix(vLayerColor, vec3(1.0), 0.62);
+
+  vec3 surface = mix(dark, mid, smoothstep(0.28, 0.55, n));
+  surface = mix(surface, bright, smoothstep(0.55, 0.85, n));
+  // яркие прожилки плазмы
+  surface += bright * pow(max(0.0, n2 - 0.45), 2.0) * 2.4;
+
+  vec3 N = normalize(vNormal);
+  vec3 V = vec3(0.0, 0.0, 1.0); // к камере в view-space
+  float facing = max(dot(N, V), 0.0);
+  // лимб-свечение: край солнца ярче центра (как на эталоне)
+  float limb = pow(1.0 - facing, 2.0);
+  surface += bright * limb * 0.85;
+  // лёгкая тень центра для объёма
+  surface *= 0.55 + 0.45 * facing;
+
+  gl_FragColor = vec4(surface, vAlpha);
+}
+`;
+const CORONA_VERTEX = `
+attribute mat4 instanceMatrix; // от InstancedMesh
+attribute vec3 instanceColor;
+attribute float aInstSeed;
+
+uniform float uTime;
+
+varying vec3 vLayerColor;
+varying float vSeed;
+varying vec2 vQuad;
+
+void main() {
+  // масштаб инстанса (радиус сферы в юнитах) — из первой колонки матрицы
+  float instScale = length(vec3(instanceMatrix[0][0], instanceMatrix[0][1], instanceMatrix[0][2]));
+  vec4 mvCenter = modelViewMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+  // billboard: квад в view-space вокруг центра, радиус короны = 2× сферы
+  // (в ЮНИТАХ — перспективно корректно: корона растёт с солнцем)
+  mvCenter.xy += position.xy * instScale * 2.0;
+  vLayerColor = instanceColor;
+  vSeed = aInstSeed;
+  vQuad = position.xy;
+  gl_Position = projectionMatrix * mvCenter;
+}
+`;
+const CORONA_FRAGMENT = `
+precision highp float;
+
+uniform float uTime;
+
+varying vec3 vLayerColor;
+varying float vSeed;
+varying vec2 vQuad;
+
+void main() {
+  float r = length(vQuad);          // 0..~1.41
+  float ang = atan(vQuad.y, vQuad.x);
+
+  // радиальный градиент: плотно у сферы, спад к краю
+  float body = smoothstep(1.15, 0.42, r);
+  // «огонь дышит»: мерцание 0.3-0.6 Гц + шифт оттенка по периметру
+  float flicker = 0.78 + 0.22 * sin(uTime * 2.8 + vSeed * 6.2831 + ang * 2.0);
+  float hueShift = 0.5 + 0.5 * sin(uTime * 0.9 + ang * 3.0 + vSeed * 4.0);
+  vec3 tint = mix(vLayerColor, vec3(1.0), 0.25 + 0.2 * hueShift);
+
+  float alpha = body * flicker * 0.55;
+  gl_FragColor = vec4(tint * alpha, alpha);
+}
+`;
 </script>
 </body>
 </html>
