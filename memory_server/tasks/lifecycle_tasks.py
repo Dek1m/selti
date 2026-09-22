@@ -9,11 +9,17 @@ refresh_clusters (02:00) → confidence_decay (03:00) → mark_stale (04:00).
 Все задачи идемпотентны: повтор по уже обработанному состоянию — no-op.
 """
 
+import time
 from typing import Any
 
 from celery import shared_task
 
 from memory_server.logger import get_logger
+from memory_server.metrics import (
+    EDGE_PRUNE_CANDIDATES_TOTAL,
+    EDGE_PRUNE_DURATION_SECONDS,
+    EDGE_PRUNED_TOTAL,
+)
 from memory_server.state import get_state
 from memory_server.tasks.async_bridge import run_async
 from memory_server.tasks.base import SeltiTask
@@ -57,8 +63,51 @@ def confidence_decay(self) -> dict[str, Any]:
     return {"touched": touched, "total": sum(touched.values())}
 
 
-# ── Mark stale (ежедневно, 04:00 UTC) ───────────────────────────
+# ── Edge prune (ежедневно, 03:30 UTC; V3.5 «Жизнь графа знаний») ─
 
+
+@shared_task(
+    bind=True,
+    base=SeltiTask,
+    name="memory_server.tasks.lifecycle_tasks.edge_prune",
+    max_retries=5,
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+    default_retry_delay=30,
+    soft_time_limit=240,
+    time_limit=300,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    queue="memory",
+    routing_key="memory",
+)
+def edge_prune(self, dry_run: bool | None = None) -> dict[str, Any]:
+    """Отсечение ослабленных рёбер (ленивая w_eff, формулы Эны 22.09).
+
+    Кандидат: живое резолвнутое ребро старше edge_prune_min_age_days, без
+    иммунитета (ручные/l2/inherited/frozen-инцидентные) и не мост; raw
+    w_eff ≤ edge_decay_floor. Пишется ТОЛЬКО pruned_at (не DELETE, не вес).
+    dry_run=None берёт конфиг edge_prune_dry_run (дефолт True — только отчёт);
+    мастер-выключатель edge_lifecycle_enabled=False — кампания пропускается.
+    """
+    service = _get_service()
+    started = time.monotonic()
+    report = run_async(service.edge_prune, dry_run=dry_run)
+    # мастер-выключатель — кампания не выполнялась, метрик нет
+    if "skipped" in report:
+        return report
+    mode = "dry" if report.get("dry_run") else "live"
+    EDGE_PRUNE_DURATION_SECONDS.labels(mode=mode).observe(time.monotonic() - started)
+    EDGE_PRUNE_CANDIDATES_TOTAL.labels(mode=mode).inc(
+        int(report.get("candidates", 0))
+    )
+    if not report.get("dry_run", True):
+        EDGE_PRUNED_TOTAL.labels(mode="live").inc(int(report.get("pruned", 0)))
+    return report
+
+
+# ── Mark stale (ежедневно, 04:00 UTC) ───────────────────────────
 
 @shared_task(
     bind=True,

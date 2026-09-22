@@ -900,3 +900,43 @@ class MemoryRepository:
 
     async def get_graph_stats(self) -> GraphStats:
         return await self.pg.get_graph_stats()
+
+    # ════════════════════════════════════════════════════════════
+    # EDGE LIFECYCLE (V3.5, миграция 026) — delegate to PG
+    # ════════════════════════════════════════════════════════════
+
+    async def reinforce_relations(
+        self, pairs: list[tuple[str, str]], alpha: float
+    ) -> int:
+        """Касание пар гранул (used_count/last_used_at/weight) — батчи в PG."""
+        return await self.pg.reinforce_relations(pairs, alpha)
+
+    async def prune_candidates(
+        self,
+        decay_lambda: float,
+        lambda_min: float,
+        min_age_days: int,
+        floor: float,
+    ) -> list[str]:
+        """Кандидаты отсечения (иммунитет/мост/возраст/raw w_eff — SQL)."""
+        return await self.pg.prune_candidates(
+            decay_lambda, lambda_min, min_age_days, floor
+        )
+
+    async def prune_edges_apply(self, edge_ids: list[str]) -> int:
+        return await self.pg.prune_edges_apply(edge_ids)
+
+    async def restore_edge(self, edge_id: str, restore_beta: float) -> bool:
+        return await self.pg.restore_edge(edge_id, restore_beta)
+
+    async def fetch_activation_edges(
+        self,
+        decay_lambda: float,
+        lambda_min: float,
+        link_types: list[str] | None = None,
+        symmetric_link_types: list[str] | None = None,
+    ) -> list[tuple[str, str, float]]:
+        """Живой граф (source, target, w_eff) для PPR-traverse — вес в SQL."""
+        return await self.pg.fetch_activation_edges(
+            decay_lambda, lambda_min, link_types, symmetric_link_types
+        )

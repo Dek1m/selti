@@ -135,6 +135,45 @@ class Settings(BaseSettings):
     linker_llm_retries: int = 1
     linker_verdict_cache_ttl: int = 30 * 24 * 3600  # 30 дней (ADR-019 C)
 
+    # ── V3.5 «Жизнь графа знаний»: жизнь рёбер (Ф1) + PPR-traverse (Ф2) ──
+    # Формулы — вердикты Эны 22.09 (закрывают дыры Д1/Д2 тест-плана):
+    # вес ребра НЕ материализуется ежедневным батчем — ЛЕНИВАЯ проекция
+    #   w_eff(r,t) = CASE WHEN immune(r) THEN r.weight
+    #                      ELSE r.weight * exp(-λ_eff × days(t − COALESCE(
+    #                           last_used_at, created_at))) END;
+    #   λ_eff = GREATEST(λ_min, λ / (1 + used_count)) — сатурация частоты.
+    # Материализует состояние ТОЛЬКО pruning-кампания (pruned_at, не DELETE).
+    # Мастер-выключатель Ф1: False (дефолт) = reinforce-хуки и prune-кампания
+    # молчат — бой включается осознанно после стенд-репетиции.
+    edge_lifecycle_enabled: bool = False
+    edge_reinforcement_enabled: bool = True
+    edge_decay_lambda: float = 0.02       # λ: затухание в день (1/день)
+    edge_decay_lambda_min: float = 0.002  # λ_min: насыщение частых рёбер
+    edge_decay_floor: float = 0.05        # порог отсечения: raw w_eff ≤ floor
+    edge_prune_min_age_days: int = 30     # кандидат: возраст created_at
+    edge_prune_dry_run: bool = True       # первая кампания — только отчёт
+    edge_reinforce_alpha: float = 0.2     # reinforce: w += (1−w)×α (cap 1.0)
+
+    # Ф2: traverse(strategy="activation") — PPR на CSR. Directed-переходы
+    # (эталон 5.1 тест-плана); damping 0.85, power iteration 25, топ-K.
+    # False до приёмки: strategy=activation → внятная ошибка, не тихий bfs.
+    traverse_activation_enabled: bool = False
+    ppr_damping: float = 0.85
+    # 25 итераций (вердикт Эны 23.09): остаточная осцилляция циклов
+    # d^n: 0.85^15≈0.087 переворачивает топ-3 на циклах, 0.85^25≈0.017
+    # даёт эталонную точность ±0.02; цена — ~+1.1 мс на 106k рёбер.
+    traverse_activation_iterations: int = 25
+    traverse_activation_top_k: int = 50
+    # Зеркала симметричных типов в activation-графе (вердикт Эны 23.09):
+    # link_type из списка получает встречную дугу target→source с тем же
+    # w_eff (related_to не имеет стрелки). Направленные типы (depends_on,
+    # contradicts, supersedes, solves, references, …) — строго directed.
+    traverse_symmetric_link_types: list[str] = ["related_to"]
+    # Порог потока reinforce при activation (вердикт Эны 23.09): ребро-
+    # проводник касаем, только если flow(src→tgt) = r[src]×M[tgt,src] ≥
+    # порога и оба конца в топ-K выдачи (одно касание на пару за запрос).
+    edge_reinforce_flow_min: float = 0.001
+
     api_key: str = ""
 
     # ── Полная карта 3D (PLAN_FULL_MAP_3D, M1/M2) ──

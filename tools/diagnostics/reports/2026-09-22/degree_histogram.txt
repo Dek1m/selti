@@ -1,0 +1,52 @@
+SET
+SET
+Pager usage is off.
+BEGIN
+SET
+ nodes_with_edges | p50 | p90 | p95 |        p99         | avg_degree | max_degree 
+------------------+-----+-----+-----+--------------------+------------+------------
+            14420 |  11 |  21 |  41 | 111.80999999999949 |      14.63 |       1532
+(1 row)
+
+ bucket | nodes |  pct  
+--------+-------+-------
+ 0-1    |   471 |  3.27
+ 2-3    |  1047 |  7.26
+ 4-7    |  2199 | 15.25
+ 8-15   |  8265 | 57.32
+ 16-31  |  1488 | 10.32
+ 32-63  |   491 |  3.40
+ 64-127 |   359 |  2.49
+ 128+   |   100 |  0.69
+(8 rows)
+
+ asserted_granules | nodes_with_edges | isolated_granules | coverage_pct 
+-------------------+------------------+-------------------+--------------
+             15492 |            14420 |              1072 |        93.08
+(1 row)
+
+              granule_id              |         entity_name         |   namespace    | in_degree | out_degree | total_degree | importance |              cluster_id              
+--------------------------------------+-----------------------------+----------------+-----------+------------+--------------+------------+--------------------------------------
+ 0b99192a-26aa-42c0-9441-7846edf1fac8 | cpp-docs-downloaded         | project_meta   |      1532 |          0 |         1532 |          5 | 
+ 3dfd4f77-f9f5-4115-bdb2-265aa564636f | TestGraphStats              | code_knowledge |       285 |          7 |          292 |          3 | 
+ 40b7028b-cd55-4441-b30b-278c4a86cc4d | TestListHashes              | code_knowledge |       286 |          6 |          292 |          3 | 
+ 436b7a5a-d8fc-41e7-bbc2-7e719c58a57f | TestForgetMemories          | code_knowledge |       288 |          4 |          292 |          3 | 949a0b13-e015-3313-bc26-13b9da9bced6
+ 47adedb5-1ce6-46b4-87b8-d2799cc69e80 | TestDeleteHash              | code_knowledge |       284 |          8 |          292 |          3 | 
+ 69802dff-f0e3-4916-afe0-2d4f69f5cea1 | TestGetRelations            | code_knowledge |       289 |          3 |          292 |          3 | fdd7d6bf-190e-c929-f55e-a7797ea2a568
+ 7bd4ec51-4e90-4845-8345-243639205033 | TestAddRelation             | code_knowledge |       282 |         10 |          292 |          3 | fdd7d6bf-190e-c929-f55e-a7797ea2a568
+ 8468604a-1259-4b8a-be48-300c4cc63446 | TestGetHash                 | code_knowledge |       283 |          9 |          292 |          3 | 
+ d009a446-0898-45ca-b09b-6b1a42d65d80 | TestTraverseGraph           | code_knowledge |       281 |         11 |          292 |          3 | 
+ d8a872ce-7b85-4597-85be-4a24a7c9698f | TestIngestBatch             | code_knowledge |       291 |          1 |          292 |          3 | 
+ ff752dfb-bbd4-428f-99f3-e7904bbda6fb | TestFindSimilar             | code_knowledge |       287 |          5 |          292 |          3 | 
+ 459f5a90-3002-471c-bd48-86220c46ce6c | python-docs-3.14-downloaded | project_meta   |       253 |          6 |          259 |          4 | 3926ccaa-ea05-0998-63d0-c939ea5d9fc0
+ 9e0581e7-b262-4d27-bccd-eea37bc41c3b | python-docs-navigation      | project_meta   |       245 |          5 |          250 |          3 | 2fc48aaf-2ee7-552a-a876-2e2b98e9b9f8
+ 24765302-30c1-482e-b83d-48df1a5ebd25 | tests                       | code_knowledge |       224 |          1 |          225 |          3 | 
+ 3a2797aa-f65d-4c6a-b9e5-8e1c5b5af2dd | Task                        | code_knowledge |       203 |         10 |          213 |          3 | 
+ 191a3a12-a48e-4ed5-acfb-2d1cf3540261 | parseSchedule               | code_knowledge |       204 |          8 |          212 |          3 | 
+ 2b215896-8ac5-4b62-b27f-588cb592a423 | TaskLog                     | code_knowledge |       205 |          7 |          212 |          3 | 
+ 34dc9868-9c76-4f0e-986a-9db3a0162761 | ParsedField                 | code_knowledge |       203 |          9 |          212 |          3 | 
+ 3f048e82-fb6c-4408-a45a-d71c05f75937 | main                        | code_knowledge |       206 |          6 |          212 |          3 | 
+ 81780487-831b-4ca6-aa61-d7792c20c767 | LogLevel                    | code_knowledge |       209 |          3 |          212 |          3 | c4743ba1-fc74-888f-7b4d-f2cd2f560dc9
+(20 rows)
+
+COMMIT

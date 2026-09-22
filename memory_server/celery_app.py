@@ -145,6 +145,13 @@ app.conf.beat_schedule = {
         "task": "memory_server.tasks.lifecycle_tasks.confidence_decay",
         "schedule": crontab(hour=3, minute=0),  # ежедневно 03:00 UTC
     },
+    # Жизнь рёбер (V3.5): после confidence-decay, до mark-stale; кластеры
+    # (02:00) уже пересчитаны — мостовые иммунитеты видят свежую разметку.
+    # dry_run берётся из конфига (edge_prune_dry_run=True до ручного боя).
+    "edge-prune": {
+        "task": "memory_server.tasks.lifecycle_tasks.edge_prune",
+        "schedule": crontab(hour=3, minute=30),  # ежедневно 03:30 UTC
+    },
     "mark-stale": {
         "task": "memory_server.tasks.lifecycle_tasks.mark_stale",
         "schedule": crontab(hour=4, minute=0),  # ежедневно 04:00 UTC

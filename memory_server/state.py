@@ -247,6 +247,7 @@ class SeltiState:
             # Линкер V3 (ADR-019): store диспетчирует link_new_granule без
             # блокировки записи; импорт внутри функции — tasks тянут state
             from memory_server.tasks.linker_tasks import enqueue_link
+            from memory_server.tasks.memory_tasks import enqueue_reinforce
 
             self._memory_service = MemoryService(
                 repository=repository,
@@ -256,6 +257,7 @@ class SeltiState:
                 project_repository=self._project_repository,
                 redis_provider=self.get_redis,
                 linker_dispatch=enqueue_link,
+                edge_dispatch=enqueue_reinforce,
             )
         return self._memory_service
 

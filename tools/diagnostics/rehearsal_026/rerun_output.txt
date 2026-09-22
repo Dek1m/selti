@@ -1,0 +1,18 @@
+psql:../../../migrations/026_edge_lifecycle.sql:70: ЗАМЕЧАНИЕ:  столбец "used_count" отношения "relations" уже существует, пропускается
+ALTER TABLE
+psql:../../../migrations/026_edge_lifecycle.sql:74: ЗАМЕЧАНИЕ:  столбец "last_used_at" отношения "relations" уже существует, пропускается
+ALTER TABLE
+psql:../../../migrations/026_edge_lifecycle.sql:81: ЗАМЕЧАНИЕ:  столбец "pruned_at" отношения "relations" уже существует, пропускается
+ALTER TABLE
+COMMENT
+COMMENT
+COMMENT
+psql:../../../migrations/026_edge_lifecycle.sql:120: ЗАМЕЧАНИЕ:  отношение "idx_relations_decay_due" уже существует, пропускается
+CREATE INDEX
+COMMENT
+psql:../../../migrations/026_edge_lifecycle.sql:139: ЗАМЕЧАНИЕ:  функция graph_traverse_full(uuid,pg_catalog.int4,text[]) не существует, пропускается
+DROP FUNCTION
+DROP FUNCTION
+CREATE FUNCTION
+COMMENT
+ALTER FUNCTION

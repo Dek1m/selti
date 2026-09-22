@@ -670,6 +670,85 @@ class PostgreSQLRepository:
             )
 
     # ════════════════════════════════════════════════════════════
+    # EDGE LIFECYCLE (V3.5 «Жизнь графа знаний», миграция 026)
+    # ════════════════════════════════════════════════════════════
+
+    async def reinforce_relations(
+        self, pairs: list[tuple[str, str]], alpha: float, batch: int = 1000
+    ) -> int:
+        """Боевое касание пар гранул: +1 использование, якорь сейчас, вес
+        к 1.0 (α). Пары уже канонизованы вызывающим; батчи по 1000 — один
+        round-trip на батч (паттерн «не N+1»). Возвращает число усиленных рёбер.
+        """
+        touched = 0
+        async with self.pool.acquire() as conn:
+            for start in range(0, len(pairs), batch):
+                chunk = pairs[start : start + batch]
+                a_ids = [uuid_module.UUID(a) for a, _ in chunk]
+                b_ids = [uuid_module.UUID(b) for _, b in chunk]
+                rows = await conn.fetch(q.REINFORCE_RELATIONS, a_ids, b_ids, alpha)
+                touched += len(rows)
+        return touched
+
+    async def prune_candidates(
+        self,
+        decay_lambda: float,
+        lambda_min: float,
+        min_age_days: int,
+        floor: float,
+    ) -> list[str]:
+        """ID кандидатов отсечения (иммунитеты/мост/возраст/raw w_eff — в SQL)."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                q.PRUNE_EDGES_CANDIDATES, decay_lambda, lambda_min, min_age_days, floor
+            )
+            return [row["id"] for row in rows]
+
+    async def prune_edges_apply(self, edge_ids: list[str], batch: int = 1000) -> int:
+        """Отсечение кандидатов: только pruned_at, батчами 1000. Идемпотентно."""
+        pruned = 0
+        async with self.pool.acquire() as conn:
+            for start in range(0, len(edge_ids), batch):
+                chunk = edge_ids[start : start + batch]
+                rows = await conn.fetch(
+                    q.PRUNE_EDGES_APPLY, [uuid_module.UUID(e) for e in chunk]
+                )
+                pruned += len(rows)
+        return pruned
+
+    async def restore_edge(self, edge_id: str, restore_beta: float) -> bool:
+        """Ручное воскрешение pruned-ребра (β — восстановительная сила веса)."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                q.RESTORE_EDGE, uuid_module.UUID(edge_id), restore_beta
+            )
+            return row is not None
+
+    async def fetch_activation_edges(
+        self,
+        decay_lambda: float,
+        lambda_min: float,
+        link_types: list[str] | None = None,
+        symmetric_link_types: list[str] | None = None,
+    ) -> list[tuple[str, str, float]]:
+        """Живой граф для PPR: (source, target, w_eff) — вес считает SQL
+        (ленивая проекция на момент вызова), Python строит только CSR.
+        symmetric_link_types — типы, чьи дуги зеркалятся встречной
+        (UNION ALL в SQL, вердикт Эны 23.09)."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                q.SELECT_ACTIVATION_EDGES,
+                decay_lambda,
+                lambda_min,
+                link_types or None,
+                symmetric_link_types or None,
+            )
+            return [
+                (row["source_id"], row["target_id"], float(row["w_eff"]))
+                for row in rows
+            ]
+
+    # ════════════════════════════════════════════════════════════
     # LIFECYCLE (Фаза 2.2: decay / stale / GC / orphans)
     # ════════════════════════════════════════════════════════════
 

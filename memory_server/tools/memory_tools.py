@@ -455,17 +455,23 @@ async def memory_traverse(
     limit: int | None = None,
     offset: int = 0,
     project_id: str | None = None,
+    strategy: str = "bfs",
     ctx: Context | None = None,
 ) -> dict[str, Any]:
-    """Обход графа от начальной гранулы (BFS).
+    """Обход графа от начальной гранулы.
 
-    depth: максимальная глубина обхода (по умолчанию 3)
+    depth: максимальная глубина обхода (по умолчанию 3, только bfs)
     link_types: фильтр по типам связей (по умолчанию все)
     limit/offset: курсорная пагинация узлов (стабильный порядок —
     сортировка по id; total_nodes в ответе — для навигации);
     hard-cap узлов — 500 (конфиг traverse_max_nodes)
     project_id: опционально — валидация проекта (slug/UUID) ранней понятной
     ошибкой; граф связей глобальный, фильтра узлов по проекту нет
+    strategy: "bfs" (дефолт — обход в ширину по хранимке) | "activation"
+    (персонализированный PageRank по живому графу с затуханием весов
+    рёбер: топ-K узлов по активации, у узла поле score; edges пуст,
+    depth/limit/offset не применяются). activation требует включённого
+    флага traverse_activation_enabled — иначе явная ошибка.
     """
     return await celery_call(
         TASK_TRAVERSE,
@@ -475,6 +481,7 @@ async def memory_traverse(
         limit=limit,
         offset=offset,
         project_id=project_id,
+        strategy=strategy,
     )
 
 

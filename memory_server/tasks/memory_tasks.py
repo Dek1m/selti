@@ -15,6 +15,7 @@ from typing import Any
 from celery import shared_task
 
 from memory_server.logger import get_logger
+from memory_server.metrics import EDGE_REINFORCED_TOTAL, EDGE_RESTORE_TOTAL
 from memory_server.state import get_state
 from memory_server.tasks.async_bridge import run_async
 from memory_server.tasks.base import SeltiTask
@@ -548,12 +549,15 @@ def traverse_graph(
     limit: int | None = None,
     offset: int = 0,
     project_id: str | None = None,
+    strategy: str = "bfs",
 ) -> dict[str, Any]:
     """Traverse the knowledge graph from a starting node.
 
     limit/offset — курсорная пагинация узлов (cap traverse_max_nodes).
     project_id — ранняя валидация проекта (slug/UUID); граф связей
     глобальный, фильтра узлов нет.
+    strategy="activation" — PPR-обход (V3.5 Ф2): топ-K узлов по активации
+    с полем score; до включения traverse_activation_enabled — ValueError.
     """
     if not start_id or not start_id.strip():
         raise ValidationError("start_id cannot be empty")
@@ -567,6 +571,7 @@ def traverse_graph(
         limit=limit,
         offset=offset,
         project_id=project_id,
+        strategy=strategy,
     )
     return {
         "nodes": result.nodes,
@@ -1072,3 +1077,93 @@ def cluster_list(
         namespace=namespace,
         project_id=project_id,
     )
+
+
+# ── Edge lifecycle (V3.5 «Жизнь графа знаний», Ф1) ───────────────
+
+
+def enqueue_reinforce(pairs: list[tuple[str, str]]) -> None:
+    """Диспетчер search/traverse → очередь reinforce (best-effort).
+
+    Паттерн enqueue_link (linker_tasks): send_task с явной очередью,
+    сбой постановки не роняет выдачу. Флаги — ЗДЕСЬ: мастер-выключатель
+    edge_lifecycle_enabled гасит всю Ф1, edge_reinforcement_enabled —
+    только касания (SQL не выполняется вовсе).
+    """
+    from memory_server.config import settings
+
+    if not settings.edge_lifecycle_enabled or not settings.edge_reinforcement_enabled:
+        return
+    if not pairs:
+        return
+    try:
+        from memory_server.celery_app import app
+
+        # JSON-сериализация Celery не несёт кортежи — пары списками
+        app.send_task(
+            "memory_server.tasks.memory_tasks.reinforce_relations",
+            kwargs={"pairs": [list(pair) for pair in pairs]},
+            queue="memory",
+            routing_key="memory",
+        )
+    except Exception as exc:
+        logger.warning(
+            "edge: reinforce enqueue failed (non-fatal)",
+            extra={"pairs": len(pairs), "error": str(exc)},
+        )
+
+
+@shared_task(
+    bind=True,
+    base=SeltiTask,
+    name="memory_server.tasks.memory_tasks.reinforce_relations",
+    max_retries=3,
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+    default_retry_delay=30,
+    soft_time_limit=120,
+    time_limit=180,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    queue="memory",
+    routing_key="memory",
+)
+def reinforce_relations(self, pairs: list[list[str]]) -> dict[str, Any]:
+    """Касание рёбер пар гранул: +1 использование, якорь сейчас, вес к 1.0.
+
+    Канонизация/дедуп пар и батчи 1000 — в сервисе; несуществующие/pruned
+    пары — тихий no-op (0 строк).
+    """
+    service = _get_service()
+    touched = run_async(
+        service.reinforce_edges, [(a, b) for a, b in pairs]
+    )
+    EDGE_REINFORCED_TOTAL.inc(touched)
+    return {"pairs": len(pairs), "touched": touched}
+
+
+@shared_task(
+    bind=True,
+    base=SeltiTask,
+    name="memory_server.tasks.memory_tasks.restore_edge",
+    max_retries=3,
+    retry_backoff=True,
+    default_retry_delay=30,
+    soft_time_limit=60,
+    time_limit=90,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    queue="memory",
+    routing_key="memory",
+)
+def restore_edge(self, edge_id: str) -> dict[str, Any]:
+    """Ручное воскрешение pruned-ребра (без MCP-тула — celery call):
+    pruned_at=NULL + reinforce β=0.5. Идемпотентно: не-pruned ребро — no-op."""
+    if not edge_id or not edge_id.strip():
+        raise ValidationError("edge_id cannot be empty")
+    service = _get_service()
+    restored = run_async(service.restore_edge, edge_id)
+    # noop: ребро не pruned / не найдено — идемпотентный no-op
+    EDGE_RESTORE_TOTAL.labels(result="ok" if restored else "noop").inc()
+    return {"restored": restored}

@@ -377,6 +377,43 @@ class MemoryRepositoryProtocol(Protocol):
         """Batch-синхронизация metadata.links → relations."""
         ...
 
+    # ── EDGE LIFECYCLE (V3.5 «Жизнь графа знаний») ──
+
+    async def reinforce_relations(
+        self, pairs: list[tuple[str, str]], alpha: float
+    ) -> int:
+        """Касание пар гранул: +1 использование, якорь сейчас, вес к 1.0."""
+        ...
+
+    async def prune_candidates(
+        self,
+        decay_lambda: float,
+        lambda_min: float,
+        min_age_days: int,
+        floor: float,
+    ) -> list[str]:
+        """ID кандидатов отсечения (иммунитеты/мост/возраст/raw w_eff в SQL)."""
+        ...
+
+    async def prune_edges_apply(self, edge_ids: list[str]) -> int:
+        """Отсечение: только pruned_at, батчами. Идемпотентно."""
+        ...
+
+    async def restore_edge(self, edge_id: str, restore_beta: float) -> bool:
+        """Воскрешение pruned-ребра (pruned_at=NULL + усиленный reinforce)."""
+        ...
+
+    async def fetch_activation_edges(
+        self,
+        decay_lambda: float,
+        lambda_min: float,
+        link_types: list[str] | None = None,
+        symmetric_link_types: list[str] | None = None,
+    ) -> list[tuple[str, str, float]]:
+        """Живой граф (source, target, w_eff) для PPR-traverse; типы из
+        symmetric_link_types зеркалятся встречными дугами."""
+        ...
+
     async def get_graph_stats(self) -> GraphStats:
         """Статистика графа."""
         ...

@@ -182,11 +182,16 @@ INSERT_MEMORY_VERSION = """
 #     может нарушить unique-тройку (source_id, target_id, link_type);
 #   * inherited_from = old.id — колонка происхождения (миграция 023):
 #     исторический граф восстанавливает физическое место ребра проекцией.
+#   * V3.5 (026): pruned-рёбра (pruned_at IS NOT NULL) НЕ переносятся —
+#     decay отсёк их из эффективного графа, наследнику они не нужны;
+#     остаются на старой версии как история (time-travel видит их
+#     по окну жизни до момента отсечения).
 REWIRE_RELATIONS_SOURCE = """
     UPDATE relations r
     SET source_id = $2::uuid,
         inherited_from = $1::uuid
     WHERE r.source_id = $1::uuid
+      AND r.pruned_at IS NULL
       AND r.link_type <> 'supersedes'
       AND (r.target_id IS NULL OR EXISTS (
           SELECT 1 FROM memories m
@@ -207,6 +212,7 @@ REWIRE_RELATIONS_TARGET = """
     SET target_id = $2::uuid,
         inherited_from = $1::uuid
     WHERE r.target_id = $1::uuid
+      AND r.pruned_at IS NULL
       AND r.link_type <> 'supersedes'
       AND EXISTS (
           SELECT 1 FROM memories m
@@ -551,6 +557,168 @@ DELETE_RELATION = """
 
 DELETE_RELATIONS_BY_SOURCE = """
     DELETE FROM relations WHERE source_id = $1
+"""
+
+
+# ── V3.5 «Жизнь графа знаний»: жизнь рёбер (026; формулы — вердикты Эны 22.09) ──
+#
+# Вес ребра — ЛЕНИВАЯ проекция, в БД не материализуется (дыра Д2 закрыта
+# построением: нет батча — нет двойного затухания, повторный расчёт в тот
+# же день идемпотентен):
+#   w_eff(r,t) = CASE WHEN immune(r) THEN r.weight
+#                      ELSE r.weight * exp(−λ_eff × days(t − COALESCE(
+#                           last_used_at, created_at))) END
+#   λ_eff(r)   = GREATEST(λ_min, λ / (1 + used_count))
+# Материализует состояние ТОЛЬКО pruning-кампания — и только pruned_at.
+
+# Иммунитет от decay И pruning: ручные рёбра (source ≠ 'linker_v3'; NULL
+# source — рёбра бэкфилла/синка — трактуются как ручные, IS DISTINCT FROM),
+# L2-вердикты, REWIRE-наследованные и инцидентные frozen-гранулам
+# (frozen — колонка memories 018; симметрия с confidence decay, D4).
+_EDGE_IMMUNE_SQL = """
+    (
+        r.metadata->>'source' IS DISTINCT FROM 'linker_v3'
+        OR r.metadata->>'layer' = 'l2'
+        OR r.inherited_from IS NOT NULL
+        OR src.frozen
+        OR tgt.frozen
+    )
+"""
+
+# Межкластерный мост: иммунитет ТОЛЬКО от pruning, НЕ от decay. Оба конца
+# кластеризованы и в разных кластерах; NULL-кластер мостом не считается —
+# иначе в средах без миграции 022 весь decay вырожден (Д4, Ф1-IMM-04/05).
+_EDGE_BRIDGE_SQL = """
+    (
+        src.cluster_id IS NOT NULL
+        AND tgt.cluster_id IS NOT NULL
+        AND src.cluster_id IS DISTINCT FROM tgt.cluster_id
+    )
+"""
+
+# Ленивая w_eff как вычислимая колонка; {decay_lambda}/{decay_lambda_min} —
+# позиционные плейсхолдеры конкретного запроса ($N::float8), собираются на импорте.
+_W_EFF_TEMPLATE = """
+    CASE WHEN {immune} THEN r.weight
+         ELSE r.weight * exp(
+             -GREATEST({decay_lambda_min}, {decay_lambda} / (1 + r.used_count))
+             * EXTRACT(EPOCH FROM (now() - COALESCE(r.last_used_at, r.created_at))) / 86400.0
+         )
+    END
+"""
+
+
+def _w_eff_sql(lambda_ph: str, lambda_min_ph: str) -> str:
+    """w_eff-выражение под позиционные параметры запроса (SQL, не Python:
+    exp/дни считает сервер — активация строится из готовых чисел)."""
+    return _W_EFF_TEMPLATE.format(
+        immune=_EDGE_IMMUNE_SQL,
+        decay_lambda=lambda_ph,
+        decay_lambda_min=lambda_min_ph,
+    )
+
+
+# Reinforce (боевое касание пары гранул, обход/поиск): +1 использование,
+# последний якорь сейчас, вес подтягивается к 1.0 (α, Ф1-RNF; дыра Д5 —
+# частое ребро восстанавливает силу). Пара канонизуется ДО SQL (least/
+# greatest в Python) и матчится в обе стороны — reinforce безразличен
+# к направлению ребра. Только живые рёбра (pruned не воскрешаем касанием).
+REINFORCE_RELATIONS = """
+    UPDATE relations r
+    SET used_count   = r.used_count + 1,
+        last_used_at = now(),
+        weight       = LEAST(1.0, r.weight + (1.0 - r.weight) * $3::float8)
+    FROM unnest($1::uuid[], $2::uuid[]) AS p(a_id, b_id)
+    WHERE r.pruned_at IS NULL
+      AND r.target_id IS NOT NULL
+      AND ((r.source_id = p.a_id AND r.target_id = p.b_id)
+           OR (r.source_id = p.b_id AND r.target_id = p.a_id))
+    RETURNING r.id
+"""
+
+# Кандидаты отсечения: живое, резолвнутое, старше edge_prune_min_age_days,
+# без иммунитета и не мост; RAW w_eff ≤ floor БЕЗ clamp (дыра Д1: порог
+# применяется к ленивому значению, а не к материализованному floor).
+# $1 λ, $2 λ_min, $3 min_age_days, $4 floor.
+PRUNE_EDGES_CANDIDATES = f"""
+    SELECT r.id::text
+    FROM relations r
+    JOIN memories src ON src.id = r.source_id
+    JOIN memories tgt ON tgt.id = r.target_id
+    WHERE r.pruned_at IS NULL
+      AND r.target_id IS NOT NULL
+      AND r.created_at <= now() - make_interval(days => $3::int)
+      AND NOT {_EDGE_IMMUNE_SQL}
+      AND NOT {_EDGE_BRIDGE_SQL}
+      AND r.weight * exp(
+              -GREATEST($2::float8, $1::float8 / (1 + r.used_count))
+              * EXTRACT(EPOCH FROM (now() - COALESCE(r.last_used_at, r.created_at))) / 86400.0
+          ) <= $4::float8
+    ORDER BY r.created_at
+"""
+
+# Отсечение (материализация ЕДИНСТВЕННОГО факта жизни рёбер): пишется
+# только pruned_at, ни статусов, ни весов; гард pruned_at IS NULL даёт
+# идемпотентность повтора. НЕ DELETE — история и restore остаются.
+PRUNE_EDGES_APPLY = """
+    UPDATE relations
+    SET pruned_at = now()
+    WHERE id = ANY($1::uuid[])
+      AND pruned_at IS NULL
+    RETURNING id
+"""
+
+# Ручное воскрешение: сброс отсечения + усиленный reinforce (β=0.5 — вдвое
+# сильнее боевого α, вердикт Эны); только pruned-ребро — повторный restore
+# активного no-op.
+RESTORE_EDGE = """
+    UPDATE relations
+    SET pruned_at    = NULL,
+        used_count   = used_count + 1,
+        last_used_at = now(),
+        weight       = LEAST(1.0, weight + (1.0 - weight) * $2::float8)
+    WHERE id = $1::uuid
+      AND pruned_at IS NOT NULL
+    RETURNING id
+"""
+
+# Эффективный граф для activation-traverse (Ф2): живые рёбра между живыми
+# нодами; w_eff — вычислимая колонка (immune → голый weight). Направление
+# рёбер сохраняется (directed, эталон 5.1), КРОМЕ симметричных типов
+# (traverse_symmetric_link_types, вердикт Эны 23.09): для них UNION ALL
+# добавляет встречную дугу target→source с тем же w_eff — related_to не
+# имеет стрелки. Зеркальная ветка дополнительно проходит фильтр $3 —
+# зеркалим только рёбра, выбранные запросом. Встречные дуги суммируются
+# в CSR (двойная связь A↔B двумя рёбрами течёт сильнее — осознанно,
+# PPR нормирует по исходящей сумме). $1 λ, $2 λ_min, $3 link_types
+# (NULL = все), $4 symmetric_link_types (NULL/пусто = строго directed).
+SELECT_ACTIVATION_EDGES = f"""
+    SELECT r.source_id::text AS source_id,
+           r.target_id::text AS target_id,
+           {_w_eff_sql('$1::float8', '$2::float8')} AS w_eff
+    FROM relations r
+    JOIN memories src ON src.id = r.source_id
+    JOIN memories tgt ON tgt.id = r.target_id
+    WHERE r.pruned_at IS NULL
+      AND r.target_id IS NOT NULL
+      AND src.status = 'asserted' AND src.valid_to IS NULL
+      AND tgt.status = 'asserted' AND tgt.valid_to IS NULL
+      AND ($3::text[] IS NULL OR r.link_type = ANY($3))
+
+    UNION ALL
+
+    SELECT r.target_id::text AS source_id,
+           r.source_id::text AS target_id,
+           {_w_eff_sql('$1::float8', '$2::float8')} AS w_eff
+    FROM relations r
+    JOIN memories src ON src.id = r.source_id
+    JOIN memories tgt ON tgt.id = r.target_id
+    WHERE r.pruned_at IS NULL
+      AND r.target_id IS NOT NULL
+      AND src.status = 'asserted' AND src.valid_to IS NULL
+      AND tgt.status = 'asserted' AND tgt.valid_to IS NULL
+      AND ($3::text[] IS NULL OR r.link_type = ANY($3))
+      AND r.link_type = ANY($4::text[])
 """
 
 

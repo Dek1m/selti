@@ -406,3 +406,57 @@ GALACTIC_EDGE_MEDIAN_LEN = Gauge(
     f"{PREFIX}_galactic_edge_median_len",
     "Median resolved-edge length after galactic layout (structure quality)",
 )
+
+# ============================================================
+# Edge lifecycle + PPR traverse (V3.5, Ф1/Ф2)
+# ============================================================
+
+# Кампания edge_prune (beat 03:30 UTC): кандидаты по режиму прогона.
+# mode: dry (только отчёт, edge_prune_dry_run=True) / live (бой)
+EDGE_PRUNE_CANDIDATES_TOTAL = Counter(
+    f"{PREFIX}_edge_prune_candidates_total",
+    "Edges matching prune criteria per campaign run",
+    ["mode"],  # mode: dry / live
+)
+
+# Фактически отсечённые (pruned_at=now), только live-прогоны
+EDGE_PRUNED_TOTAL = Counter(
+    f"{PREFIX}_edge_pruned_total",
+    "Edges soft-pruned (pruned_at set) by live campaign runs",
+    ["mode"],  # mode: live
+)
+
+# Касания рёбер reinforce'ом (usage → w к 1.0), считаем touched-строки
+EDGE_REINFORCED_TOTAL = Counter(
+    f"{PREFIX}_edge_reinforced_total",
+    "Edges touched by reinforce batches (rows updated)",
+)
+
+# Ручное воскрешение pruned-ребра; noop = ребро не pruned / не найдено
+EDGE_RESTORE_TOTAL = Counter(
+    f"{PREFIX}_edge_restore_total",
+    "Manual restore attempts of pruned edges",
+    ["result"],  # result: ok / noop
+)
+
+# PPR-traverse (strategy="activation"): запросы и латентность полного пути
+# (выборка графа → spread → карточки). status: ok / empty (старт вне графа)
+TRAVERSE_ACTIVATION_REQUESTS_TOTAL = Counter(
+    f"{PREFIX}_traverse_activation_requests_total",
+    "PPR activation traverse requests by outcome",
+    ["status"],  # status: ok / empty
+)
+
+TRAVERSE_ACTIVATION_LATENCY_SECONDS = Histogram(
+    f"{PREFIX}_traverse_activation_latency_seconds",
+    "PPR activation traverse duration (graph fetch + spread + cards)",
+    buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
+)
+
+# Длительность кампании edge_prune (SQL кандидаты + применение)
+EDGE_PRUNE_DURATION_SECONDS = Histogram(
+    f"{PREFIX}_edge_prune_duration_seconds",
+    "Edge prune campaign duration (candidates scan + apply)",
+    ["mode"],  # mode: dry / live
+    buckets=(0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 240.0),
+)

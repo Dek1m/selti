@@ -443,6 +443,8 @@ class TestTraverseGraph:
             result = traverse_graph(start_id="granule-1", project_id="akame")
 
         assert result["total_nodes"] == 1
+        # strategy="bfs" — новый дефолт V3.5 Ф2: bfs-контракт traverse
+        # не изменился, таска лишь явно прокидывает стратегию
         mock_svc.traverse.assert_awaited_with(
             start_id="granule-1",
             depth=3,
@@ -450,6 +452,7 @@ class TestTraverseGraph:
             limit=None,
             offset=0,
             project_id="akame",
+            strategy="bfs",
         )
 
     def test_empty_start_id_raises(self):

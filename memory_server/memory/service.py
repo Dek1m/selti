@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
+from itertools import combinations
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -16,6 +18,7 @@ from memory_server.exceptions import (
     VectorStoreError,
 )
 from memory_server.logger import async_measure_duration, get_logger
+from memory_server.memory.activation import ActivationSpreader
 from memory_server.memory.dedup import DedupAction, DedupEngine
 from memory_server.memory.namespace_repository import NamespaceRepository
 from memory_server.memory.project_repository import ProjectRecord, ProjectRepository
@@ -32,6 +35,8 @@ from memory_server.metrics import (
     GC_PURGE_BLOCKED_TOTAL,
     MEMORIES_VERSIONED_TOTAL,
     RELATIONS_REWIRED_TOTAL,
+    TRAVERSE_ACTIVATION_LATENCY_SECONDS,
+    TRAVERSE_ACTIVATION_REQUESTS_TOTAL,
     ZERO_RESULT_SEARCHES_TOTAL,
 )
 from memory_server.models import (
@@ -87,6 +92,29 @@ _SECTION_TITLES = {
 _CONTENT_MAX_LINES = 100
 _CONTENT_LINE_MAX_CHARS = 280
 
+# restore-ребра: вес подтягивается вдвое сильнее боевого reinforce-α
+# (вердикт Эны 22.09: воскрешение должно заметно поднять ослабленное ребро).
+_RESTORE_BETA = 0.5
+
+# Стратегии traverse (V3.5 Ф2): bfs — прежний контракт (дефолт, регрессия
+# недопустима), activation — PPR по эффективному графу.
+_TRAVERSE_STRATEGIES = ("bfs", "activation")
+
+
+def canonical_edge_pairs(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Пары гранул → канонические (least, greatest) без дублей и петель.
+
+    reinforce безразличен к направлению ребра — пара одинакова в обе
+    стороны; канонизация до SQL даёт «одно касание на пару за проход»
+    (вердикт Эны) и дедуп батча ещё в Python (Ф1-RNF-02).
+    """
+    unique: set[tuple[str, str]] = set()
+    for a, b in pairs:
+        if a == b:
+            continue
+        unique.add((a, b) if a < b else (b, a))
+    return sorted(unique)
+
 
 def _days_since(moment: datetime | None, now: datetime) -> float:
     """Полных дней с момента (для recency decay); отсутствие момента → 0."""
@@ -119,6 +147,7 @@ class MemoryService:
         project_repository: ProjectRepository | None = None,
         redis_provider: Callable[[], Awaitable["Redis"]] | None = None,
         linker_dispatch: Callable[[str], None] | None = None,
+        edge_dispatch: Callable[[list[tuple[str, str]]], None] | None = None,
     ):
         self.repository = repository
         self.embedding = embedding_provider
@@ -132,6 +161,9 @@ class MemoryService:
         # Диспетчер Линкера V3 (SeltiState → enqueue_link): None = автолинк
         # выключен (юнит-тесты без Celery); вызов best-effort после INSERT
         self.linker_dispatch = linker_dispatch
+        # Диспетчер reinforce рёбер (V3.5 Ф1, SeltiState → enqueue_reinforce):
+        # None = касания выключены (тесты без Celery); флаги — в самом хуке
+        self.edge_dispatch = edge_dispatch
 
     async def resolve_project(self, project_id: str | None) -> str | None:
         """Ключ тула (slug | UUID | None) → project_id UUID. Неизвестный slug → NotFoundError."""
@@ -352,6 +384,12 @@ class MemoryService:
             if not results:
                 # Качество поиска (Фаза 3.3): пустая выдача — сигнал для дашборда
                 ZERO_RESULT_SEARCHES_TOTAL.labels(namespace=namespace or "all").inc()
+            else:
+                # V3.5 Ф1: выданные вместе топ-K гранулы «встретились» — рёбра
+                # их пар касаются (все C(k,2) пар выдачи, k мал; вердикт Эны)
+                self._dispatch_reinforce(
+                    [(r.id, other.id) for r, other in combinations(results, 2)]
+                )
             return results
 
     async def _search_hybrid(
@@ -1222,18 +1260,37 @@ class MemoryService:
         limit: int | None = None,
         offset: int = 0,
         project_id: str | None = None,
+        strategy: str = "bfs",
     ) -> TraverseResult:
         """Обход графа от начальной ноды. Один round-trip вместо 2N+2.
 
-        Cap traverse_max_nodes + курсорная пагинация — Python-слой поверх
-        хранимки graph_traverse_full (Фаза 1.5, миграций нет): стабильный
-        порядок сортировкой id, срез [offset : offset+limit], рёбра —
-        только между выданными узлами. total_nodes/truncated — навигация.
+        strategy="bfs" (дефолт) — прежний контракт: хранимка graph_traverse_full,
+        Cap traverse_max_nodes + курсорная пагинация, стабильный порядок
+        сортировкой id, срез [offset : offset+limit], рёбра — только между
+        выданными узлами. total_nodes/truncated — навигация.
+
+        strategy="activation" (V3.5 Ф2) — PPR (power iteration, damping
+        ppr_damping) по живому графу с ленивыми w_eff: топ-K узлов по
+        активации, у узла поле score; edges пуст (это не подграф путей),
+        depth/limit/offset не применяются. Требует traverse_activation_enabled
+        (до приёмки выключен: внятная ошибка, НЕ тихий fallback на bfs).
 
         project_id — только ранняя валидация проекта (понятная ошибка при
         неизвестном slug, паттерн memory_link): граф связей глобальный,
         фильтра узлов по проекту в контракте хранимки нет.
         """
+        if strategy not in _TRAVERSE_STRATEGIES:
+            raise ValueError(
+                f"strategy must be one of {'|'.join(_TRAVERSE_STRATEGIES)}, got: {strategy!r}"
+            )
+        if strategy == "activation":
+            if not self.config.traverse_activation_enabled:
+                raise ValueError(
+                    "traverse strategy 'activation' is disabled "
+                    "(traverse_activation_enabled=False)"
+                )
+            return await self._traverse_activation(start_id, link_types)
+
         logger.debug("traverse", extra={
             "start_id": start_id, "depth": depth, "link_types": link_types,
             "limit": limit, "offset": offset, "project_id": project_id,
@@ -1267,6 +1324,10 @@ class MemoryService:
             if str(e["source_id"]) in visible_ids
             and (e.get("target_id") is None or str(e["target_id"]) in visible_ids)
         ]
+        # V3.5 Ф1: рёбра выданного подграфа «использованы» обходом — касание
+        self._dispatch_reinforce(
+            [(e.source_id, e.target_id) for e in edges if e.target_id is not None]
+        )
         logger.debug("traverse: done", extra={
             "nodes": len(page), "edges": len(edges), "total_nodes": total,
         })
@@ -1276,6 +1337,149 @@ class MemoryService:
             total_nodes=total,
             truncated=len(page) < total,
         )
+
+    async def _traverse_activation(
+        self, start_id: str, link_types: list[str] | None
+    ) -> TraverseResult:
+        """PPR от start_id по эффективному графу (strategy="activation").
+
+        Весь живой граф (рёбра + ленивые w_eff) — одним SELECT в CSR
+        (симметричные типы — встречными дугами, конфиг); итерации — чистая
+        numpy/scipy математика. Карточки топ-K — повторное использование
+        fetch_by_ids (один батч-SELECT).
+        """
+        started = time.perf_counter()
+        edges = await self.repository.fetch_activation_edges(
+            self.config.edge_decay_lambda,
+            self.config.edge_decay_lambda_min,
+            link_types,
+            self.config.traverse_symmetric_link_types,
+        )
+        spreader = ActivationSpreader(edges, damping=self.config.ppr_damping)
+        ranked = spreader.spread(
+            [start_id],
+            iterations=self.config.traverse_activation_iterations,
+            top_k=self.config.traverse_activation_top_k,
+            ensure_ids=[start_id],  # контракт Ф2-PPR-05: старт всегда в выдаче
+        )
+        if not ranked:
+            # старт вне графа (нет рёбер вообще) — пустой результат штатно
+            TRAVERSE_ACTIVATION_REQUESTS_TOTAL.labels(status="empty").inc()
+            TRAVERSE_ACTIVATION_LATENCY_SECONDS.observe(time.perf_counter() - started)
+            return TraverseResult(nodes=[], edges=[], total_nodes=0, truncated=False)
+        cards = {
+            str(row["id"]): row
+            for row in await self.repository.fetch_by_ids([g for g, _ in ranked])
+        }
+        nodes = [
+            {
+                "id": granule_id,
+                "content": str(cards[granule_id]["content"])[:200],
+                "namespace": cards[granule_id]["namespace"],
+                "importance": cards[granule_id]["importance"],
+                "score": score,
+            }
+            for granule_id, score in ranked
+            # гранула закрылась между выборкой рёбер и карточками — гонка
+            # микросекунд, выпавший узел молча исключаем из выдачи
+            if granule_id in cards
+        ]
+        # Рёбра-проводники (вердикт Эны 23.09): касаем ТОЛЬКО рёбра с обоими
+        # концами в топ-K выдачи и потоком ≥ edge_reinforce_flow_min — не
+        # C(k,2) всех пар, как в search-хуке. Канонизация — одно касание на
+        # пару за запрос (зеркальные дуги дают пару в обе стороны).
+        self._dispatch_reinforce(
+            canonical_edge_pairs([
+                (src, tgt)
+                for src, tgt, flow in spreader.edge_flows(
+                    {node["id"] for node in nodes}
+                )
+                if flow >= self.config.edge_reinforce_flow_min
+            ])
+        )
+        logger.debug("traverse: activation done", extra={
+            "start_id": start_id, "graph_edges": len(edges), "top": len(nodes),
+        })
+        TRAVERSE_ACTIVATION_REQUESTS_TOTAL.labels(status="ok").inc()
+        TRAVERSE_ACTIVATION_LATENCY_SECONDS.observe(time.perf_counter() - started)
+        return TraverseResult(
+            nodes=nodes, edges=[], total_nodes=len(nodes), truncated=False
+        )
+
+    # ── Жизнь рёбер (V3.5 Ф1: reinforce / prune / restore) ──
+
+    def _dispatch_reinforce(self, pairs: list[tuple[str, str]]) -> None:
+        """Fire-and-forget касание рёбер пар: постановка в очередь memory.
+        Сбой диспетчеризации не роняет выдачу (паттерн linker_dispatch);
+        флаги — в хуке enqueue_reinforce."""
+        if self.edge_dispatch is None or not pairs:
+            return
+        try:
+            self.edge_dispatch(pairs)
+        except Exception:
+            logger.warning(
+                "edge: reinforce dispatch FAILED (non-fatal)",
+                extra={"pairs": len(pairs)},
+            )
+
+    async def reinforce_edges(self, pairs: list[tuple[str, str]]) -> int:
+        """Касание пар гранул: канонизация/дедуп + батч-UPDATE (α из конфига).
+
+        Одно касание на пару за вызов — частота использования, не число
+        итераций PPR; накопление между вызовами — осознанная семантика.
+        """
+        canonical = canonical_edge_pairs(pairs)
+        if not canonical:
+            return 0
+        touched = await self.repository.reinforce_relations(
+            canonical, self.config.edge_reinforce_alpha
+        )
+        logger.debug("reinforce_edges: done", extra={
+            "pairs": len(canonical), "touched": touched,
+        })
+        return touched
+
+    async def edge_prune(self, dry_run: bool | None = None) -> dict[str, int | str | bool]:
+        """Кампания отсечения (beat 03:30 UTC): ленивый raw w_eff ≤ floor у
+        старых рёбер без иммунитета и не мостов → pruned_at=now().
+
+        dry_run=None берёт конфиг (дефолт True — только отчёт). Бой идемпотентен:
+        повтор по обработанному состоянию — 0 кандидатов. Ни одного DELETE,
+        ни одного UPDATE веса — материализуется только pruned_at.
+        """
+        if not self.config.edge_lifecycle_enabled:
+            logger.info("edge_prune: lifecycle disabled (edge_lifecycle_enabled=False)")
+            return {"skipped": "edge_lifecycle_enabled"}
+        dry = self.config.edge_prune_dry_run if dry_run is None else dry_run
+        ids = await self.repository.prune_candidates(
+            decay_lambda=self.config.edge_decay_lambda,
+            lambda_min=self.config.edge_decay_lambda_min,
+            min_age_days=self.config.edge_prune_min_age_days,
+            floor=self.config.edge_decay_floor,
+        )
+        report: dict[str, int | str | bool] = {
+            "dry_run": dry,
+            "candidates": len(ids),
+            "lambda": self.config.edge_decay_lambda,
+            "lambda_min": self.config.edge_decay_lambda_min,
+            "floor": self.config.edge_decay_floor,
+            "min_age_days": self.config.edge_prune_min_age_days,
+        }
+        if dry:
+            logger.info("edge_prune: DRY RUN report", extra=report)
+            return report
+        pruned = await self.repository.prune_edges_apply(ids) if ids else 0
+        report["pruned"] = pruned
+        logger.info("edge_prune: applied", extra={**report, "pruned": pruned})
+        return report
+
+    async def restore_edge(self, edge_id: str) -> bool:
+        """Ручное воскрешение pruned-ребра: pruned_at=NULL + усиленный
+        reinforce (β=0.5). False = ребро не pruned (или нет) — идемпотентный
+        no-op, дыра Д3 закрыта гвардом: второго active-ребра не бывает."""
+        restored = await self.repository.restore_edge(edge_id, _RESTORE_BETA)
+        logger.info("restore_edge: done", extra={"id": edge_id, "restored": restored})
+        return restored
 
     async def get_graph_stats(self) -> GraphStats:
         """Статистика графа знаний."""

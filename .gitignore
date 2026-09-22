@@ -31,3 +31,8 @@ htmlcov/
 # Docker
 .docker/
 .acc_tmp/
+node_modules/
+tools/diagnostics/rehearsal_026/*.sql
+tools/diagnostics/rehearsal_026/pg.log
+tools/diagnostics/rehearsal_026/pg.port
+tools/diagnostics/reports/**/bridges*.json

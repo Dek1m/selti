@@ -1,0 +1,30 @@
+# Контроль безопасности прогона T0.4 (исполнение Рэй, прод ai.atom.ui)
+
+Дата: 2026-09-22 21:16–21:20 UTC (00:16–00:20 МСК, окно после 05:30 UTC чистое,
+load average 0.25, RAM available 4.2 GiB).
+
+## Счётчики ДО/ПОСЛЕ (read-only сессии, statement_timeout 30s)
+
+| Таблица | До | После | Вердикт |
+|---|---|---|---|
+| memories | 15551 | 15551 | идентично |
+| relations | 106557 | 106557 | идентично |
+
+## Механика исполнения
+
+- SQL × 3: psql (stdin, docker exec -i postgres) поверх файлового
+  `BEGIN TRANSACTION READ ONLY` + сессионного `default_transaction_read_only=on`.
+- cosine_histogram.py: `docker exec -i selti python -` (stdin, env
+  SELTI_DIAG_PG_DSN из DATABASE_URL контейнера, Qdrant http://athena-qdrant:6333,
+  батчи 256 последовательно, сэмпл ≤3000/ns, seed selti-diag-v3.5). 33 c.
+- bridges.py: импортирует cosine_histogram — прогон через stdin невозможен;
+  исполнено в ОДНОРАЗОВОМ контейнере `docker run --rm --network app_default
+  -m 1g -v ~/diag:/diag:ro selti:latest` (боевые контейнеры не тронуты,
+  ~/diag удалён после). Plain 3.2 c; --betweenness 7.6 c, timeout=false.
+
+## Следы на проде
+
+Нулевые: временный ~/diag удалён; в ФС боевых контейнеров ничего не писалось
+(прогон cosine — stdin; bridges — отдельный --rm контейнер); контейнеры не
+пересоздавались (uptime сохранился); Qdrant — только retrieve батчами;
+деплой/push не выполнялись.
