@@ -75,7 +75,7 @@ void main() {
   // перемигивание (фидбек Мастера): заметная амплитуда ±35%, 0.5-1.5 Гц,
   // фаза/частота уникальны per-star; выбранная не мигает; reduced-motion off
   vTwinklePhase = fract(sin(dot(position.xy, vec2(12.9898, 78.233))) * 43758.5453) + aPhase;
-  vTwinkleFreq = 3.14 + fract(aPhase * 0.1591549) * 6.2831; // 0.5-1.5 Гц
+  vTwinkleFreq = 0.8 + fract(aPhase * 0.1591549) * 1.6; // 0.125-0.375 Гц — медленное дыхание
   vTwinkleAmp = uTwinkle * 0.35 * step(0.5, level);
 
   vBlur = (uFocusBlur > 0.5 && level >= 1.0) ? 1.0 : 0.0;
