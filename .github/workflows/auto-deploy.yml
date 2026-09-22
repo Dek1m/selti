@@ -77,14 +77,19 @@ jobs:
       # мёртвом фронте — старая проверка била localhost:8000 МИМО nginx,
       # а тот отдавал 502 на все /api/* из-за устаревшего upstream IP).
       # Теперь проверяем: бэкенд жив + плечо nginx→selti + морда отдаётся.
+      # /ui/ и /api/ проверяем как LAN-клиент (source = LAN-IP сервера):
+      # allow-list 10.0.0.0/24 режет loopback-петли через DNAT (172.18.0.1).
       - name: Verify health (backend + через nginx + web UI)
         run: |
           curl -sf http://localhost:8000/live >/dev/null \
             && echo "selti /live OK" || { echo "selti /live FAILED"; exit 1; }
           curl -skf --resolve memory.atom.ui:443:127.0.0.1 https://memory.atom.ui/live >/dev/null \
             && echo "nginx->selti OK" || { echo "nginx->selti FAILED (502 = upstream, см. infra/nginx/conf.d/README.md)"; exit 1; }
-          curl -skf --resolve ai.atom.ui:443:127.0.0.1 https://ai.atom.ui/ui/ >/dev/null \
-            && echo "web UI OK" || { echo "web UI FAILED"; exit 1; }
+          LAN_IP=$(hostname -I | awk '{print $1}')
+          curl -skf --interface "$LAN_IP" --resolve ai.atom.ui:443:"$LAN_IP" https://ai.atom.ui/ui/ >/dev/null \
+            && echo "web UI OK (from $LAN_IP)" || { echo "web UI FAILED"; exit 1; }
+          curl -skf --interface "$LAN_IP" --resolve ai.atom.ui:443:"$LAN_IP" https://ai.atom.ui/api/namespaces >/dev/null \
+            && echo "web UI API OK (nginx auth-inject + selti)" || { echo "web UI API FAILED"; exit 1; }
 
       # 72h, не 24h: откаточный образ :previous должен пережить
       # окно отката (3 дня). Prune -af всё равно заберёт dangling-слои.
