@@ -1,10 +1,13 @@
-"""Полная карта 3D (PLAN_FULL_MAP_3D M1/M2) — задачи Celery, очередь memory.
+"""Полная карта 3D (PLAN_FULL_MAP_3D M1/M2 + GALACTIC_LAYOUT v2) — задачи Celery, очередь memory.
 
 map_meta            — метa снапшота (version, счётчики; кеш Redis 60с)
 build_map_snapshot  — холодная сборка снапшота под build-lock, gz-байты
                       в Redis (PLAN: Celery-JSON не переносит байты, web
                       читает Redis сам — как fast-path облачка Фазы 6)
-layout_map          — beat: DrL dim=3 + релаксация + bbox, UPSERT map_layout
+layout_map          — DrL dim=3 + релаксация + bbox (путь M2; после приёмки
+                      Galactic v2 удаляется вместе с изоляцией-щитом, §7)
+galactic_layout     — Galactic Layout v2 (GALACTIC_LAYOUT.md): beat-слот
+                      layout-map, инкремент новых гранул; force — ручной
 bump_map_dirty      — инвалидатор кешей после reconciler/refresh_clusters
 """
 
@@ -109,5 +112,39 @@ def build_map_snapshot(
     routing_key="memory",
 )
 def layout_map(self) -> dict[str, Any]:
-    """Пересчёт 3D-раскладки (beat, 02:30 UTC — после refresh_clusters)."""
+    """Пересчёт 3D-раскладки DrL (M2; beat-слот передан galactic_layout)."""
     return run_async(_get_map_service().rebuild_layout)
+
+
+@shared_task(
+    bind=True,
+    base=SeltiTask,
+    name="memory_server.tasks.map_tasks.galactic_layout",
+    max_retries=1,
+    retry_backoff=True,
+    retry_backoff_max=60,
+    default_retry_delay=30,
+    soft_time_limit=240,
+    time_limit=300,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    queue="memory",
+    routing_key="memory",
+)
+def galactic_layout(self, force: bool = False) -> dict[str, Any]:
+    """Galactic Layout v2 (GALACTIC_LAYOUT.md) — занимает beat-слот 02:30 UTC.
+
+    force=False (beat, дефолт): размещает ТОЛЬКО гранулы без строки
+    map_layout (инкремент §4: барицентр соседей / центроид кластера /
+    гало); старые строки не пересчитываются никогда.
+
+    force=True — полный побитово детерминированный пересев галактики
+    (перноудовые RNG §3; снос сферического fallback). ТОЛЬКО ручной
+    запуск по команде Мастера/Рэя, например:
+
+        celery -A memory_server.celery_app call \\
+            memory_server.tasks.map_tasks.galactic_layout --args '[true]'
+
+    Идемпотентен: повтор force-прогона даёт те же координаты (GL-1 §3).
+    """
+    return run_async(_get_map_service().layout_galaxy, force=force)

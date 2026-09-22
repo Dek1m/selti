@@ -452,7 +452,11 @@ class TestMigrationAndSchedule:
         from memory_server.celery_app import app
 
         schedule = app.conf.beat_schedule
-        assert schedule["layout-map"]["task"] == "memory_server.tasks.map_tasks.layout_map"
+        # GALACTIC_LAYOUT §7: слот layout-map передан galactic_layout (v2),
+        # DrL-путь layout_map жив до приёмки v2 как ручной
+        assert schedule["layout-map"]["task"] == (
+            "memory_server.tasks.map_tasks.galactic_layout"
+        )
         cron = schedule["layout-map"]["schedule"]
         # 02:30 UTC — после refresh_clusters (02:00), кластеры нового состава учтены
         assert (set(cron.hour), set(cron.minute)) == ({2}, {30})

@@ -132,11 +132,13 @@ app.conf.beat_schedule = {
         "task": "memory_server.tasks.lifecycle_tasks.refresh_clusters",
         "schedule": crontab(hour=2, minute=0),  # ежедневно 02:00 UTC
     },
-    # Полная карта 3D (PLAN_FULL_MAP_3D M2): пересчёт раскладки после
-    # refresh_clusters — кластеры нового состава сразу получают места;
-    # no-op при отсутствии dirty и неизменном version-хэше графа.
+    # Полная карта 3D (GALACTIC_LAYOUT v2, §7): galactic_layout занимает
+    # beat-слот layout_map — инкремент новых гранул после refresh_clusters
+    # (02:00); размещённые строки не пересчитываются. Force-пересев — только
+    # ручной запуск по команде Мастера (celery call, см. докстринг таски).
+    # DrL-путь layout_map остаётся до приёмки v2 (удаляется с изоляцией-щитом).
     "layout-map": {
-        "task": "memory_server.tasks.map_tasks.layout_map",
+        "task": "memory_server.tasks.map_tasks.galactic_layout",
         "schedule": crontab(hour=2, minute=30),  # ежедневно 02:30 UTC
     },
     "confidence-decay": {

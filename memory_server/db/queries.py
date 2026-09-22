@@ -1184,3 +1184,28 @@ MAP_LAYOUT_UPSERT_SQL = """
         x = EXCLUDED.x, y = EXCLUDED.y, z = EXCLUDED.z,
         rev = EXCLUDED.rev, updated_at = now()
 """
+
+# ── Galactic Layout v2 (GALACTIC_LAYOUT.md, GL-1/GL-2) ──
+
+# Вход галактики: важность нужна для массы кластеров (балдж топ-64, §1.2) —
+# у MAP_LAYOUT_NODES_SQL её нет.
+GALACTIC_NODES_SQL = """
+    SELECT m.id::text, m.cluster_id::text, m.importance
+    FROM memories m
+    WHERE m.status = 'asserted' AND m.valid_to IS NULL
+    ORDER BY m.id
+"""
+
+# Force-пересев (§3): только по команде Мастера. Поколение rev читается
+# ДО сноса — TRUNCATE обнуляет max(rev), а «поколение раскладки» должно
+# расти и через пересев.
+MAP_LAYOUT_TRUNCATE_SQL = "TRUNCATE TABLE map_layout"
+
+# Посадка новых (§4): конфликт = строку уже разместил кто-то другой —
+# пропускаем молча. Размещённые узлы не пересчитываются НИКОГДА.
+MAP_LAYOUT_INSERT_IGNORE_SQL = """
+    INSERT INTO map_layout (node_id, x, y, z, rev)
+    SELECT u.node_id, u.x, u.y, u.z, $5::int
+    FROM unnest($1::uuid[], $2::real[], $3::real[], $4::real[]) AS u(node_id, x, y, z)
+    ON CONFLICT (node_id) DO NOTHING
+"""

@@ -381,3 +381,28 @@ MAP_CACHE_HITS = Counter(
     f"{PREFIX}_map_cache_hits_total",
     "Total map meta/snapshot cache hits (Redis)",
 )
+
+# ============================================================
+# Galactic Layout v2 (GALACTIC_LAYOUT.md, GL-1/GL-2)
+# ============================================================
+
+# Режимы: full — force-пересев по команде Мастера, incremental — beat-прирост
+GALACTIC_LAYOUT_SECONDS = Histogram(
+    f"{PREFIX}_galactic_layout_seconds",
+    "Galactic layout run duration (spectral order + seeding + relaxation)",
+    ["mode"],
+    buckets=(0.5, 1.0, 2.5, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0, 300.0),
+)
+
+# Посажено узлов по регионам галактики (arm/bulge/halo/satellite)
+GALACTIC_LAYOUT_PLACED = Counter(
+    f"{PREFIX}_galactic_layout_placed_total",
+    "Nodes placed into map_layout by galactic layout, by region",
+    ["mode", "region"],
+)
+
+# Медиана длины резолвленного ребра после прогона (§8.3: ≤150 при R_disk 900)
+GALACTIC_EDGE_MEDIAN_LEN = Gauge(
+    f"{PREFIX}_galactic_edge_median_len",
+    "Median resolved-edge length after galactic layout (structure quality)",
+)

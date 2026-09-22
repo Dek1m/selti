@@ -31,9 +31,13 @@ import numpy as np
 from memory_server.config import Settings
 from memory_server.db import queries as q
 from memory_server.logger import get_logger
+from memory_server.memory import galactic_layout as galaxy
 from memory_server.memory import map_layout
 from memory_server.memory.project_repository import ProjectRepository
 from memory_server.metrics import (
+    GALACTIC_EDGE_MEDIAN_LEN,
+    GALACTIC_LAYOUT_PLACED,
+    GALACTIC_LAYOUT_SECONDS,
     MAP_CACHE_HITS,
     MAP_LAYOUT_FALLBACKS,
     MAP_LAYOUT_SECONDS,
@@ -63,6 +67,10 @@ LAYOUT_GRAPH_KEY = "map:layout:graph"
 
 # Раз в сколько опрашиваем Redis, ждём билд-конкурента под lock
 _BUILD_POLL_INTERVAL = 0.5
+
+# Батч INSERT IGNORE галактики (§5): statement_timeout не должен ловить
+# одиночную вставку 15k строк
+_LAYOUT_BATCH = 5000
 
 
 def truncate_preview(text: str | None, limit: int) -> str | None:
@@ -425,6 +433,112 @@ class MapService:
             "ok": True, "method": method, "nodes": len(node_rows),
             "edges": len(edge_list), "rev": rev, "version": post_meta["version"],
             "seconds": round(elapsed, 3),
+        }
+
+    # ── Galactic Layout v2 (GALACTIC_LAYOUT.md GL-1/GL-2) ───────────
+
+    async def layout_galaxy(self, force: bool = False) -> dict[str, Any]:
+        """Астрофизическая раскладка (спираль + балдж + гало) вместо DrL.
+
+        force=False (beat): только гранулы без строки map_layout — правила
+        инкремента §4; размещённые строки не пересчитываются НИКОГДА.
+        force=True: полный побитово детерминированный пересев (перноудовые
+        RNG §3) — только ручной запуск по команде Мастера/Рэя. Снапшот и
+        API не меняются: rev в version-хэше сам инвалидирует ETag.
+        """
+        started = time.monotonic()
+        async with self._pool.acquire() as conn:
+            if not await conn.fetchval(q.MAP_LAYOUT_EXISTS_SQL):
+                return {"ok": False, "reason": "migration 024 pending"}
+            node_rows = await conn.fetch(q.GALACTIC_NODES_SQL)
+            edge_rows = await conn.fetch(q.MAP_LAYOUT_EDGES_SQL)
+            old_rows = await conn.fetch(q.MAP_LAYOUT_EXISTING_SQL)
+
+        index = {row["id"]: i for i, row in enumerate(node_rows)}
+        edge_list: list[tuple[int, int]] = []
+        edge_weights: list[float] = []
+        for row in edge_rows:
+            src = index.get(row["source_id"])
+            tgt = index.get(row["target_id"])
+            if src is not None and tgt is not None:
+                edge_list.append((src, tgt))
+                edge_weights.append(float(row["weight"]))
+        placed_coords = np.full((len(node_rows), 3), np.nan)
+        for row in old_rows:
+            pos = index.get(row["node_id"])
+            if pos is not None:
+                placed_coords[pos] = (row["x"], row["y"], row["z"])
+        inp = galaxy.GalacticInput(
+            node_ids=[row["id"] for row in node_rows],
+            cluster_ids=[row["cluster_id"] for row in node_rows],
+            importance=[float(row["importance"] or 0.0) for row in node_rows],
+            edges=edge_list,
+            edge_weights=edge_weights,
+        )
+
+        if force:
+            todo_indices = np.arange(len(node_rows), dtype=np.int64)
+            coords, report = galaxy.layout_full(inp)
+        else:
+            todo_indices, coords, report = galaxy.layout_increment(inp, placed_coords)
+
+        elapsed = time.monotonic() - started
+        if report.placed == 0:
+            return {"ok": True, "noop": True, "force": force,
+                    "seconds": round(elapsed, 3)}
+
+        # Расчёт вне транзакции (секунды eigh/релаксации не держат блокировки);
+        # TRUNCATE+INSERT атомарны, rev читается ДО сноса — поколение живёт
+        # через пересев. ON CONFLICT DO NOTHING: конкурент уже разместил —
+        # пропускаем, старые строки неприкосновенны.
+        inserted, rev = 0, 0
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                rev = int(await conn.fetchval(q.MAP_LAYOUT_NEXT_REV_SQL))
+                if force:
+                    await conn.execute(q.MAP_LAYOUT_TRUNCATE_SQL)
+                for start in range(0, len(todo_indices), _LAYOUT_BATCH):
+                    stop = start + _LAYOUT_BATCH
+                    status = await conn.execute(
+                        q.MAP_LAYOUT_INSERT_IGNORE_SQL,
+                        [node_rows[i]["id"] for i in todo_indices[start:stop]],
+                        coords[start:stop, 0].tolist(),
+                        coords[start:stop, 1].tolist(),
+                        coords[start:stop, 2].tolist(),
+                        rev,
+                    )
+                    inserted += int(status.rsplit(" ", 1)[-1]) if status else 0
+
+        redis = await self._redis()
+        await redis.delete(DIRTY_KEY)
+        await redis.delete(META_KEY)
+        async for key in redis.scan_iter(match=f"{SNAP_KEY_PREFIX}*"):
+            await redis.delete(key)
+        post_meta = await self._compute_meta()
+        await redis.set(LAYOUT_GRAPH_KEY, post_meta["version"])
+
+        GALACTIC_LAYOUT_SECONDS.labels(mode=report.mode).observe(elapsed)
+        for region, count in report.regions.items():
+            if count:
+                GALACTIC_LAYOUT_PLACED.labels(mode=report.mode, region=region).inc(count)
+        if report.edge_median_len is not None:
+            GALACTIC_EDGE_MEDIAN_LEN.set(report.edge_median_len)
+        logger.info(
+            "map: galactic layout done",
+            extra={
+                "mode": report.mode, "placed": inserted, "rev": rev,
+                "regions": report.regions, "arm_mass": report.arm_mass,
+                "arm_balance_pct": report.arm_balance_pct,
+                "edge_median_len": report.edge_median_len,
+                "seconds": round(elapsed, 3),
+            },
+        )
+        return {
+            "ok": True, "force": force, "mode": report.mode, "placed": inserted,
+            "rev": rev, "regions": report.regions, "arm_mass": report.arm_mass,
+            "arm_balance_pct": report.arm_balance_pct,
+            "edge_median_len": report.edge_median_len,
+            "version": post_meta["version"], "seconds": round(elapsed, 3),
         }
 
     # ── Dirty-bump: reconciler / refresh_clusters ──────────────────
