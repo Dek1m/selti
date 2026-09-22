@@ -29,7 +29,7 @@ describe("selectLabeledNodes — top-K DOM label culling (§7)", () => {
     expect(picks.map((p) => p.index)).toEqual([4]);
   });
 
-  it("respects the projected-size threshold", () => {
+  it("respects the projected-size threshold and carries radiusPx", () => {
     const picks = selectLabeledNodes(
       [candidate({ index: 1, radiusPx: 1 }), candidate({ index: 2, radiusPx: 2.5 })],
       800,
@@ -37,6 +37,8 @@ describe("selectLabeledNodes — top-K DOM label culling (§7)", () => {
       10,
     );
     expect(picks.map((p) => p.index)).toEqual([2]);
+    // подпись вешается от кромки диска (правило Мастера: кромка + 5px)
+    expect(picks[0].radiusPx).toBe(2.5);
   });
 
   it("nearest first, importance as tiebreak, min pixel gap enforced", () => {

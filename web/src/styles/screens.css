@@ -476,7 +476,7 @@
   will-change: transform;
 }
 
-/* hover tooltip: HUD tag with name + preview, follows the cursor */
+/* hover tooltip: HUD tag with name + preview, anchored to the star's edge */
 .map-tooltip {
   position: absolute; z-index: 5;
   max-width: 320px;
@@ -486,7 +486,7 @@
   border: 1px solid var(--sl-hud-frame);
   border-radius: var(--sl-r-sm);
   box-shadow: var(--sl-shadow-2);
-  transform: translateY(-50%); /* рамка справа от звезды, центр по вертикали */
+  transform: translateY(-50%); /* left = правая кромка + 5px, вертикаль — центр звезды */
   pointer-events: none;
 }
 .map-tooltip.flip { transform: translate(-100%, -50%); }

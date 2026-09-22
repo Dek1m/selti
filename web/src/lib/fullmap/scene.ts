@@ -20,7 +20,7 @@ import { EDGE_VISIBLE_CAP, selectVisibleEdges, selectVisibleNodes } from "./edge
 import { selectLabeledNodes, type LabelCandidate } from "./lod";
 import { ellipseLayout, mixedLayout, FULL_VOLUME, hashUuid, type LayoutBounds, type VolumeBounds } from "./layout";
 import { unpackNodeString } from "./pack";
-import { CORONA_FRAGMENT, CORONA_VERTEX, STAR_FRAGMENT, STAR_VERTEX, SUN_FRAGMENT, SUN_VERTEX } from "./shaders";
+import { HALO_FRAGMENT, HALO_VERTEX, STAR_FRAGMENT, STAR_VERTEX, SUN_FRAGMENT, SUN_VERTEX } from "./shaders";
 import type { PackedCluster, PackedMapSnapshot } from "./types";
 
 const CLICK_SLOP_PX = 5;
@@ -199,6 +199,36 @@ export class FullMapScene {
   }
 
   private hoverIndex: number | null = null;
+
+  /**
+   * Реальный экранный радиус видимого диска звезды (px CSS-вьюпорта):
+   * максимум из Points-точки с магнификацией ×4 (вблизи) и инстанс-солнца
+   * при подлёте — подписи отступают именно от кромки, а не от центра
+   * (правило Мастера: кромка + 5px). Формулы зеркалят STAR_VERTEX
+   * (mag = 1+3×(1−smoothstep 60..400)) и updateSuns (кап 12, буст ×2).
+   */
+  private starScreenRadiusPx(index: number): number {
+    if (!this.packed) return 0;
+    const importance = this.packed.nodeMeta[index * 4 + 2];
+    const star = new THREE.Vector3(
+      this.packed.nodePositions[index * 3],
+      this.packed.nodePositions[index * 3 + 1],
+      this.packed.nodePositions[index * 3 + 2],
+    );
+    const dist = this.camera.position.distanceTo(star);
+    const base = (4.5 + importance * 1.9) * this.renderer.getPixelRatio();
+    const mag = 1 + 3 * (1 - this.smooth(60.0, 400.0, dist));
+    let radius = (base * mag) / 2;
+    if (dist < 250) {
+      const rect = this.renderer.domElement.getBoundingClientRect();
+      const fovScale = rect.height / 2 / Math.tan((this.camera.fov * Math.PI) / 360);
+      const selectedBoost = index === this.selectedNode ? 2.0 : 1.0;
+      const scale = Math.min(12, Math.max(1.5, (base * dist) / 1276)) * selectedBoost;
+      radius = Math.max(radius, (scale * fovScale) / Math.max(dist, 1));
+    }
+    return radius;
+  }
+
   private labels: HTMLDivElement[] = [];
 
   private frame = 0;
@@ -401,28 +431,28 @@ export class FullMapScene {
     this.suns.frustumCulled = false;
     this.scene.add(this.suns);
 
-    // корона: billboard-квад ×2 радиуса, аддитивная, общий seed-атрибут
-    const coronaGeo = new THREE.PlaneGeometry(2, 2);
-    coronaGeo.setAttribute("aInstSeed", seed);
-    const coronaMaterial = new THREE.ShaderMaterial({
-      vertexShader: CORONA_VERTEX,
-      fragmentShader: CORONA_FRAGMENT,
-      uniforms: { uTime: { value: 0 } },
+    // кольцевое гало: billboard-квад ×2.2 радиуса, аддитивная, статичное —
+    // тонкая хромосфера у кромки диска (диск в кваде до r≈0.455)
+    const haloGeo = new THREE.PlaneGeometry(2, 2);
+    const haloMaterial = new THREE.ShaderMaterial({
+      vertexShader: HALO_VERTEX,
+      fragmentShader: HALO_FRAGMENT,
+      uniforms: {},
       transparent: true,
       depthWrite: false,
       depthTest: false,
       side: THREE.DoubleSide,
       blending: THREE.AdditiveBlending,
     });
-    this.corona = new THREE.InstancedMesh(coronaGeo, coronaMaterial, SUN_CAP);
-    this.corona.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.corona.count = 0;
-    this.corona.frustumCulled = false;
-    this.corona.renderOrder = 5;
-    this.scene.add(this.corona);
+    this.halo = new THREE.InstancedMesh(haloGeo, haloMaterial, SUN_CAP);
+    this.halo.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.halo.count = 0;
+    this.halo.frustumCulled = false;
+    this.halo.renderOrder = 5;
+    this.scene.add(this.halo);
   }
 
-  private corona: THREE.InstancedMesh | null = null;
+  private halo: THREE.InstancedMesh | null = null;
 
   private sunsSeed: THREE.InstancedBufferAttribute | null = null;
 
@@ -460,13 +490,13 @@ export class FullMapScene {
       matrix.makeScale(scale, scale, scale);
       matrix.setPosition(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
       this.suns.setMatrixAt(used, matrix);
-      this.corona?.setMatrixAt(used, matrix);
+      this.halo?.setMatrixAt(used, matrix);
 
       const nsIdx = meta[i * 4] | 0;
       const rgb = nsRgb[nsIdx] ?? [0.54, 0.59, 0.67];
       color.setRGB(rgb[0], rgb[1], rgb[2]);
       this.suns.setColorAt(used, color);
-      this.corona?.setColorAt(used, color);
+      this.halo?.setColorAt(used, color);
       this.sunsSeed.setX(used, (hashUuid(`${i}`) >>> 12) / 0x1000000);
       used++;
     }
@@ -475,10 +505,10 @@ export class FullMapScene {
     this.suns.instanceMatrix.needsUpdate = true;
     this.sunsSeed.needsUpdate = true;
     if (this.suns.instanceColor) this.suns.instanceColor.needsUpdate = true;
-    if (this.corona) {
-      this.corona.count = used;
-      this.corona.instanceMatrix.needsUpdate = true;
-      if (this.corona.instanceColor) this.corona.instanceColor.needsUpdate = true;
+    if (this.halo) {
+      this.halo.count = used;
+      this.halo.instanceMatrix.needsUpdate = true;
+      if (this.halo.instanceColor) this.halo.instanceColor.needsUpdate = true;
     }
   }
 
@@ -1096,8 +1126,6 @@ export class FullMapScene {
     this.lastLabelRefresh = now;
 
     const rect = this.renderer.domElement.getBoundingClientRect();
-    const fovScale = rect.height / 2 / Math.tan((this.camera.fov * Math.PI) / 360);
-    const starWorldRadius = 3.2;
     const candidates: LabelCandidate[] = [];
     const total = Math.max(this.nodeVisibleCount, 0);
     for (let k = 0; k < total; k++) {
@@ -1115,15 +1143,20 @@ export class FullMapScene {
         y: ((1 - v.y) / 2) * rect.height,
         depth,
         behind: v.z > 1,
-        radiusPx: (starWorldRadius * fovScale) / Math.max(depth, 1),
+        // реальный экранный радиус диска — подпись отступает от кромки
+        radiusPx: this.starScreenRadiusPx(i),
         importance: this.packed.nodeMeta[i * 4 + 2],
       });
     }
     this.renderLabels(selectLabeledNodes(candidates, rect.width, rect.height, LABEL_MAX));
   }
 
-  private renderLabels(picks: Array<{ index: number; x: number; y: number }>): void {
+  /** Отступ подписи от правой кромки диска звезды (правило Мастера). */
+  private static readonly LABEL_EDGE_GAP_PX = 5;
+
+  private renderLabels(picks: Array<{ index: number; x: number; y: number; radiusPx: number }>): void {
     if (!this.packed) return;
+    const viewW = this.renderer.domElement.clientWidth;
     while (this.labels.length < picks.length) {
       const div = document.createElement('div');
       div.className = 'map-label';
@@ -1138,7 +1171,18 @@ export class FullMapScene {
       }
       div.textContent = unpackNodeString(this.packed!, pick.index, 1);
       div.style.display = 'block';
-      div.style.transform = 'translate(' + pick.x + 'px, ' + (pick.y - 14) + 'px) translate(-50%, -100%)';
+      // подпись СПРАВА от кромки диска: x = кромка + 5px, вертикаль — центр
+      // звезды; у правого края окна флип влево (кромка − 5px, якорь справа)
+      const gap = FullMapScene.LABEL_EDGE_GAP_PX;
+      const radiusPx = pick.radiusPx;
+      const leftX = pick.x + radiusPx + gap;
+      const width = div.offsetWidth;
+      if (leftX + width > viewW - 8) {
+        div.style.transform =
+          'translate(' + (pick.x - radiusPx - gap) + 'px, ' + pick.y + 'px) translate(-100%, -50%)';
+      } else {
+        div.style.transform = 'translate(' + leftX + 'px, ' + pick.y + 'px) translate(0, -50%)';
+      }
     });
   }
 
@@ -1158,8 +1202,7 @@ export class FullMapScene {
     if (starMaterial) starMaterial.uniforms.uTime.value = elapsed;
     const sunMaterial = this.suns?.material as THREE.ShaderMaterial | undefined;
     if (sunMaterial) sunMaterial.uniforms.uTime.value = elapsed;
-    const coronaMaterial = this.corona?.material as THREE.ShaderMaterial | undefined;
-    if (coronaMaterial) coronaMaterial.uniforms.uTime.value = elapsed;
+    // гало-кольцо статично (решение Мастера) — uTime ему не нужен
 
     // 3D-солнца: близкие звёзды (<250 юнитов) — InstancedMesh, throttle 120мс
     this.updateSuns(now);
@@ -1172,22 +1215,21 @@ export class FullMapScene {
         if (picked === null) {
           this.callbacks.onHover(null);
         } else {
-          // экранный радиус звезды — тултип позиционируется от кромки
-          const importance = this.packed ? this.packed.nodeMeta[picked * 4 + 2] : 3;
-          const dist = this.camera.position.distanceTo(
-            new THREE.Vector3(
-              this.packed!.nodePositions[picked * 3],
-              this.packed!.nodePositions[picked * 3 + 1],
-              this.packed!.nodePositions[picked * 3 + 2],
-            ),
+          // тултип позиционируется от КРОМКИ диска (правило Мастера:
+          // правая кромка + 5px), поэтому отдаём центр звезды на экране
+          // и её реальный экранный радиус — не координаты курсора
+          const star = new THREE.Vector3(
+            this.packed!.nodePositions[picked * 3],
+            this.packed!.nodePositions[picked * 3 + 1],
+            this.packed!.nodePositions[picked * 3 + 2],
           );
-          const mag = 1 + 3 * (1 - this.smooth(60.0, 400.0, dist));
-          const sizePx = (4.5 + importance * 1.9) * this.renderer.getPixelRatio() * mag;
+          const rect = this.renderer.domElement.getBoundingClientRect();
+          star.project(this.camera);
           this.callbacks.onHover({
             index: picked,
-            x: this.pointerScreen.x,
-            y: this.pointerScreen.y,
-            radiusPx: sizePx / 2,
+            x: ((star.x + 1) / 2) * rect.width,
+            y: ((1 - star.y) / 2) * rect.height,
+            radiusPx: this.starScreenRadiusPx(picked),
           });
         }
       }
@@ -1247,14 +1289,14 @@ export class FullMapScene {
   }
 
   private disposeMap(): void {
-    for (const object of [this.fullPoints, this.suns, this.corona, this.mainEdges, this.supersedesEdges, this.contradictsEdges]) {
+    for (const object of [this.fullPoints, this.suns, this.halo, this.mainEdges, this.supersedesEdges, this.contradictsEdges]) {
       if (!object) continue;
       this.scene.remove(object);
       object.geometry.dispose();
       (object.material as THREE.Material).dispose();
     }
     this.suns = null;
-    this.corona = null;
+    this.halo = null;
     this.fullPoints = null;
     this.fullEdges = null;
     this.mainEdges = null;

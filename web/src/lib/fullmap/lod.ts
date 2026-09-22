@@ -21,6 +21,8 @@ export interface LabelPick {
   index: number;
   x: number;
   y: number;
+  /** projected radius in px — labels hang off the star's edge (+5px) */
+  radiusPx: number;
 }
 
 /**
@@ -45,7 +47,9 @@ export function selectLabeledNodes(
     const clear = picked.every(
       (p) => Math.hypot(p.x - candidate.x, p.y - candidate.y) >= MIN_GAP_PX,
     );
-    if (clear) picked.push({ index: candidate.index, x: candidate.x, y: candidate.y });
+    if (clear) {
+      picked.push({ index: candidate.index, x: candidate.x, y: candidate.y, radiusPx: candidate.radiusPx });
+    }
   }
   return picked;
 }

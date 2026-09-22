@@ -132,8 +132,13 @@ void main() {
   halo = mix(halo, halo * 1.15 + 0.06, vBlur);
 
   float alpha = max(core, halo * mix(0.85, 0.7, vBlur));
-  float rim = (vHighlight >= 2.0) ? (1.0 - smoothstep(0.55, 1.0, dist)) * 0.35 : 0.0;
-  alpha = max(alpha, rim);
+
+  // хит поиска: аккуратное тонкое кольцо у кромки вместо расплывчатого
+  // свечения — тот же приём, что хромосфера 3D-солнц (единый язык)
+  float hitRing = (vHighlight >= 2.0)
+    ? smoothstep(0.6, 0.7, dist) * (1.0 - smoothstep(0.78, 0.95, dist))
+    : 0.0;
+  alpha = max(alpha, hitRing * 0.9);
 
   // заметное перемигивание фоновых звёзд (±35% альфы), выбранная не мигает
   alpha *= 1.0 + vTwinkleAmp * sin(uTime * vTwinkleFreq + vTwinklePhase);
@@ -148,79 +153,65 @@ void main() {
   color = mix(color, shifted, hueW);
 
   vec3 fogged = mix(color, uFogColor, (1.0 - vFade) * 0.6);
-  gl_FragColor = vec4(mix(coreColor, fogged, haloT) * alpha, alpha);
+  vec3 outCol = mix(coreColor, fogged, haloT);
+  // кольцо хита с тёплым white-hot нагревом — цвет слоя остаётся читаемым
+  vec3 ringCol = mix(color, vec3(1.0), 0.45);
+  outCol = mix(outCol, ringCol, hitRing);
+  gl_FragColor = vec4(outCol * alpha, alpha);
 }
 `;
 
 /**
- * КОРОНА 3D-солнца: billboard-квад ×2 радиуса сферы, аддитивная,
- * радиальный градиент цвет→прозрачность, медленное мерцание (0.3-0.6 Гц)
- * и лёгкий шифт оттенка по периметру («огонь дышит»).
+ * КОЛЬЦЕВОЕ ГАЛО 3D-солнца (эталон «реальное солнце», разворот Мастера
+ * 22.09): billboard-квад ×2.2 радиуса сферы, аддитивная, СТАТИЧНОЕ тонкое
+ * ровное кольцо-хромосфера, прижатое к кромке диска, с white-hot
+ * внутренним краем и коротким мягким радиальным спадом сразу за кольцом.
+ * Никаких лепестков, облачной атмосферы и мерцания — живость даёт
+ * плазма поверхности (SUN_FRAGMENT), кольцо стабильно.
  */
-export const CORONA_VERTEX = /* glsl */ `
+export const HALO_VERTEX = /* glsl */ `
 // NB: instanceMatrix/instanceColor объявляет сам three (USE_INSTANCING
 // prefix для InstancedMesh) — свои объявления ломают компиляцию
-attribute float aInstSeed;
-
-uniform float uTime;
-
 varying vec3 vLayerColor;
-varying float vSeed;
 varying vec2 vQuad;
 
 void main() {
   // масштаб инстанса (радиус сферы в юнитах) — из первой колонки матрицы
   float instScale = length(vec3(instanceMatrix[0][0], instanceMatrix[0][1], instanceMatrix[0][2]));
   vec4 mvCenter = modelViewMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
-  // billboard: квад в view-space, радиус короны = 2.2× радиуса сферы (юниты)
+  // billboard: квад в view-space, радиус квада = 2.2× радиуса сферы (юниты)
   mvCenter.xy += position.xy * instScale * 2.2;
   vLayerColor = instanceColor;
-  vSeed = aInstSeed;
   vQuad = position.xy;
   gl_Position = projectionMatrix * mvCenter;
 }
 `;
 
-export const CORONA_FRAGMENT = /* glsl */ `
+export const HALO_FRAGMENT = /* glsl */ `
 precision highp float;
 
-uniform float uTime;
-
 varying vec3 vLayerColor;
-varying float vSeed;
 varying vec2 vQuad;
 
 void main() {
-  float ang = atan(vQuad.y, vQuad.x);
+  // r в единицах квада: 1.0 = 2.2 радиуса сферы, кромка диска ≈ 0.455
+  float r = length(vQuad);
 
-  // рандомная форма: уникальные лепестки per-star (угловой шум радиуса)
-  float petalFreq = 3.0 + floor(fract(vSeed * 5.17) * 4.0) * 1.7;
-  float deform = 1.0
-    + 0.13 * sin(ang * petalFreq + vSeed * 6.2831)
-    + 0.07 * sin(ang * 7.3 - vSeed * 3.1);
-  float r = length(vQuad) / deform;
+  // ── ХРОМОСФЕРА: тонкое яркое кольцо сразу за кромкой диска ──
+  // сфера «дышит» ±4% (SUN_VERTEX), поэтому внутренний край кольца
+  // стоит за максимумом раздува (0.455 × 1.04 ≈ 0.473)
+  float ring = smoothstep(0.475, 0.505, r) * (1.0 - smoothstep(0.55, 0.63, r));
 
+  // короткий мягкий радиальный спад сразу за кольцом; внутри кромки
+  // стартует с нуля и подстилает стык «диск ↔ кольцо» при дыхании сферы
+  float falloff = smoothstep(0.42, 0.47, r) * (1.0 - smoothstep(0.47, 0.8, r)) * 0.2;
 
-  // ── ЯВНОЕ КРУГЛОЕ КОЛЬЦО-ГАЛО сразу за кромкой диска (диск в кваде до r≈0.455)
-  // тонкое яркое: резко загорается за кромкой, мягко гаснет наружу
-  float haloRing = smoothstep(0.46, 0.54, r) * (1.0 - smoothstep(0.64, 0.82, r));
-  float outer = (1.0 - smoothstep(0.5, 1.02, r)) * 0.3;
+  float alpha = max(ring, falloff);
 
-  // рандом per-star: интенсивность 0.5-1.0, мерцание 0.3-0.7 Гц
-  float intensity = 0.5 + fract(vSeed * 7.13) * 0.5;
-  float freq = 1.88 + fract(vSeed * 3.71) * 2.51;
-  float flicker = 0.75 + 0.25 * sin(uTime * freq + vSeed * 6.2831 + ang * 2.2);
-  float hueShift = 0.5 + 0.5 * sin(uTime * 0.9 + ang * 3.0 + vSeed * 4.0);
-  vec3 tint = mix(vLayerColor, vec3(1.0), 0.25 + 0.2 * hueShift);
+  // white-hot внутренний край → тёплый цвет слоя наружу (как на эталоне)
+  float heat = 1.0 - smoothstep(0.475, 0.63, r);
+  vec3 col = mix(vLayerColor, vec3(1.0), 0.55 * heat);
 
-  // ── ЧИСТОЕ СВЕТЯЩЕЕСЯ КОЛЬЦО (фидбек Мастера 22.09: атмосферу/дымку
-  // выпилить полностью, оставить только кольцо вокруг звезды) ──
-  // тонкое яркое кольцо цвета слоя с белым нагревом, живой пульс 0.3-0.6 Гц
-  vec3 ringTint = mix(vLayerColor, vec3(1.0), 0.55);
-  float ringPulse = 0.62 + 0.28 * sin(uTime * freq * 0.7 + vSeed * 6.2831 + ang * 1.4);
-  float ringAlpha = haloRing * ringPulse * intensity;
-  float alpha = ringAlpha;
-  vec3 col = ringTint;
   gl_FragColor = vec4(col * alpha, alpha);
 }
 `;

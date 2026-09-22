@@ -36,11 +36,15 @@ interface FullMapLayerProps {
 interface TooltipState {
   name: string;
   preview: string | null;
+  /** экранный центр звезды — рамка позиционируется от кромки диска */
   x: number;
   y: number;
-  /** экранный радиус звезды — рамка отступает на 10px от кромки */
+  /** экранный радиус звезды (с магнификацией и инстанс-солнцем) */
   radiusPx: number;
 }
+
+/** Отступ рамки тултипа от правой кромки диска (правило Мастера). */
+const TOOLTIP_EDGE_GAP_PX = 5;
 
 const EMPTY_FILTERS: SearchFilters = {
   query: "",
@@ -299,7 +303,14 @@ export function FullMapLayer({ mode = "full", constellationSnapshot = null, quer
         <div
           className={`map-tooltip${tooltip.x + tooltip.radiusPx + 350 > window.innerWidth ? " flip" : ""}`}
           style={{
-            left: tooltip.x + tooltip.radiusPx + 10,
+            // правило Мастера: рамка отступает 5px от ПРАВОЙ кромки диска;
+            // при флипе у правого края окна — от ЛЕВОЙ кромки − 5px
+            // (иначе translate(-100%) кладёт рамку обратно на звезду)
+            left:
+              tooltip.x +
+              (tooltip.x + tooltip.radiusPx + 350 > window.innerWidth
+                ? -(tooltip.radiusPx + TOOLTIP_EDGE_GAP_PX)
+                : tooltip.radiusPx + TOOLTIP_EDGE_GAP_PX),
             top: tooltip.y,
           }}
           aria-hidden="true"
