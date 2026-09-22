@@ -200,19 +200,6 @@ void main() {
     + 0.07 * sin(ang * 7.3 - vSeed * 3.1);
   float r = length(vQuad) / deform;
 
-  // ── АТМОСФЕРА: глоу от кромки диска наружу (§ фидбек Мастера) ──
-  // яркая привязка к кромке (alpha 1.0) + «толстый» мягкий спад ^1.2 от 0.55
-  float atmoRise = smoothstep(0.42, 0.60, r);
-  float atmoFall = pow(1.0 - smoothstep(0.55, 1.0, r), 1.2);
-  float atmo = atmoRise * atmoFall;
-
-  // ── ВСПОЛОХИ: угловой+временной шум (3 гармоники k=2,3,5), ±55% —
-  // пламя «дышит» несимметрично
-  float flare =
-    sin(ang * 2.0 + uTime * 0.9 + vSeed * 6.2831) * 0.55 +
-    sin(ang * 3.0 - uTime * 0.7 + vSeed * 3.1) * 0.45 +
-    sin(ang * 5.0 + uTime * 1.3 + vSeed * 1.7) * 0.30;
-  atmo *= 1.0 + 0.55 * flare;
 
   // ── ЯВНОЕ КРУГЛОЕ КОЛЬЦО-ГАЛО сразу за кромкой диска (диск в кваде до r≈0.455)
   // тонкое яркое: резко загорается за кромкой, мягко гаснет наружу
@@ -226,20 +213,14 @@ void main() {
   float hueShift = 0.5 + 0.5 * sin(uTime * 0.9 + ang * 3.0 + vSeed * 4.0);
   vec3 tint = mix(vLayerColor, vec3(1.0), 0.25 + 0.2 * hueShift);
 
-  // цвет атмосферы: слой с нагревом к белому у кромки (ярче ободок)
-  vec3 atmoTint = mix(vLayerColor, vec3(1.0), 0.45 * atmoRise);
-
-  // ── ГАЛО-КОЛЬЦО: отдельный гарантированный слой (фидбек Мастера: не тонет
-  // в атмосфере) — тонкая чёткая линия цвета слоя с белым нагревом, alpha ~0.9.
-  // max-композиция, а не сумма: кольцо видно всегда.
+  // ── ЧИСТОЕ СВЕТЯЩЕЕСЯ КОЛЬЦО (фидбек Мастера 22.09: атмосферу/дымку
+  // выпилить полностью, оставить только кольцо вокруг звезды) ──
+  // тонкое яркое кольцо цвета слоя с белым нагревом, живой пульс 0.3-0.6 Гц
   vec3 ringTint = mix(vLayerColor, vec3(1.0), 0.55);
-  // живое кольцо: лёгкий пульс 0.3-0.6 Гц по per-star freq — не статичная линия
   float ringPulse = 0.62 + 0.28 * sin(uTime * freq * 0.7 + vSeed * 6.2831 + ang * 1.4);
   float ringAlpha = haloRing * ringPulse * intensity;
-  float glowAlpha = (atmo * 0.55 + outer * 0.12) * intensity * flicker; // живая дымка
-  float alpha = max(glowAlpha, ringAlpha);
-  vec3 col = mix(tint, atmoTint, atmoRise);
-  col = mix(col, ringTint, clamp(haloRing + ringAlpha * 0.5, 0.0, 1.0));
+  float alpha = ringAlpha;
+  vec3 col = ringTint;
   gl_FragColor = vec4(col * alpha, alpha);
 }
 `;
