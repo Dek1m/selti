@@ -1187,6 +1187,16 @@ MAP_LAYOUT_UPSERT_SQL = """
 
 # ── Galactic Layout v2 (GALACTIC_LAYOUT.md, GL-1/GL-2) ──
 
+# Защитный порог масштаба (прод-OOM 20.09): дешёвые COUNTы первой же фазой
+# таски. Рёбра без джойнов — верхняя оценка: guard консервативнее фильтра.
+GALACTIC_SCALE_SQL = """
+    SELECT
+        (SELECT count(*) FROM memories
+          WHERE status = 'asserted' AND valid_to IS NULL)           AS node_count,
+        (SELECT count(*) FROM relations WHERE target_id IS NOT NULL) AS edge_count,
+        (SELECT count(*) FROM clusters)                               AS cluster_count
+"""
+
 # Вход галактики: важность нужна для массы кластеров (балдж топ-64, §1.2) —
 # у MAP_LAYOUT_NODES_SQL её нет.
 GALACTIC_NODES_SQL = """

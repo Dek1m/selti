@@ -25,6 +25,55 @@ def uid(i: int) -> str:
     return f"00000000-0000-0000-0000-{i:012d}"
 
 
+def prod_profile_input() -> gl.GalacticInput:
+    """Синтетика прод-профиля (боя 20.09): 15 246 узлов / 104 381 рёбер /
+    1800 кластеров + гигантская ассоциация 5000 связанных свободных —
+    провокатор прод-OOM (попарная (m, m, 3) = 600 МБ на массив)."""
+    rng = np.random.default_rng(2026)
+    n_nodes, n_clusters, n_edges = 15_246, 1_800, 104_381
+    clustered_target = 9_246
+    node_ids = [f"30000000-0000-0000-0000-{i:012d}" for i in range(n_nodes)]
+    cluster_ids: list[str | None] = [None] * n_nodes
+    members_by_group: list[list[int]] = []
+    cursor = 0
+    for g in range(n_clusters):  # степенные размеры, как assign_clusters
+        size = min(150, max(1, int(rng.pareto(1.5) + 1)))
+        take = min(size, clustered_target - cursor)
+        if take > 0:
+            for i in range(cursor, cursor + take):
+                cluster_ids[i] = f"cluster-{g:04d}"
+            members_by_group.append(list(range(cursor, cursor + take)))
+            cursor += take
+    clustered_end = cursor
+    free = list(range(clustered_end, n_nodes))
+    assoc, satellites = free[:5_000], free[5_000:5_700]
+    importance = rng.integers(1, 6, n_nodes).astype(float)
+    edges: list[tuple[int, int]] = []
+    weights: list[float] = []
+    for members in members_by_group:  # внутрикластерные цепочки
+        for a, b in zip(members, members[1:]):
+            edges.append((a, b))
+            weights.append(1.0)
+    for m, n in zip(members_by_group, members_by_group[1:]):
+        if rng.random() < 0.5:  # межкластерные мосты
+            edges.append((m[0], n[0]))
+            weights.append(0.8)
+    for node in assoc:  # взаимные связи свободных → гигантская ассоциация
+        for _ in range(int(rng.integers(2, 6))):
+            edges.append((node, assoc[int(rng.integers(0, len(assoc)))]))
+            weights.append(0.6)
+    for node in satellites:  # спутники к кластерным
+        edges.append((node, int(rng.integers(0, clustered_end))))
+        weights.append(0.7)
+    while len(edges) < n_edges:  # добор фона до прод-объёма
+        a, b = int(rng.integers(0, clustered_end)), int(rng.integers(0, clustered_end))
+        edges.append((a, b))
+        weights.append(0.4)
+    return gl.GalacticInput(
+        node_ids, cluster_ids, importance, np.array(edges), np.array(weights)
+    )
+
+
 def chain_input(
     n_clusters: int = 120,
     per_cluster: int = 30,
@@ -363,7 +412,7 @@ GAL_EDGES = [{"source_id": uid(0), "target_id": uid(1), "weight": 1.0}]
 
 
 def galaxy_pool(nodes, edges, old_rows=None, layout_exists=True, next_rev=9,
-                executed=None):
+                executed=None, scale_row=None):
     if executed is None:
         executed = []
     from tests.test_map_snapshot import version_row
@@ -376,6 +425,10 @@ def galaxy_pool(nodes, edges, old_rows=None, layout_exists=True, next_rev=9,
             return version_row(node_count=len(nodes), edge_count=len(edges))
         if sql is ms_q.MAP_LAYOUT_VERSION_SQL:
             return {"layout_rev": 8, "layout_at": None}
+        if sql is ms_q.GALACTIC_SCALE_SQL:
+            return scale_row or {
+                "node_count": len(nodes), "edge_count": len(edges), "cluster_count": 4
+            }
         raise AssertionError(sql)
 
     async def fetchval(sql, *args):
@@ -521,6 +574,99 @@ class TestServiceLayoutGalaxy:
             for region in ("arm", "bulge", "halo", "satellite")
         )
         assert after - before == len(GAL_NODES)
+
+
+# ══════════════════════════════════════════════════════════════════
+# Профиль памяти прод-объёма (инцидент OOM 20.09)
+# ══════════════════════════════════════════════════════════════════
+
+
+class TestProdMemoryProfile:
+    def test_full_layout_under_400mb_and_60s(self):
+        import time
+        import tracemalloc
+
+        inp = prod_profile_input()
+        tracemalloc.start()
+        started = time.perf_counter()
+        coords, report = gl.layout_full(inp)
+        elapsed = time.perf_counter() - started
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        # до фикса блочной репульсии пик был 3080 МБ (воркер 512M — OOM)
+        assert peak < 400_000_000, f"peak {peak / 1e6:.0f} MB"
+        assert elapsed < 60.0, f"{elapsed:.1f}s"
+        assert np.isfinite(coords).all()
+        assert float(np.linalg.norm(coords, axis=1).max()) <= gl.R_HALO + 1e-6
+
+    def test_prod_profile_increment_is_cheap(self):
+        import time
+
+        inp = prod_profile_input()
+        placed = np.full((len(inp.node_ids), 3), np.nan)
+        started = time.perf_counter()
+        todo, coords, report = gl.layout_increment(inp, placed)
+        elapsed = time.perf_counter() - started
+        assert len(todo) == len(inp.node_ids)
+        assert np.isfinite(coords).all()
+        assert elapsed < 60.0
+
+    def test_giant_association_relaxed_blockwise(self):
+        # гигантская ассоциация не строит (m, m, 3): бюджеты блока/итераций
+        assert gl._RELAX_BLOCK_ELEMS * 8 <= 24_000_000
+        assert gl._RELAX_MIN_ITERS >= 1
+
+
+# ══════════════════════════════════════════════════════════════════
+# Защитный порог масштаба (первая фаза таски, прод-OOM 20.09)
+# ══════════════════════════════════════════════════════════════════
+
+
+class TestScaleGuard:
+    @pytest.mark.asyncio
+    async def test_skips_when_edges_over_limit(self):
+        from tests.test_map_snapshot import FakeRedis
+
+        scale = {"node_count": 15_246, "edge_count": 999_999, "cluster_count": 1_800}
+        executed: list = []
+        result = await make_galaxy_service(
+            galaxy_pool(GAL_NODES, GAL_EDGES, executed=executed, scale_row=scale),
+            FakeRedis(),
+        ).layout_galaxy(force=True)
+        # задача завершается УСПЕШНО без раскладки — карта остаётся на сфере
+        assert result["ok"] is True and result["skipped"] is True
+        assert "dataset too large" in result["reason"]
+        assert not executed  # ни COUNT-ов данных, ни INSERT — воркер жив
+
+    @pytest.mark.asyncio
+    async def test_skips_when_nodes_over_limit(self):
+        from tests.test_map_snapshot import FakeRedis
+
+        scale = {"node_count": 10_000_000, "edge_count": 10, "cluster_count": 5}
+        result = await make_galaxy_service(
+            galaxy_pool(GAL_NODES, GAL_EDGES, scale_row=scale), FakeRedis()
+        ).layout_galaxy()
+        assert result["skipped"] is True
+
+    @pytest.mark.asyncio
+    async def test_runs_when_within_limits(self):
+        from tests.test_map_snapshot import FakeRedis
+
+        scale = {"node_count": 15_246, "edge_count": 104_381, "cluster_count": 1_800}
+        executed: list = []
+        result = await make_galaxy_service(
+            galaxy_pool(GAL_NODES, GAL_EDGES, executed=executed, scale_row=scale),
+            FakeRedis(),
+        ).layout_galaxy(force=True)
+        assert "skipped" not in result and result["ok"] is True
+        assert executed  # раскладка состоялась
+
+    def test_limits_config_present(self):
+        settings = Settings()
+        # прод 20.09: 15246/104381/1800 — под порогами, запас ≥ 30%
+        assert settings.galactic_max_nodes > 15_246
+        assert settings.galactic_max_edges > 104_381
+        assert settings.galactic_max_clusters > 1_800
 
 
 # ══════════════════════════════════════════════════════════════════

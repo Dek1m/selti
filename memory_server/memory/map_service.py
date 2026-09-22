@@ -450,6 +450,27 @@ class MapService:
         async with self._pool.acquire() as conn:
             if not await conn.fetchval(q.MAP_LAYOUT_EXISTS_SQL):
                 return {"ok": False, "reason": "migration 024 pending"}
+            # ПЕРВОЙ фазой — дешёвые COUNTы: воркер жив, даже если корпус
+            # перерос память-профиль таски (прод-OOM 20.09). Карта остаётся
+            # на сфере; порог поднять после подтверждения прод-замеров.
+            scale = await conn.fetchrow(q.GALACTIC_SCALE_SQL)
+        counts = tuple(int(scale[name]) for name in ("node_count", "edge_count", "cluster_count"))
+        limits = (
+            self._config.galactic_max_nodes,
+            self._config.galactic_max_edges,
+            self._config.galactic_max_clusters,
+        )
+        if any(c > lim for c, lim in zip(counts, limits)):
+            logger.warning(
+                "galactic layout skipped: dataset too large for current memory profile",
+                extra={"nodes": counts[0], "edges": counts[1], "clusters": counts[2],
+                       "limits": dict(zip(("nodes", "edges", "clusters"), limits))},
+            )
+            return {"ok": True, "skipped": True,
+                    "reason": "dataset too large for current memory profile",
+                    "nodes": counts[0], "edges": counts[1], "clusters": counts[2]}
+
+        async with self._pool.acquire() as conn:
             node_rows = await conn.fetch(q.GALACTIC_NODES_SQL)
             edge_rows = await conn.fetch(q.MAP_LAYOUT_EDGES_SQL)
             old_rows = await conn.fetch(q.MAP_LAYOUT_EXISTING_SQL)
@@ -475,9 +496,13 @@ class MapService:
             edges=edge_list,
             edge_weights=edge_weights,
         )
+        # Records (104k рёбер ≈ десятки МБ) и списки-посредники не нужны:
+        # GalacticInput держит собственные numpy-копии — подушка под расчёт.
+        node_id_list = inp.node_ids
+        del node_rows, edge_rows, old_rows, edge_list, edge_weights, index
 
         if force:
-            todo_indices = np.arange(len(node_rows), dtype=np.int64)
+            todo_indices = np.arange(len(node_id_list), dtype=np.int64)
             coords, report = galaxy.layout_full(inp)
         else:
             todo_indices, coords, report = galaxy.layout_increment(inp, placed_coords)
@@ -501,7 +526,7 @@ class MapService:
                     stop = start + _LAYOUT_BATCH
                     status = await conn.execute(
                         q.MAP_LAYOUT_INSERT_IGNORE_SQL,
-                        [node_rows[i]["id"] for i in todo_indices[start:stop]],
+                        [node_id_list[i] for i in todo_indices[start:stop]],
                         coords[start:stop, 0].tolist(),
                         coords[start:stop, 1].tolist(),
                         coords[start:stop, 2].tolist(),

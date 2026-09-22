@@ -62,6 +62,15 @@ REPULSION_CUTOFF = 30.0
 VELOCITY_DAMPING = 0.85
 RELAX_DT = 0.3
 
+# Бюджет блока репульсии, элементов: (chunk, m, 3) float64 ≤ 24 МБ. Полная
+# попарная матрица (m, m, 3) на гигантской ассоциации (инцидент прод-OOM
+# 20.09: 5000 узлов → 600 МБ на массив, ~3 ГБ пик) — режем на блоки строк.
+_RELAX_BLOCK_ELEMS = 1_000_000
+# Свыше этого размера группы бюджет итераций линейно урезается: работа
+# релаксации O(iters·m²), гигантская ассоциация 5000×40 итераций = минуты.
+_RELAX_FULL_ITERS_SIZE = 2_048
+_RELAX_MIN_ITERS = 8
+
 # Регионы карты (лог-отчёт таски + метрики)
 REGION_ARM = "arm"
 REGION_BULGE = "bulge"
@@ -482,39 +491,54 @@ def relax_in_groups(
     """Локальная spring-electrical релаксация внутри групп (§2.4).
 
     Глобальную структуру держит спираль — глобальной репульсии нет; пружина
-    к месту посадки не даёт группе расползти. d клиппируется снизу единицей:
+    к месту посадки не даёт группе расползтись. Репульсия считается блоками
+    строк (память O(chunk·m), не O(m²) — прод-OOM: ассоциация 5000 давала
+    (m, m, 3) = 600 МБ × несколько массивов). d клиппируется снизу единицей:
     Ньютон 400/d² при d→0 взрывает скорости, а единица на масштабе сотен
     неотличима. Symplectic Euler (v-первый) — стабильнее явного.
     """
     coords = coords.copy()
-    for members, in_group_edges in zip(
+    for members, (li, lj, w) in zip(
         _group_members(group_of, n_groups),
         _group_edge_indices(group_of, inp, n_groups),
     ):
-        if len(members) < 2:
+        m = len(members)
+        if m < 2:
             continue
         x = coords[members]
         place = x.copy()
         velocity = np.zeros_like(x)
-        li, lj, w = in_group_edges
-        for _ in range(iterations):
-            diff = x[None, :, :] - x[:, None, :]          # [i,j] = x_j − x_i
-            dist = np.sqrt((diff * diff).sum(-1))
-            np.fill_diagonal(dist, np.inf)
-            near = dist < REPULSION_CUTOFF
+        row_chunk = m if m <= 512 else max(1, _RELAX_BLOCK_ELEMS // (3 * m))
+        # бюджет итераций гигантов урезаем: релаксация — полировка посадки,
+        # суммарная работа O(iters·m²); 40 полных итераций писались для m≤200
+        budget = iterations
+        if m > _RELAX_FULL_ITERS_SIZE:
+            budget = max(_RELAX_MIN_ITERS, iterations * _RELAX_FULL_ITERS_SIZE // m)
+        for _ in range(budget):
             force = K_PLACE * (place - x)
-            if near.any():
-                safe = np.maximum(dist, 1.0)
-                repulsion = K_REPULSION * diff / safe[..., None] ** 3
-                force += np.where(near[..., None], repulsion, 0.0).sum(axis=1)
+            for start in range(0, m, row_chunk):
+                stop = min(start + row_chunk, m)
+                diff = x[start:stop, None, :] - x[None, :, :]  # (b, m, 3)
+                dist = np.sqrt(np.einsum("bmi,bmi->bm", diff, diff))
+                # диагональ: строка k блока ↔ колонка start+k (колонки глобальны)
+                dist[np.arange(stop - start), np.arange(start, stop)] = np.inf
+                near_rows, near_cols = np.nonzero(dist < REPULSION_CUTOFF)
+                if near_rows.size:
+                    # сила только по ближним парам: where-маскирование всех
+                    # (b, m, 3) пар тратило впустую большую часть flops
+                    safe3 = np.maximum(dist[near_rows, near_cols], 1.0) ** 3
+                    force[start + near_rows] += (
+                        K_REPULSION * diff[near_rows, near_cols] / safe3[:, None]
+                    )
             if len(w):
                 edge_diff = x[lj] - x[li]
                 edge_d = np.maximum(np.linalg.norm(edge_diff, axis=1), 1.0)
                 pull = K_EDGE * w[:, None] * edge_diff / edge_d[:, None]
                 np.add.at(force, li, pull)
                 np.add.at(force, lj, -pull)
-            velocity = VELOCITY_DAMPING * velocity + force * RELAX_DT
-            x = x + velocity * RELAX_DT
+            velocity *= VELOCITY_DAMPING
+            velocity += force * RELAX_DT
+            x += velocity * RELAX_DT
             if float(np.abs(velocity).max()) < 1e-3:
                 break
         coords[members] = x

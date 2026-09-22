@@ -153,6 +153,14 @@ class Settings(BaseSettings):
     map_preview_chars: int = 180       # preview контента, по границе слова + «…»
     map_name_chars: int = 80           # entity_name (тултип)
 
+    # ── Galactic Layout v2 (GALACTIC_LAYOUT.md) ──
+    # Защитный порог масштаба (прод-OOM 20.09: пик >3 ГБ при лимите 512M):
+    # выше порога таска пропускает раскладку с WARNING — карта остаётся на
+    # сфере. Поднять/снять после подтверждения прод-замеров Рэем.
+    galactic_max_nodes: int = 20_000
+    galactic_max_edges: int = 150_000
+    galactic_max_clusters: int = 3_000
+
     # ── Фаза 5: веб-морда ──
     # CORS под фронт-порт (Vite default 5173); переопределяется env-JSON
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
