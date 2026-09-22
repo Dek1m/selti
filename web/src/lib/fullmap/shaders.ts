@@ -38,8 +38,8 @@ void main() {
   vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
   float dist = -mvPosition.z;
 
-  // эталон EVE: мелкие отчётливые точки 3-8px, редкие крупные до ~12px
-  float sizePx = (3.5 + aSize * 1.9) * uSizeScale * uPixelRatio;
+  // эталон EVE: мелкие отчётливые точки, читаются сквозь линии
+  float sizePx = (4.5 + aSize * 1.9) * uSizeScale * uPixelRatio;
 
   float fade = 1.0 - smoothstep(FADE_START, FADE_END, dist);
   vFade = fade * fade;
@@ -113,7 +113,7 @@ void main() {
   float haloT = clamp((dist - coreR) / (1.0 - coreR), 0.0, 1.0);
   float halo = pow(1.0 - haloT, 1.8) * min(vGlow, 1.0);
 
-  float alpha = max(core, halo * 0.42);
+  float alpha = max(core, halo * 0.6);
   float rim = (vHighlight >= 2.0) ? (1.0 - smoothstep(0.55, 1.0, dist)) * 0.35 : 0.0;
   alpha = max(alpha, rim);
   // погасшие гранулы созвездия: тлеющий контур вместо полноценной звезды

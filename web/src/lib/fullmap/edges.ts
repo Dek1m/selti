@@ -5,7 +5,7 @@
 // weight < 1) скрыт по умолчанию. Чистая функция — unit-testable.
 
 /** Жёсткий кап видимых рёбер полного графа (не опция). */
-export const EDGE_VISIBLE_CAP = 1200;
+export const EDGE_VISIBLE_CAP = 700;
 
 export interface VisibleNodesResult {
   visible: Uint8Array;

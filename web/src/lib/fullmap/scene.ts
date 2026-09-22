@@ -412,8 +412,8 @@ export class FullMapScene {
       new THREE.LineBasicMaterial({
         vertexColors: true,
         transparent: true,
-        opacity: 0.55,
-        blending: THREE.AdditiveBlending,
+        opacity: 0.22,
+        blending: THREE.NormalBlending, // additive на плотных линиях белеет (фидбек)
         depthTest: false,
         depthWrite: false,
       }),
@@ -423,7 +423,7 @@ export class FullMapScene {
       new THREE.LineBasicMaterial({
         color: warn,
         transparent: true,
-        opacity: 0.85,
+        opacity: 0.6,
         blending: THREE.AdditiveBlending,
         depthTest: false,
         depthWrite: false,
@@ -434,7 +434,7 @@ export class FullMapScene {
       new THREE.LineBasicMaterial({
         color: contradicts,
         transparent: true,
-        opacity: 0.9,
+        opacity: 0.75,
         blending: THREE.AdditiveBlending,
         depthTest: false,
         depthWrite: false,
