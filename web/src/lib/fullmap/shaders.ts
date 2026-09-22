@@ -162,6 +162,108 @@ void main() {
 `;
 
 /**
+ * Рёбра полного графа: LineSegments + кастомный шейдер (заказ Мастера
+ * 22.09 «синаптические импульсы»). Базовый вид ребра повторяет прежний
+ * LineBasicMaterial: градиент цвет(исток) → цвет(цель), сплошная линия
+ * с фиксированной непрозрачностью слоя (uBaseAlpha). Поверх — РЕДКИЕ
+ * световые импульсы: короткая яркая гауссова волна с затухающим хвостом
+ * скользит вдоль ребра из конца в конец, как спайк по нервному синапсу.
+ * Вся математика спайка — во фрагменте, только из uTime и per-edge seed:
+ * ноль per-frame CPU-работы. uSpike = 0 (prefers-reduced-motion) выключает
+ * импульсы полностью, базовый вид ребра не меняется.
+ */
+export const EDGE_VERTEX = /* glsl */ `
+attribute vec3 aColor;  // цвет конца ребра: namespace-спектр или спец-тип
+attribute float aT;     // 0 у истока, 1 у цели — интерполируется в vT
+attribute float aSeed;  // per-edge seed (хэш пары узлов), стабилен между куллингами
+
+varying vec3 vColor;
+varying float vT;
+varying float vSeed;
+
+void main() {
+  vColor = aColor;
+  vT = aT;
+  vSeed = aSeed;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+export const EDGE_FRAGMENT = /* glsl */ `
+precision highp float;
+
+uniform float uTime;
+uniform float uSpike;     // 1 = импульсы включены, 0 = prefers-reduced-motion
+uniform float uBaseAlpha; // базовая непрозрачность слоя (main 0.22 / sup 0.6 / con 0.75)
+uniform float uDim;       // расфокус при выбранной звезде: 0 нет, 0.7 = ×0.3
+
+varying vec3 vColor;
+varying float vT;
+varying float vSeed;
+
+// ── Калибровка синаптических импульсов (заказ Мастера 22.09) ──
+// РЕДКО: одно видимое ребро спайкует в среднем раз в SPIKE_INTERVAL секунд
+// (среднее 30 с → при сотнях рёбер одновременно светятся единицы).
+const float SPIKE_INTERVAL_MIN = 20.0; // сек между спайками одного ребра
+const float SPIKE_INTERVAL_MAX = 40.0;
+// длительность пробега; скорость = длина ребра / dur — рандомна per-импульс
+const float SPIKE_DURATION_MIN = 0.8; // сек
+const float SPIKE_DURATION_MAX = 1.5;
+const float SPIKE_SIGMA = 0.065;      // ширина гауссова пика (доля длины ребра)
+const float SPIKE_TAIL_DECAY = 16.0;  // спад хвоста позади пика (на 1/16 длины)
+const float SPIKE_TAIL_GAIN = 0.55;   // яркость хвоста относительно головы
+const float SPIKE_ALPHA = 0.55;       // аддитивная добавка альфы в пике
+const float SPIKE_WHITE_HEAT = 0.6;   // подогрев локального цвета ребра к белому
+const float SPIKE_BRIGHT_VAR = 0.25;  // лёгкая вариация яркости ±25%
+
+float hash11(float n) {
+  return fract(sin(n) * 43758.5453123);
+}
+
+void main() {
+  // расписание детерминировано из seed: период и момент старта внутри него
+  float interval = mix(SPIKE_INTERVAL_MIN, SPIKE_INTERVAL_MAX, hash11(vSeed * 71.13));
+  float phase = hash11(vSeed * 137.9) * interval;
+
+  // per-импульсные параметры (длительность/направление/яркость) сменяются
+  // от цикла к циклу — тоже детерминированно: seed + номер цикла
+  float cyc = floor((uTime + phase) / interval);
+  float hDur = hash11(vSeed * 19.7 + cyc * 3.71);
+  float hDir = hash11(vSeed * 47.3 + cyc * 8.53);
+  float hAmp = hash11(vSeed * 89.1 + cyc * 5.29);
+
+  float lt = mod(uTime + phase, interval); // локальное время цикла
+  float dur = mix(SPIKE_DURATION_MIN, SPIKE_DURATION_MAX, hDur);
+  float p = lt / dur;                      // прогресс пробега 0..1
+  float active = step(lt, dur);            // вне пробега ребро «спит»
+
+  // направление: к цели (A→B) или к истоку (B→A)
+  float toB = step(0.5, hDir);
+  float peak = mix(1.0 - p, p, toB);
+
+  // голова — мягкий гауссов пик (не резкая точка); хвост — короткий
+  // экспоненциальный, тянется строго ПОЗАДИ движения
+  float d = vT - peak;
+  float head = exp(-d * d / (2.0 * SPIKE_SIGMA * SPIKE_SIGMA));
+  float behind = (peak - vT) * (toB * 2.0 - 1.0);
+  float tail = exp(-max(behind, 0.0) * SPIKE_TAIL_DECAY) * step(0.0, behind);
+
+  // мягкое появление без вспышки на узле; у конца хвост тает естественно
+  float env = smoothstep(0.0, 0.18, p);
+  float amp = SPIKE_ALPHA * (1.0 + SPIKE_BRIGHT_VAR * (hAmp * 2.0 - 1.0));
+  float spike = (head + tail * SPIKE_TAIL_GAIN) * amp * env * active * uSpike;
+
+  // самостоятельный аддитивный слой поверх базового вида: цвет подогревается
+  // к белому от ЛОКАЛЬНОГО цвета градиента — namespace-палитра не ломается
+  float shape = clamp(spike, 0.0, 1.0);
+  vec3 hot = mix(vColor, vec3(1.0), SPIKE_WHITE_HEAT);
+  vec3 color = mix(vColor, hot, shape);
+  float alpha = (uBaseAlpha + spike) * (1.0 - uDim);
+  gl_FragColor = vec4(color, min(alpha, 1.0));
+}
+`;
+
+/**
  * КОЛЬЦЕВОЕ ГАЛО 3D-солнца (эталон «реальное солнце», разворот Мастера
  * 22.09): billboard-квад ×2.2 радиуса сферы, аддитивная, СТАТИЧНОЕ тонкое
  * ровное кольцо-хромосфера, прижатое к кромке диска, с white-hot

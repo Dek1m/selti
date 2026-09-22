@@ -20,7 +20,7 @@ import { EDGE_VISIBLE_CAP, selectVisibleEdges, selectVisibleNodes } from "./edge
 import { selectLabeledNodes, type LabelCandidate } from "./lod";
 import { ellipseLayout, mixedLayout, FULL_VOLUME, hashUuid, type LayoutBounds, type VolumeBounds } from "./layout";
 import { unpackNodeString } from "./pack";
-import { HALO_FRAGMENT, HALO_VERTEX, STAR_FRAGMENT, STAR_VERTEX, SUN_FRAGMENT, SUN_VERTEX } from "./shaders";
+import { EDGE_FRAGMENT, EDGE_VERTEX, HALO_FRAGMENT, HALO_VERTEX, STAR_FRAGMENT, STAR_VERTEX, SUN_FRAGMENT, SUN_VERTEX } from "./shaders";
 import type { PackedCluster, PackedMapSnapshot } from "./types";
 
 const CLICK_SLOP_PX = 5;
@@ -544,60 +544,77 @@ export class FullMapScene {
 
   /**
    * Рёбра — THREE.LineSegments (эталон EVE, финал): три меша —
-   * основной с vertexColors (градиент слой→слой из коробки), янтарные
-   * supersedes и красные contradicts. Куллинг перезаписывает
-   * position/color буферы видимого набора (кап 1200 суммарно).
+   * основной (градиент слой→слой) и янтарные supersedes / красные
+   * contradicts. Материал общий — шейдерный EDGE_VERTEX/EDGE_FRAGMENT
+   * (заказ Мастера «синаптические импульсы»): базовый вид идентичен
+   * прежнему LineBasicMaterial (градиент, фиксированная alpha слоя),
+   * поверх — редкие световые спайки, целиком в GLSL. Куллинг
+   * перезаписывает position/aColor/aSeed (кап 700 на меш).
    */
   private buildEdgeLines(): void {
     const cap = EDGE_VISIBLE_CAP;
-    const make = (vertexColors: boolean) => {
+    const make = () => {
       const geometry = new THREE.BufferGeometry();
       geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(cap * 6), 3));
-      if (vertexColors) geometry.setAttribute("color", new THREE.BufferAttribute(new Float32Array(cap * 6), 3));
+      geometry.setAttribute("aColor", new THREE.BufferAttribute(new Float32Array(cap * 6), 3));
+      // ось импульса/градиента: чётная вершина — исток (0), нечётная — цель (1);
+      // пары не перемешиваются куллингом, буфер заполняется один раз
+      const t = new Float32Array(cap * 2);
+      for (let i = 0; i < cap; i++) {
+        t[i * 2] = 0;
+        t[i * 2 + 1] = 1;
+      }
+      geometry.setAttribute("aT", new THREE.BufferAttribute(t, 1));
+      geometry.setAttribute("aSeed", new THREE.BufferAttribute(new Float32Array(cap * 2), 1));
       geometry.setDrawRange(0, 0);
       return geometry;
     };
 
+    const edgeMaterial = (baseAlpha: number, blending: THREE.Blending) =>
+      new THREE.ShaderMaterial({
+        vertexShader: EDGE_VERTEX,
+        fragmentShader: EDGE_FRAGMENT,
+        uniforms: {
+          uTime: { value: 0 },
+          uSpike: { value: this.reducedMotion ? 0 : 1 },
+          uBaseAlpha: { value: baseAlpha },
+          uDim: { value: 0 },
+        },
+        transparent: true,
+        blending,
+        depthTest: false,
+        depthWrite: false,
+      });
+
     const contradicts = this.palette?.contradicts ?? new THREE.Color("#ff7a8a");
     const warn = this.palette?.supersedes ?? new THREE.Color("#ffc15e");
 
-    this.mainEdges = new THREE.LineSegments(
-      make(true),
-      new THREE.LineBasicMaterial({
-        vertexColors: true,
-        transparent: true,
-        opacity: 0.22,
-        blending: THREE.NormalBlending, // additive на плотных линиях белеет (фидбек)
-        depthTest: false,
-        depthWrite: false,
-      }),
-    );
-    this.supersedesEdges = new THREE.LineSegments(
-      make(false),
-      new THREE.LineBasicMaterial({
-        color: warn,
-        transparent: true,
-        opacity: 0.6,
-        blending: THREE.AdditiveBlending,
-        depthTest: false,
-        depthWrite: false,
-      }),
-    );
-    this.contradictsEdges = new THREE.LineSegments(
-      make(false),
-      new THREE.LineBasicMaterial({
-        color: contradicts,
-        transparent: true,
-        opacity: 0.75,
-        blending: THREE.AdditiveBlending,
-        depthTest: false,
-        depthWrite: false,
-      }),
-    );
+    // main — NormalBlending (additive на плотных линиях белеет, фидбек);
+    // спец-слои — additive, как раньше
+    this.mainEdges = new THREE.LineSegments(make(), edgeMaterial(0.22, THREE.NormalBlending));
+    this.supersedesEdges = new THREE.LineSegments(make(), edgeMaterial(0.6, THREE.AdditiveBlending));
+    this.contradictsEdges = new THREE.LineSegments(make(), edgeMaterial(0.75, THREE.AdditiveBlending));
+
+    // спец-слои монохромны: цвет заливается один раз, куллинг его не трогает
+    this.fillEdgeFixedColor(this.supersedesEdges, warn);
+    this.fillEdgeFixedColor(this.contradictsEdges, contradicts);
+
     for (const mesh of [this.mainEdges, this.supersedesEdges, this.contradictsEdges]) {
       mesh.frustumCulled = false;
       this.scene.add(mesh);
     }
+  }
+
+  /** Монохромная заливка aColor спец-слоя (одинаковый rgb на оба конца). */
+  private fillEdgeFixedColor(mesh: THREE.LineSegments, color: THREE.Color): void {
+    const attr = mesh.geometry.getAttribute("aColor") as THREE.BufferAttribute;
+    const arr = attr.array as Float32Array;
+    for (let i = 0; i < arr.length; i += 3) {
+      arr[i] = color.r;
+      arr[i + 1] = color.g;
+      arr[i + 2] = color.b;
+    }
+    attr.needsUpdate = true;
   }
 
   private suns: THREE.InstancedMesh | null = null;
@@ -902,12 +919,12 @@ export class FullMapScene {
 
   /** Связи при выделенной звезде — ×0.3 прозрачности (расфокус сцены). */
   private setEdgeDimmed(dimmed: boolean): void {
-    const k = dimmed ? 0.3 : 1;
+    // uDim = 0.7 → (1 - uDim) = ×0.3, гаснет и база, и импульс
+    const v = dimmed ? 0.7 : 0;
     for (const mesh of [this.mainEdges, this.supersedesEdges, this.contradictsEdges]) {
-      const material = mesh?.material as THREE.LineBasicMaterial | undefined;
+      const material = mesh?.material as THREE.ShaderMaterial | undefined;
       if (!material) continue;
-      const base = mesh === this.mainEdges ? 0.22 : mesh === this.supersedesEdges ? 0.6 : 0.75;
-      material.opacity = base * k;
+      material.uniforms.uDim.value = v;
     }
   }
 
@@ -1032,10 +1049,11 @@ export class FullMapScene {
   private candScore: number[] | null = null;
 
   /**
-   * Edge culling + кап 1200 (эталон EVE): выбранные рёбра раскладываются
-   * в position/color буферы трёх LineSegments-мешей (main/supersedes/
+   * Edge culling + кап 700 (эталон EVE): выбранные рёбра раскладываются
+   * в position/aColor/aSeed буферы трёх LineSegments-мешей (main/supersedes/
    * contradicts). Пары вершин копируются из nodePositions, цвета main —
-   * из спектра слоёв концов (градиент из коробки). Throttle 150 мс.
+   * из спектра слоёв концов (градиент), seed — из хэша пары узлов (ось
+   * спайков импульсов). Throttle 150 мс.
    */
   private cullEdges(now: number | null): void {
     if (!this.packed || !this.nodeVisible || !this.mainEdges || !this.supersedesEdges || !this.contradictsEdges) return;
@@ -1069,9 +1087,12 @@ export class FullMapScene {
     const nsRgb = this.palette?.namespaceRgb ?? [];
 
     const mainPos = (this.mainEdges.geometry.getAttribute("position") as THREE.BufferAttribute).array as Float32Array;
-    const mainCol = (this.mainEdges.geometry.getAttribute("color") as THREE.BufferAttribute).array as Float32Array;
+    const mainCol = (this.mainEdges.geometry.getAttribute("aColor") as THREE.BufferAttribute).array as Float32Array;
+    const mainSeed = (this.mainEdges.geometry.getAttribute("aSeed") as THREE.BufferAttribute).array as Float32Array;
     const supPos = (this.supersedesEdges.geometry.getAttribute("position") as THREE.BufferAttribute).array as Float32Array;
+    const supSeed = (this.supersedesEdges.geometry.getAttribute("aSeed") as THREE.BufferAttribute).array as Float32Array;
     const conPos = (this.contradictsEdges.geometry.getAttribute("position") as THREE.BufferAttribute).array as Float32Array;
+    const conSeed = (this.contradictsEdges.geometry.getAttribute("aSeed") as THREE.BufferAttribute).array as Float32Array;
     let mainN = 0;
     let supN = 0;
     let conN = 0;
@@ -1081,17 +1102,24 @@ export class FullMapScene {
       const src = this.packed.edgeData[e * 3];
       const tgt = this.packed.edgeData[e * 3 + 1];
       const kindName = this.packed.edgeTypes[this.packed.edgeData[e * 3 + 2]] ?? "";
+      // per-edge seed спайка: хэш ПАРЫ узлов, стабилен между куллингами —
+      // расписание импульсов не прыгает при перезаписи буферов
+      const seed = (hashUuid(`${src}:${tgt}`) >>> 8) / 0x1000000;
 
       let buf: Float32Array;
+      let seedBuf: Float32Array;
       let slot: number;
       if (kindName === "supersedes") {
         buf = supPos;
+        seedBuf = supSeed;
         slot = supN++ * 6;
       } else if (kindName === "contradicts") {
         buf = conPos;
+        seedBuf = conSeed;
         slot = conN++ * 6;
       } else {
         buf = mainPos;
+        seedBuf = mainSeed;
         slot = mainN * 6;
         const cA = nsRgb[meta[src * 4] | 0] ?? [0.54, 0.59, 0.67];
         const cB = nsRgb[meta[tgt * 4] | 0] ?? [0.54, 0.59, 0.67];
@@ -1105,14 +1133,20 @@ export class FullMapScene {
       buf[slot + 3] = positions[tgt * 3];
       buf[slot + 4] = positions[tgt * 3 + 1];
       buf[slot + 5] = positions[tgt * 3 + 2];
+      // оба конца ребра несут один seed (slot / 3 = вершинный слот)
+      seedBuf[slot / 3] = seed;
+      seedBuf[slot / 3 + 1] = seed;
     }
 
     (this.mainEdges.geometry.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
-    (this.mainEdges.geometry.getAttribute("color") as THREE.BufferAttribute).needsUpdate = true;
+    (this.mainEdges.geometry.getAttribute("aColor") as THREE.BufferAttribute).needsUpdate = true;
+    (this.mainEdges.geometry.getAttribute("aSeed") as THREE.BufferAttribute).needsUpdate = true;
     this.mainEdges.geometry.setDrawRange(0, mainN * 2);
     (this.supersedesEdges.geometry.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
+    (this.supersedesEdges.geometry.getAttribute("aSeed") as THREE.BufferAttribute).needsUpdate = true;
     this.supersedesEdges.geometry.setDrawRange(0, supN * 2);
     (this.contradictsEdges.geometry.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
+    (this.contradictsEdges.geometry.getAttribute("aSeed") as THREE.BufferAttribute).needsUpdate = true;
     this.contradictsEdges.geometry.setDrawRange(0, conN * 2);
   }
 
@@ -1202,6 +1236,11 @@ export class FullMapScene {
     if (starMaterial) starMaterial.uniforms.uTime.value = elapsed;
     const sunMaterial = this.suns?.material as THREE.ShaderMaterial | undefined;
     if (sunMaterial) sunMaterial.uniforms.uTime.value = elapsed;
+    // рёбра: тикаем uTime синаптических импульсов (вся математика в GLSL)
+    for (const mesh of [this.mainEdges, this.supersedesEdges, this.contradictsEdges]) {
+      const material = mesh?.material as THREE.ShaderMaterial | undefined;
+      if (material) material.uniforms.uTime.value = elapsed;
+    }
     // гало-кольцо статично (решение Мастера) — uTime ему не нужен
 
     // 3D-солнца: близкие звёзды (<250 юнитов) — InstancedMesh, throttle 120мс
