@@ -454,7 +454,7 @@ export class HyperspaceEdgeProgram<
 const HOVER_TAG_MAX_WIDTH = 360;
 const HOVER_TAG_PAD_X = 8;
 const HOVER_TAG_PAD_Y = 5;
-const HOVER_TAG_MARGIN = 8;
+const HOVER_TAG_MARGIN = 10;
 
 /** Greedy word wrap with hard breaks for unbroken entity names (snake_case…). */
 function wrapHoverLabel(context: CanvasRenderingContext2D, label: string, maxWidth: number): string[] {

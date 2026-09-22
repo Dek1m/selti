@@ -486,18 +486,19 @@
   border: 1px solid var(--sl-hud-frame);
   border-radius: var(--sl-r-sm);
   box-shadow: var(--sl-shadow-2);
-  transform: translate(14px, 12px);
+  transform: translateY(-50%); /* рамка справа от звезды, центр по вертикали */
   pointer-events: none;
 }
+.map-tooltip.flip { transform: translate(-100%, -50%); }
 .map-tooltip-name {
   margin: 0 0 4px;
-  font: 600 12px/1.45 var(--sl-font-display);
+  font: 600 15px/1.45 var(--sl-font-display);
   color: var(--sl-text);
   overflow-wrap: anywhere;
 }
 .map-tooltip-preview {
   margin: 0;
-  font: 400 11px/1.55 var(--sl-font-body);
+  font: 400 13px/1.55 var(--sl-font-body);
   color: var(--sl-text-2);
   display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
   overflow: hidden;

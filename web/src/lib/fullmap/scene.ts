@@ -47,8 +47,8 @@ const NODE_CULL_COOLDOWN_MS = 150;
 const NODE_CULL_MARGIN = 1.15;
 
 export interface FullMapSceneCallbacks {
-  /** hover moved onto a star (index) or off (null); screen px included */
-  onHover: (node: { index: number; x: number; y: number } | null) => void;
+  /** hover moved onto a star (index) or off (null); screen px + star radius */
+  onHover: (node: { index: number; x: number; y: number; radiusPx: number } | null) => void;
   /** click resolved as a star */
   onSelect: (node: { index: number } | null) => void;
 }
@@ -193,6 +193,11 @@ export class FullMapScene {
   private clusterByIndex = new Map<number, PackedCluster>();
 
   private levels: Int32Array | null = null;
+  private smooth(edge0: number, edge1: number, x: number): number {
+    const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)));
+    return t * t * (3 - 2 * t);
+  }
+
   private hoverIndex: number | null = null;
   private labels: HTMLDivElement[] = [];
 
@@ -1164,9 +1169,27 @@ export class FullMapScene {
       const picked = this.pick();
       if (picked !== this.hoverIndex) {
         this.hoverIndex = picked;
-        this.callbacks.onHover(
-          picked === null ? null : { index: picked, x: this.pointerScreen.x, y: this.pointerScreen.y },
-        );
+        if (picked === null) {
+          this.callbacks.onHover(null);
+        } else {
+          // экранный радиус звезды — тултип позиционируется от кромки
+          const importance = this.packed ? this.packed.nodeMeta[picked * 4 + 2] : 3;
+          const dist = this.camera.position.distanceTo(
+            new THREE.Vector3(
+              this.packed!.nodePositions[picked * 3],
+              this.packed!.nodePositions[picked * 3 + 1],
+              this.packed!.nodePositions[picked * 3 + 2],
+            ),
+          );
+          const mag = 1 + 3 * (1 - this.smooth(60.0, 400.0, dist));
+          const sizePx = (4.5 + importance * 1.9) * this.renderer.getPixelRatio() * mag;
+          this.callbacks.onHover({
+            index: picked,
+            x: this.pointerScreen.x,
+            y: this.pointerScreen.y,
+            radiusPx: sizePx / 2,
+          });
+        }
       }
     }
 

@@ -38,6 +38,8 @@ interface TooltipState {
   preview: string | null;
   x: number;
   y: number;
+  /** экранный радиус звезды — рамка отступает на 10px от кромки */
+  radiusPx: number;
 }
 
 const EMPTY_FILTERS: SearchFilters = {
@@ -138,6 +140,7 @@ export function FullMapLayer({ mode = "full", constellationSnapshot = null, quer
           preview: packed.withPreview ? unpackNodeString(packed, node.index, 2) || null : null,
           x: node.x,
           y: node.y,
+          radiusPx: node.radiusPx,
         });
       },
       onSelect: (pick) => {
@@ -293,7 +296,14 @@ export function FullMapLayer({ mode = "full", constellationSnapshot = null, quer
       <div ref={labelLayerRef} className="map-labels" aria-hidden="true" />
 
       {tooltip && (
-        <div className="map-tooltip" style={{ left: tooltip.x, top: tooltip.y }} aria-hidden="true">
+        <div
+          className={`map-tooltip${tooltip.x + tooltip.radiusPx + 350 > window.innerWidth ? " flip" : ""}`}
+          style={{
+            left: tooltip.x + tooltip.radiusPx + 10,
+            top: tooltip.y,
+          }}
+          aria-hidden="true"
+        >
           <p className="map-tooltip-name">{tooltip.name}</p>
           {tooltip.preview && <p className="map-tooltip-preview">{tooltip.preview}</p>}
         </div>
