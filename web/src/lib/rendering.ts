@@ -531,12 +531,13 @@ export function eveDrawNodeHover(
   const boxW = Math.ceil(Math.min(textWidth + HOVER_TAG_PAD_X * 2, HOVER_TAG_MAX_WIDTH));
   const boxH = Math.ceil(ascent + descent + (lines.length - 1) * lineHeight + HOVER_TAG_PAD_Y * 2);
 
-  // flip to the left side when the tag would cross the right edge
-  let x = data.x + size + HOVER_TAG_MARGIN;
+  // левый край рамки = центр звезды + экранный радиус + 10px (фидбек Мастера:
+  // тег НЕ на середине звезды), вертикальный центр звезды; флип у правого края
+  let x = data.x + (data.size ?? size) + 10;
   if (x + boxW > viewW - HOVER_TAG_MARGIN) {
     x = Math.max(HOVER_TAG_MARGIN, data.x - size - HOVER_TAG_MARGIN - boxW);
   }
-  let y = data.y - boxH / 2;
+  let y = data.y - boxH / 2; // вертикальный центр звезды
   y = Math.min(Math.max(HOVER_TAG_MARGIN, y), Math.max(HOVER_TAG_MARGIN, viewH - boxH - HOVER_TAG_MARGIN));
 
   context.shadowColor = "rgba(2, 6, 14, 0.8)";

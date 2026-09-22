@@ -229,12 +229,15 @@ void main() {
   // цвет атмосферы: слой с нагревом к белому у кромки (ярче ободок)
   vec3 atmoTint = mix(vLayerColor, vec3(1.0), 0.45 * atmoRise);
 
-  // кольцо: яркая линия цвета слоя с нагревом к белому — «звезда в короне»
-  vec3 ringTint = mix(vLayerColor, vec3(1.0), 0.6);
-  float ringAlpha = haloRing * 0.95 * intensity * flicker;
-  float alpha = (atmo * 1.0 + outer * 0.25) * intensity * flicker + ringAlpha;
+  // ── ГАЛО-КОЛЬЦО: отдельный гарантированный слой (фидбек Мастера: не тонет
+  // в атмосфере) — тонкая чёткая линия цвета слоя с белым нагревом, alpha ~0.9.
+  // max-композиция, а не сумма: кольцо видно всегда.
+  vec3 ringTint = mix(vLayerColor, vec3(1.0), 0.55);
+  float ringAlpha = haloRing * 0.9 * intensity; // flicker на линии едва заметен
+  float glowAlpha = (atmo * 0.33 + outer * 0.08) * intensity * flicker; // приглушено ×1/3
+  float alpha = max(glowAlpha, ringAlpha);
   vec3 col = mix(tint, atmoTint, atmoRise);
-  col = mix(col, ringTint, haloRing);
+  col = mix(col, ringTint, clamp(haloRing + ringAlpha * 0.5, 0.0, 1.0));
   gl_FragColor = vec4(col * alpha, alpha);
 }
 `;
