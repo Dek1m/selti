@@ -112,7 +112,7 @@ export interface VolumeBounds {
   height: number;
 }
 
-export const FULL_VOLUME: VolumeBounds = { span: 500, height: 300 };
+export const FULL_VOLUME: VolumeBounds = { span: 700, height: 420 };
 
 /**
  * Объёмная раскладка полного графа: 60% вокруг центроидов кластеров
@@ -134,7 +134,7 @@ export function mixedLayout(
     centers[c * 3] = ((h & 0xffff) / 0x10000 * 2 - 1) * bounds.span;
     centers[c * 3 + 1] = (((h >>> 8) ^ (h >>> 16)) & 0xffff) / 0x10000 * 2 * bounds.height - bounds.height;
     centers[c * 3 + 2] = (((h >>> 4) & 0xffff) / 0x10000 * 2 - 1) * bounds.span;
-    sigmas[c] = 45 + ((h >>> 12) & 0xff) / 255 * 110; // 45..155
+    sigmas[c] = 65 + ((h >>> 12) & 0xff) / 255 * 155; // 65..220 — сильный разброс
   }
 
   const gauss = (h: number) => {

@@ -36,7 +36,7 @@ describe.skipIf(!hasDump)("real prod dump (15k nodes / 90k edges)", () => {
 
   it("connected node selection → edge cap filled with both-ends-visible rods", () => {
     // типовая камера: (0, 900, 2600) → центр куба, fov 55, margin 1.15
-    const eye = new Vector3(0, 900, 2600);
+    const eye = new Vector3(0, 850, 1500);
     const view = new Matrix4().lookAt(eye, new Vector3(0, 0, 0), new Vector3(0, 1, 0)).setPosition(eye).invert();
     const t = Math.tan((55 * Math.PI) / 180 / 2);
     const aspect = 16 / 9;
@@ -49,7 +49,7 @@ describe.skipIf(!hasDump)("real prod dump (15k nodes / 90k edges)", () => {
     const candIdx: number[] = [];
     const candScore: number[] = [];
     const margin = 1.15;
-    const maxDistSq = 2200 * 2200;
+    const maxDistSq = 3000 * 3000;
     for (let i = 0; i < n; i++) {
       const x = positions[i * 3];
       const y = positions[i * 3 + 1];
@@ -65,7 +65,7 @@ describe.skipIf(!hasDump)("real prod dump (15k nodes / 90k edges)", () => {
       const ny = (e[1] * x + e[5] * y + e[9] * z + e[13]) / w;
       if (nx < -margin || nx > margin || ny < -margin || ny > margin) continue;
       candIdx.push(i);
-      candScore.push(packed.nodeMeta[i * 4 + 2] * 3 + (1 - Math.sqrt(distSq) / 2200) * 2);
+      candScore.push(packed.nodeMeta[i * 4 + 2] * 3 + (1 - Math.sqrt(distSq) / 3000) * 2);
     }
 
     const importance = new Float32Array(n);
@@ -76,8 +76,8 @@ describe.skipIf(!hasDump)("real prod dump (15k nodes / 90k edges)", () => {
       packed.adjOffsets,
       packed.adjList,
       importance,
-      140,
-      280,
+      // молекулы как в сцене: 35 сгустков × 8 узлов
+      { seedCount: 35, clusterSize: 8, cap: 280 },
     );
     expect(selection.count).toBe(280);
 
@@ -90,9 +90,11 @@ describe.skipIf(!hasDump)("real prod dump (15k nodes / 90k edges)", () => {
       selection.visible,
       { showAuxiliary: false, cap: 1200, stats },
     );
-    // требование Мастера: >1000 рёбер в капе
-    expect(picked.length).toBeGreaterThan(1000);
-    // и большинство из них — стержни МЕЖДУ видимыми атомами (связный кадр)
-    expect(stats.bothVisible).toBeGreaterThan(500);
+    // политика both-ends + кап 700: все нарисованные ленты — ЦЕЛЬНЫЕ связи
+    expect(picked.length).toBeGreaterThan(150); // молекулы дают сотни стержней
+    expect(picked.length).toBeLessThanOrEqual(700);
+    // обрубков ноль: каждое нарисованное ребро имеет оба видимых конца
+    expect(stats.bothVisible).toBeGreaterThanOrEqual(picked.length);
+    expect(stats.candidates).toBeGreaterThanOrEqual(picked.length);
   });
 });

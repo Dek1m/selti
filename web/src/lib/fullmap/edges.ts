@@ -7,82 +7,6 @@
 /** Жёсткий кап видимых рёбер полного графа (не опция). */
 export const EDGE_VISIBLE_CAP = 700;
 
-export interface VisibleNodesResult {
-  visible: Uint8Array;
-  count: number;
-}
-
-/**
- * Связный отбор узлов (итерация 4): кап 280 «звёзд-одиночек» рвал сеть —
- * из 1837 видимых во фрустуме узлов обе концовки у рёбер сходились лишь
- * 71 раз (дамп 15k/90k). Теперь: 1) seeds = топ seedCount по score;
- * 2) добор до cap — соседи уже выбранных с приоритетом
- * «связей с выбранными × 3 + importance». Кадр собирается в связные
- * «молекулы»: у доборных узлов по построению есть стержень внутрь набора.
- * Чистая функция — unit-testable.
- */
-export function selectVisibleNodes(
-  candidateIndices: Int32Array,
-  candidateScores: Float32Array,
-  adjOffsets: Int32Array,
-  adjList: Int32Array,
-  nodeImportance: Float32Array,
-  seedCount: number,
-  cap: number,
-): VisibleNodesResult {
-  const total = candidateIndices.length;
-  const drawCount = Math.min(total, cap);
-  const order = Array.from({ length: total }, (_, k) => k).sort(
-    (a, b) => candidateScores[b] - candidateScores[a],
-  );
-
-  const visible = new Uint8Array(adjOffsets.length - 1);
-  const chosen: number[] = [];
-
-  const pick = (node: number) => {
-    if (visible[node]) return;
-    visible[node] = 1;
-    chosen.push(node);
-  };
-
-  // 1) seeds — самые яркие/близкие
-  for (let k = 0; k < Math.min(seedCount, drawCount); k++) {
-    pick(candidateIndices[order[k]]);
-  }
-
-  // 2) добор: сосед выбранных ценнее одинокой звезды — стержни внутрь набора
-  const refillIdx: number[] = [];
-  const refillScore: number[] = [];
-  const seen = new Set<number>();
-  for (const node of chosen) {
-    for (let j = adjOffsets[node]; j < adjOffsets[node + 1]; j++) {
-      const neighbor = adjList[j];
-      if (visible[neighbor] || seen.has(neighbor)) continue;
-      seen.add(neighbor);
-      let links = 0;
-      for (let q = adjOffsets[neighbor]; q < adjOffsets[neighbor + 1]; q++) {
-        if (visible[adjList[q]]) links++;
-      }
-      refillIdx.push(neighbor);
-      refillScore.push(links * 3 + nodeImportance[neighbor]);
-    }
-  }
-  const refillOrder = refillIdx.map((_, k) => k).sort((a, b) => refillScore[b] - refillScore[a]);
-  const remaining = drawCount - chosen.length;
-  for (let k = 0; k < Math.min(remaining, refillOrder.length); k++) {
-    pick(refillIdx[refillOrder[k]]);
-  }
-
-  // 3) если кап всё ещё не добран — самые яркие оставшиеся кандидаты
-  if (chosen.length < drawCount) {
-    for (let k = seedCount; k < total && chosen.length < drawCount; k++) {
-      pick(candidateIndices[order[k]]);
-    }
-  }
-
-  return { visible, count: chosen.length };
-}
-
 /** Служебные связи: co_occurrence-слой related_to с весом ниже единицы. */
 export function isAuxiliaryEdge(typeName: string, weight: number): boolean {
   return typeName === "related_to" && weight < 1;
@@ -96,9 +20,92 @@ export interface EdgeSelectOptions {
   stats?: { candidates: number; bothVisible: number; drawn: number };
 }
 
+export interface VisibleNodesResult {
+  visible: Uint8Array;
+  count: number;
+}
+
 /**
- * Выбирает рисуемые рёбра: один конец обязан быть в culled draw-списке
- * (nodeVisible), служебные фильтруются тумблером, остальные сортируются по
+ * Связный отбор узлов (финал): экран собирается «молекулами». Сначала
+ * seeds — самые яркие/близкие кандидаты; вокруг каждого seed волна
+ * собирает clusterSize узлов, приоритет «связей с молекулой × 3 +
+ * importance». Внутримолекулярные стержни дают плотные связные группы —
+ * рёбер both-ends становятся сотни, обрубков нет.
+ */
+export function selectVisibleNodes(
+  candidateIndices: Int32Array,
+  candidateScores: Float32Array,
+  adjOffsets: Int32Array,
+  adjList: Int32Array,
+  nodeImportance: Float32Array,
+  options: { seedCount: number; clusterSize: number; cap: number },
+): VisibleNodesResult {
+  const total = candidateIndices.length;
+  const visible = new Uint8Array(adjOffsets.length - 1);
+  const order = Array.from({ length: total }, (_, k) => k).sort(
+    (a, b) => candidateScores[b] - candidateScores[a],
+  );
+
+  const scoreOf = (node: number, molecule: Uint8Array) => {
+    let links = 0;
+    for (let j = adjOffsets[node]; j < adjOffsets[node + 1]; j++) {
+      if (molecule[adjList[j]]) links++;
+    }
+    return links * 3 + nodeImportance[node];
+  };
+
+  let taken = 0;
+  const seedCount = Math.max(1, options.seedCount);
+  const clusterSize = Math.max(1, options.clusterSize);
+
+  for (let s = 0; s < seedCount && taken < options.cap; s++) {
+    const seed = candidateIndices[order[s]];
+    if (!seed || visible[seed]) continue;
+    visible[seed] = 1;
+    taken++;
+
+    // волна вокруг seed: добираем clusterSize-1 узлов по связям с молекулой
+    const molecule = new Uint8Array(visible.length);
+    molecule[seed] = 1;
+    let size = 1;
+    let frontier = [seed];
+    while (size < clusterSize && frontier.length > 0) {
+      const next = new Set<number>();
+      for (const node of frontier) {
+        for (let j = adjOffsets[node]; j < adjOffsets[node + 1]; j++) {
+          const nb = adjList[j];
+          if (!visible[nb] && !molecule[nb]) next.add(nb);
+        }
+      }
+      if (next.size === 0) break;
+      const ranked = [...next].sort((a, b2) => scoreOf(b2, molecule) - scoreOf(a, molecule));
+      const take = Math.min(ranked.length, clusterSize - size);
+      for (let k = 0; k < take; k++) {
+        const node = ranked[k];
+        molecule[node] = 1;
+        visible[node] = 1;
+        taken++;
+        size++;
+      }
+      frontier = ranked.slice(0, take);
+    }
+  }
+
+  // добор остатка капа одиночными яркими звёздами (без связей — не мешает)
+  for (let k = 0; k < total && taken < options.cap; k++) {
+    const node = candidateIndices[order[k]];
+    if (!visible[node]) {
+      visible[node] = 1;
+      taken++;
+    }
+  }
+
+  return { visible, count: taken };
+}
+
+/**
+ * Выбирает рисуемые рёбра: ОБА конца в culled draw-списке (фикса
+ * «обрубков»), служебные фильтруются тумблером, остальные сортируются по
  * score = weight × (importance[src] + importance[tgt]) со спец-бустом для
  * contradicts/supersedes; возвращает плотный список индексов ≤ cap.
  */
@@ -118,18 +125,14 @@ export function selectVisibleEdges(
   for (let e = 0; e < m; e++) {
     const src = edgeData[e * 3];
     const tgt = edgeData[e * 3 + 1];
-    const srcVisible = !!nodeVisible[src];
-    const tgtVisible = !!nodeVisible[tgt];
-    if (!srcVisible && !tgtVisible) continue;
-    if (srcVisible && tgtVisible) bothVisible++;
+    if (!nodeVisible[src] || !nodeVisible[tgt]) continue;
+    if (src === tgt) continue;
+    bothVisible++;
     const weight = edgeWeights[e];
     const typeName = edgeTypeNames[edgeData[e * 3 + 2]] ?? "";
     if (!options.showAuxiliary && isAuxiliaryEdge(typeName, weight)) continue;
 
-    // спец-рёбра всегда пробивают кап; остальное — weight × важность концов
     let score = weight * (nodeImportance[src] + nodeImportance[tgt]);
-    // нити МЕЖДУ двумя видимыми звёздами приоритетнее «хвостов» за кадром
-    if (srcVisible && tgtVisible) score *= 3;
     if (typeName === "contradicts" || typeName === "supersedes") score += 1e6;
 
     candIdx.push(e);

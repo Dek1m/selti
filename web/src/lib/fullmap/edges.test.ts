@@ -115,11 +115,11 @@ describe("selectVisibleEdges — кап рёбер (итерация 2)", () => 
     expect([...shown].sort()).toEqual([0, 1]);
   });
 
-  it("drops edges whose both endpoints are outside the culled draw set", () => {
+  it("drops edges hanging into empty space — BOTH ends must be visible", () => {
     const specs: EdgeSpec[] = [
       { src: 0, tgt: 1, type: "related_to", weight: 3 }, // оба невидимы
-      { src: 1, tgt: 2, type: "related_to", weight: 1 }, // один видим
-      { src: 2, tgt: 3, type: "supersedes", weight: 2 }, // видим
+      { src: 1, tgt: 2, type: "related_to", weight: 1 }, // один видим — обрубок, skip
+      { src: 2, tgt: 3, type: "supersedes", weight: 2 }, // оба видимы
     ];
     const { edgeData, edgeWeights } = build(specs);
     const importance = new Float32Array(4).fill(3);
@@ -129,6 +129,7 @@ describe("selectVisibleEdges — кап рёбер (итерация 2)", () => 
       showAuxiliary: false,
       cap: EDGE_VISIBLE_CAP,
     });
-    expect([...picked].sort()).toEqual([1, 2]);
+    // фикса «обрубков»: half-visible рёбра больше не рисуются вовсе
+    expect([...picked]).toEqual([2]);
   });
 });

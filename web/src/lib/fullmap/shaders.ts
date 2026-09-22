@@ -31,8 +31,8 @@ varying float vHighlight;
 varying float vFade;
 varying float vTwinklePhase;
 
-const float FADE_START = 900.0;
-const float FADE_END = 2200.0;
+const float FADE_START = 1500.0;
+const float FADE_END = 3200.0;
 
 void main() {
   vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
@@ -42,7 +42,7 @@ void main() {
   float sizePx = (4.5 + aSize * 1.9) * uSizeScale * uPixelRatio;
 
   float fade = 1.0 - smoothstep(FADE_START, FADE_END, dist);
-  vFade = fade * fade;
+  vFade = pow(fade, 1.4); // мягче квадрата — дальний край живёт
 
   // glass curve (§4.2) + M4: уровни глубже капа растворяются
   float level = aBfs;

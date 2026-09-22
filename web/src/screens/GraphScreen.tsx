@@ -431,24 +431,31 @@ export function GraphScreen() {
                   </div>
                 </div>
 
-                <div className="legend-block">
-                  <p className="legend-label">Пороги</p>
-                  <ul className="legend-gates">
-                    <li>
-                      <span className="gate-sample route" /> связь
-                    </li>
-                    <li>
-                      <span className="gate-sample supersedes" /> supersedes — версия
-                    </li>
-                    <li>
-                      <span className="gate-sample contradicts" /> contradicts — спор
-                    </li>
-                  </ul>
-                </div>
               </>
             )}
           </div>
         )}
+
+        {/* пороги всегда видны (оба режима) — фидбек Мастера */}
+        <div className="graph-legend">
+          <div className="legend-block">
+            <p className="legend-label">Пороги</p>
+            <ul className="legend-gates">
+              <li>
+                <span className="gate-sample route" /> связь
+              </li>
+              <li>
+                <span className="gate-sample supersedes" /> supersedes — версия
+              </li>
+              <li>
+                <span className="gate-sample contradicts" /> contradicts — спор
+              </li>
+              <li>
+                <span className="legend-star extinct" /> погасшая гранула
+              </li>
+            </ul>
+          </div>
+        </div>
       </div>
 
       {selected && (

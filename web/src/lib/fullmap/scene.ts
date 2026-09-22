@@ -737,7 +737,7 @@ export class FullMapScene {
     const levels = this.levels;
     const highlight = this.highlightAttr ? (this.highlightAttr.array as Float32Array) : null;
     const margin = NODE_CULL_MARGIN;
-    const maxDistSq = 2200 * 2200;
+    const maxDistSq = 3000 * 3000;
 
     const candIdx: number[] = (this.candIdx ||= []);
     const candScore: number[] = (this.candScore ||= []);
@@ -789,8 +789,8 @@ export class FullMapScene {
       this.packed.adjOffsets,
       this.packed.adjList,
       importance,
-      Math.floor(NODE_VISIBLE_CAP / 2),
-      NODE_VISIBLE_CAP,
+      // молекулы: 35 сгустков × 8 узлов — плотные группы со стержнями внутрь
+      { seedCount: Math.floor(NODE_VISIBLE_CAP / 8), clusterSize: 8, cap: NODE_VISIBLE_CAP },
     );
 
     let drawCount = 0;
