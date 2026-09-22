@@ -20,7 +20,7 @@ import { EDGE_VISIBLE_CAP, selectVisibleEdges, selectVisibleNodes } from "./edge
 import { selectLabeledNodes, type LabelCandidate } from "./lod";
 import { ellipseLayout, mixedLayout, FULL_VOLUME, hashUuid, type LayoutBounds, type VolumeBounds } from "./layout";
 import { unpackNodeString } from "./pack";
-import { STAR_FRAGMENT, STAR_VERTEX, SUN_FRAGMENT, SUN_VERTEX } from "./shaders";
+import { CORONA_FRAGMENT, CORONA_VERTEX, STAR_FRAGMENT, STAR_VERTEX, SUN_FRAGMENT, SUN_VERTEX } from "./shaders";
 import type { PackedCluster, PackedMapSnapshot } from "./types";
 
 const CLICK_SLOP_PX = 5;
@@ -378,23 +378,46 @@ export class FullMapScene {
   /** InstancedMesh сфер-солнц: 40 инстансов, палитра из цвета слоя. */
   private buildSuns(): void {
     const SUN_CAP = 40;
-    const geometry = new THREE.SphereGeometry(1, 20, 14);
     const seed = new THREE.InstancedBufferAttribute(new Float32Array(SUN_CAP), 1);
-    geometry.setAttribute("aInstSeed", seed);
-    const material = new THREE.ShaderMaterial({
+    this.sunsSeed = seed;
+
+    const sphereGeo = new THREE.SphereGeometry(1, 20, 14);
+    sphereGeo.setAttribute("aInstSeed", seed);
+    const sphereMaterial = new THREE.ShaderMaterial({
       vertexShader: SUN_VERTEX,
       fragmentShader: SUN_FRAGMENT,
       uniforms: { uTime: { value: 0 } },
       transparent: true,
       depthWrite: true,
     });
-    this.suns = new THREE.InstancedMesh(geometry, material, SUN_CAP);
+    this.suns = new THREE.InstancedMesh(sphereGeo, sphereMaterial, SUN_CAP);
     this.suns.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.suns.count = 0;
     this.suns.frustumCulled = false;
-    this.sunsSeed = seed;
     this.scene.add(this.suns);
+
+    // корона: billboard-квад ×2 радиуса, аддитивная, общий seed-атрибут
+    const coronaGeo = new THREE.PlaneGeometry(2, 2);
+    coronaGeo.setAttribute("aInstSeed", seed);
+    const coronaMaterial = new THREE.ShaderMaterial({
+      vertexShader: CORONA_VERTEX,
+      fragmentShader: CORONA_FRAGMENT,
+      uniforms: { uTime: { value: 0 } },
+      transparent: true,
+      depthWrite: false,
+      depthTest: false,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+    });
+    this.corona = new THREE.InstancedMesh(coronaGeo, coronaMaterial, SUN_CAP);
+    this.corona.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.corona.count = 0;
+    this.corona.frustumCulled = false;
+    this.corona.renderOrder = 5;
+    this.scene.add(this.corona);
   }
+
+  private corona: THREE.InstancedMesh | null = null;
 
   private sunsSeed: THREE.InstancedBufferAttribute | null = null;
 
@@ -430,11 +453,13 @@ export class FullMapScene {
       matrix.makeScale(scale, scale, scale);
       matrix.setPosition(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
       this.suns.setMatrixAt(used, matrix);
+      this.corona?.setMatrixAt(used, matrix);
 
       const nsIdx = meta[i * 4] | 0;
       const rgb = nsRgb[nsIdx] ?? [0.54, 0.59, 0.67];
       color.setRGB(rgb[0], rgb[1], rgb[2]);
       this.suns.setColorAt(used, color);
+      this.corona?.setColorAt(used, color);
       this.sunsSeed.setX(used, (hashUuid(`${i}`) >>> 12) / 0x1000000);
       used++;
     }
@@ -443,7 +468,13 @@ export class FullMapScene {
     this.suns.instanceMatrix.needsUpdate = true;
     this.sunsSeed.needsUpdate = true;
     if (this.suns.instanceColor) this.suns.instanceColor.needsUpdate = true;
+    if (this.corona) {
+      this.corona.count = used;
+      this.corona.instanceMatrix.needsUpdate = true;
+      if (this.corona.instanceColor) this.corona.instanceColor.needsUpdate = true;
+    }
   }
+
 
   /** Радиусы кластеров для оболочек-туманностей (по числу членов). */
   private rebuildClusterRadii(packed: PackedMapSnapshot): void {
@@ -1117,6 +1148,8 @@ export class FullMapScene {
     if (starMaterial) starMaterial.uniforms.uTime.value = elapsed;
     const sunMaterial = this.suns?.material as THREE.ShaderMaterial | undefined;
     if (sunMaterial) sunMaterial.uniforms.uTime.value = elapsed;
+    const coronaMaterial = this.corona?.material as THREE.ShaderMaterial | undefined;
+    if (coronaMaterial) coronaMaterial.uniforms.uTime.value = elapsed;
 
     // 3D-солнца: близкие звёзды (<250 юнитов) — InstancedMesh, throttle 120мс
     this.updateSuns(now);
@@ -1185,13 +1218,14 @@ export class FullMapScene {
   }
 
   private disposeMap(): void {
-    for (const object of [this.fullPoints, this.suns, this.mainEdges, this.supersedesEdges, this.contradictsEdges]) {
+    for (const object of [this.fullPoints, this.suns, this.corona, this.mainEdges, this.supersedesEdges, this.contradictsEdges]) {
       if (!object) continue;
       this.scene.remove(object);
       object.geometry.dispose();
       (object.material as THREE.Material).dispose();
     }
     this.suns = null;
+    this.corona = null;
     this.fullPoints = null;
     this.fullEdges = null;
     this.mainEdges = null;

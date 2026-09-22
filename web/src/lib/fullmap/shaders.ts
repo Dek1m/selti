@@ -142,8 +142,66 @@ void main() {
   // кроссфейд с 3D-солнцем вблизи
   alpha *= vSunCross;
 
+  // тонкий hue-перелив ореола (только вне ядра — «не рэйв»)
+  float hueW = (0.10 + 0.10 * sin(uTime * 0.8 + vTwinklePhase)) * haloT;
+  vec3 shifted = vec3(color.b, color.r, color.g);
+  color = mix(color, shifted, hueW);
+
   vec3 fogged = mix(color, uFogColor, (1.0 - vFade) * 0.6);
   gl_FragColor = vec4(mix(coreColor, fogged, haloT) * alpha, alpha);
+}
+`;
+
+/**
+ * КОРОНА 3D-солнца: billboard-квад ×2 радиуса сферы, аддитивная,
+ * радиальный градиент цвет→прозрачность, медленное мерцание (0.3-0.6 Гц)
+ * и лёгкий шифт оттенка по периметру («огонь дышит»).
+ */
+export const CORONA_VERTEX = /* glsl */ `
+attribute mat4 instanceMatrix; // от InstancedMesh
+attribute vec3 instanceColor;
+attribute float aInstSeed;
+
+uniform float uTime;
+
+varying vec3 vLayerColor;
+varying float vSeed;
+varying vec2 vQuad;
+
+void main() {
+  vec4 center = instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+  vec4 mvCenter = modelViewMatrix * center;
+  // billboard: квад в view-space вокруг центра, ×2 радиуса сферы
+  mvCenter.xy += position.xy * 2.0;
+  vLayerColor = instanceColor;
+  vSeed = aInstSeed;
+  vQuad = position.xy;
+  gl_Position = projectionMatrix * mvCenter;
+}
+`;
+
+export const CORONA_FRAGMENT = /* glsl */ `
+precision highp float;
+
+uniform float uTime;
+
+varying vec3 vLayerColor;
+varying float vSeed;
+varying vec2 vQuad;
+
+void main() {
+  float r = length(vQuad);          // 0..~1.41
+  float ang = atan(vQuad.y, vQuad.x);
+
+  // радиальный градиент: плотно у сферы, спад к краю
+  float body = smoothstep(1.15, 0.42, r);
+  // «огонь дышит»: мерцание 0.3-0.6 Гц + шифт оттенка по периметру
+  float flicker = 0.78 + 0.22 * sin(uTime * 2.8 + vSeed * 6.2831 + ang * 2.0);
+  float hueShift = 0.5 + 0.5 * sin(uTime * 0.9 + ang * 3.0 + vSeed * 4.0);
+  vec3 tint = mix(vLayerColor, vec3(1.0), 0.25 + 0.2 * hueShift);
+
+  float alpha = body * flicker * 0.55;
+  gl_FragColor = vec4(tint * alpha, alpha);
 }
 `;
 
@@ -158,6 +216,8 @@ export const SUN_VERTEX = /* glsl */ `
 // prefix для InstancedMesh) — свои объявления ломают компиляцию
 attribute float aInstSeed;
 
+uniform float uTime; // пульс масштаба («солнце дышит»)
+
 varying vec3 vObjPos;
 varying vec3 vNormal;
 varying vec3 vLayerColor;
@@ -165,11 +225,13 @@ varying float vSeed;
 varying float vAlpha;
 
 void main() {
-  vec4 world = instanceMatrix * vec4(position, 1.0);
+  // ПРИГОВОР: vAlpha инвертирована — полная вблизи (подлёт в 50 юнитов),
+  // плавное растворение к 250, где Points уже берут своё
+  vec4 local = vec4(position * (1.0 + 0.04 * sin(uTime * 1.3 + aInstSeed * 6.2831)), 1.0);
+  vec4 world = instanceMatrix * local;
   vec4 mv = modelViewMatrix * world;
   float dist = length(mv.xyz);
-  // кроссфейд: полная видимость ближе ~130, ноль на 250+ (Points берут своё)
-  vAlpha = smoothstep(130.0, 250.0, dist);
+  vAlpha = 1.0 - smoothstep(130.0, 250.0, dist);
   vObjPos = position;
   vNormal = normalize(mat3(instanceMatrix) * normal);
   vLayerColor = instanceColor;
