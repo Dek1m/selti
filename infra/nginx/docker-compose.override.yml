@@ -1,43 +1,38 @@
-# docker-compose.override.yml — добавляет nginx reverse proxy
-# Автоматически подхватывается docker-compose up
+# docker-compose.override.yml — ЭТАЛОН сервиса nginx для прода ai.atom.ui.
 #
-# Сертификаты: ./certs/fullchain.pem + ./certs/privkey.pem
-# (bind mount с хоста — рекомендуется для wildcard)
+# ВНИМАНИЕ: на сервере этот сервис живёт в ~/app/docker-compose.yml
+# (правится на сервере, история — в *.bak* рядом с ним). Этот файл —
+# VCS-эталон, отражающий прод-конфигурацию (инцидент 2026-09-22).
+#
+# Конфиги: /etc/nginx на хосте, bind-mount в контейнер целиком.
+# Эталон конфигов: infra/nginx/conf.d/ (см. README.md там).
 
 services:
   nginx:
-    build:
-      context: ./nginx
-      dockerfile: Dockerfile
-    container_name: nginx-proxy
+    container_name: nginx
+    image: nginx:alpine
     restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
+      - 80:80
+      - 443:443
     volumes:
-      # SSL certificates (bind mount с хоста)
-      - ./certs:/etc/nginx/certs:ro
-      # Логи (persistent volume)
-      - nginx-logs:/var/log/nginx
-    networks:
-      - app_default
-    depends_on:
-      opencode:
-        condition: service_started
-      selti:
-        condition: service_started
+      - /etc/nginx/:/etc/nginx/
+      - /etc/nginx/landing:/var/www/landing:ro
+    # Двухплечевой healthcheck (инцидент 2026-09-22):
+    #  1) сам nginx отвечает на 80 (location = /nginx-health в conf.d)
+    #  2) плечо до selti живо (/live — liveness, мгновенный; НЕ /health —
+    #     это readiness с celery inspect, стабильно ~5 c > любого
+    #     разумного healthcheck-timeout)
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost/health"]
       interval: 30s
-      timeout: 3s
       retries: 3
-      start_period: 5s
+      start_period: 10s
+      test:
+        - CMD-SHELL
+        - wget -qO- -T 8 http://127.0.0.1/nginx-health >/dev/null && wget -qO- -T 8 http://selti:8000/live >/dev/null || exit 1
+      timeout: 12s
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
-
-volumes:
-  nginx-logs:
-    driver: local

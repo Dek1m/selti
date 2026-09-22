@@ -73,8 +73,18 @@ jobs:
           rsync -av --delete ~/app/src/selti/web/dist/ /etc/nginx/landing/ui/
           ls -la /etc/nginx/landing/ui/ | head -5
 
-      - name: Verify health
-        run: curl -sf http://localhost:8000/health && echo " OK" || echo " FAILED"
+      # Сквозной smoke (инцидент 22.09: деплой был «зелёным» при полностью
+      # мёртвом фронте — старая проверка била localhost:8000 МИМО nginx,
+      # а тот отдавал 502 на все /api/* из-за устаревшего upstream IP).
+      # Теперь проверяем: бэкенд жив + плечо nginx→selti + морда отдаётся.
+      - name: Verify health (backend + через nginx + web UI)
+        run: |
+          curl -sf http://localhost:8000/live >/dev/null \
+            && echo "selti /live OK" || { echo "selti /live FAILED"; exit 1; }
+          curl -skf --resolve memory.atom.ui:443:127.0.0.1 https://memory.atom.ui/live >/dev/null \
+            && echo "nginx->selti OK" || { echo "nginx->selti FAILED (502 = upstream, см. infra/nginx/conf.d/README.md)"; exit 1; }
+          curl -skf --resolve ai.atom.ui:443:127.0.0.1 https://ai.atom.ui/ui/ >/dev/null \
+            && echo "web UI OK" || { echo "web UI FAILED"; exit 1; }
 
       # 72h, не 24h: откаточный образ :previous должен пережить
       # окно отката (3 дня). Prune -af всё равно заберёт dangling-слои.

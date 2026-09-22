@@ -1,0 +1,18 @@
+# ШАБЛОН zz-selti-api-auth.conf (секрет не коммитим!).
+# Реальный файл живёт ТОЛЬКО на сервере: /etc/nginx/conf.d/zz-selti-api-auth.conf
+# и содержит фактический SELTI_API_KEY.
+#
+# Назначение: LAN-клиентам (10.0.0.0/24) nginx прозрачно подставляет Bearer
+# для /api/* (решение Мастера 2026-09-19: LAN-only UI без логина);
+# внешние клиенты должны передать свой Bearer сами.
+
+geo $selti_lan {
+    default 0;
+    10.0.0.0/24 1;
+    127.0.0.1 1;
+    ::1 1;
+}
+map $selti_lan $selti_api_auth {
+    1 "Bearer <SELTI_API_KEY>";
+    0 $http_authorization;
+}

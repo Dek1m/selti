@@ -207,9 +207,14 @@ SET statement_timeout = 30s;              → ERROR: trailing junk after numeric
 
 ## 8. Риски и особенности
 
-- **nginx `unhealthy`** — известный ложный healthcheck (allow-list
-  10.0.0.0/24 и http→https режут localhost-запросы). Прод-трафик не затронут.
-  Не чинить в рамках T0.4.
+- ~~**nginx `unhealthy`** — известный ложный healthcheck~~ — ИСПРАВЛЕНО
+  23.09 (Рэй, инцидент P1 «вебморда не коннектится», корень — см.
+  `infra/nginx/conf.d/README.md`): настоящей причиной вечного unhealthy был
+  НЕ allow-list, а healthcheck `wget http://selti:8000/health` с docker-timeout
+  3s при ответе `/health` ~5 c (readiness: PG+Redis+celery inspect(5s)).
+  Теперь healthcheck двухплечевой и бьёт в мгновенный `/live`
+  (эталон: `infra/nginx/docker-compose.override.yml`). nginx `healthy` —
+  доверять; если unhealthy — ФРОНТ РЕАЛЬНО ПРОБЛЕМНЫЙ, не игнорировать.
 - **Авто-деплой на push в main** — во время диагностики/репетиции никто не
   пушит в main: деплой пересоздаст контейнеры и может применить миграции.
   Сегодня (22.09) было 10 деплоев за вечер — координировать окно с Афиной.
