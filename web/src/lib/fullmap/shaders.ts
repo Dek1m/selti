@@ -38,8 +38,8 @@ void main() {
   vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
   float dist = -mvPosition.z;
 
-  // эталон созвездия: базовый спрайт 14.5..32.5 px, экранно-постоянный
-  float sizePx = (10.0 + aSize * 4.5) * uSizeScale * uPixelRatio;
+  // эталон EVE: мелкие отчётливые точки 3-8px, редкие крупные до ~12px
+  float sizePx = (3.5 + aSize * 1.9) * uSizeScale * uPixelRatio;
 
   float fade = 1.0 - smoothstep(FADE_START, FADE_END, dist);
   vFade = fade * fade;
@@ -104,17 +104,16 @@ void main() {
   vec3 color = mix(vColor, vec3(luma), vDesat);
   color = mix(color, uIceColor, vFrozen * 0.55);
 
-  // эталон созвездия: графичное ядро ~50% диаметра с резкой кромкой,
-  // деликатный white-hot в центре и МЯГКИЙ глоу-ореол силы 0.75 за ядром
-  float coreR = 0.5;
-  float core = 1.0 - smoothstep(coreR * 0.82, coreR * 1.06, dist);
-  float hot = 1.0 - smoothstep(0.0, coreR * 0.55, dist);
-  vec3 coreColor = mix(color, vec3(1.0), 0.28 * hot);
+  // эталон EVE: чёткое яркое ядро ~55% диаметра + ЛЁГКИЙ маленький ореол
+  float coreR = 0.55;
+  float core = 1.0 - smoothstep(coreR * 0.86, coreR * 1.04, dist);
+  float hot = 1.0 - smoothstep(0.0, coreR * 0.6, dist);
+  vec3 coreColor = mix(color, vec3(1.0), 0.3 * hot);
 
   float haloT = clamp((dist - coreR) / (1.0 - coreR), 0.0, 1.0);
-  float halo = pow(1.0 - haloT, 2.0) * min(vGlow, 1.0);
+  float halo = pow(1.0 - haloT, 1.8) * min(vGlow, 1.0);
 
-  float alpha = max(core, halo * 0.75);
+  float alpha = max(core, halo * 0.42);
   float rim = (vHighlight >= 2.0) ? (1.0 - smoothstep(0.55, 1.0, dist)) * 0.35 : 0.0;
   alpha = max(alpha, rim);
   // погасшие гранулы созвездия: тлеющий контур вместо полноценной звезды
@@ -131,105 +130,3 @@ void main() {
 
 // ═══ Итоговое тело (канон LineSegments2): смещение в px → ndc → × w
 // своей вершины; вершины за камерой (w≤0) выбрасываются за клип.
-export const EDGE_VERTEX = /* glsl */ `
-attribute vec3 aOther;
-attribute vec3 aColor;
-attribute float aWeight;
-attribute float aKind;
-attribute float aEnd;
-attribute float aSide;
-attribute float aHighlight;
-
-uniform vec2 uViewport;   // px
-uniform float uEdgeWidth; // полная толщина в px
-
-varying vec3 vColor;
-varying float vAlpha;
-varying float vKind;
-varying float vEnd;
-varying float vPhase;
-
-const float FADE_START = 1100.0;
-// узлы выбираются до 2200 — лента с видимым концом доживает до дальнего
-const float FADE_END = 2400.0;
-
-void main() {
-  vec4 clipA = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-  vec4 clipB = projectionMatrix * modelViewMatrix * vec4(aOther, 1.0);
-  // разворот за камерой: лента с w≤0 выворачивается гигантской трапецией —
-  // выбрасываем целиком за клип
-  if (clipA.w <= 0.0 || clipB.w <= 0.0) {
-    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
-    vColor = vec3(0.0); vAlpha = 0.0; vKind = 0.0; vEnd = 0.0; vPhase = 0.0;
-    return;
-  }
-  vec4 clipSelf = mix(clipA, clipB, aEnd);
-  float dist = -mix(modelViewMatrix * vec4(position, 1.0), modelViewMatrix * vec4(aOther, 1.0), aEnd).z;
-
-  vec2 ndcA = clipA.xy / clipA.w;
-  vec2 ndcB = clipB.xy / clipB.w;
-  vec2 screenDir = ndcB - ndcA;
-  screenDir.x *= uViewport.x * 0.5;
-  screenDir.y *= uViewport.y * 0.5;
-  float len = length(screenDir);
-  vec2 perpPx = (len > 0.0001) ? vec2(-screenDir.y, screenDir.x) / len : vec2(1.0, 0.0);
-
-  // канон LineSegments2: per-vertex offset в px → ndc → × w этой вершины
-  vec2 ndcPerpPx = perpPx * aSide * (uEdgeWidth * 0.5);
-  vec4 clip = clipSelf + vec4((ndcPerpPx / (uViewport * 0.5)) * clipSelf.w, 0.0, 0.0);
-
-  float fade = 1.0 - smoothstep(FADE_START, FADE_END, dist);
-  float base = mix(0.75, 1.0, clamp((aWeight - 1.0) / 2.0, 0.0, 1.0));
-  if (aKind > 1.5) base = 1.0;
-
-  vAlpha = base * fade * (1.0 + aHighlight * 1.6);
-  vPhase = dot(position, vec3(0.0137, 0.0171, 0.0113));
-  vEnd = aEnd;
-  vKind = aKind;
-  vColor = aColor;
-
-  gl_Position = clip;
-}
-`;
-
-export const EDGE_FRAGMENT = /* glsl */ `
-precision highp float;
-
-uniform float uTime;
-uniform float uDebugSolid; // ?debug=1: белые непрозрачные ленты — проверка канала
-
-varying vec3 vColor;
-varying float vAlpha;
-varying float vKind;
-varying float vEnd;
-varying float vPhase;
-
-void main() {
-  // КРАСНЫЙ БИСЕКТ: безусловно непрозрачный красный — решаем, растеризуются
-  // ли ленты вообще. Убрать после вердикта Мастера!
-  gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);
-  return;
-  // ШАГ 1 диагностики: доказать глазами, что геометрия/канал верны
-  if (uDebugSolid > 0.5) {
-    gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);
-    return;
-  }
-
-  float alpha = vAlpha;
-
-  // dashed jump routes for supersedes: six dim gaps along the gate
-  if (vKind > 0.5 && vKind < 1.5) {
-    float phase = fract(vEnd * 6.0);
-    alpha *= mix(0.15, 1.0, step(phase, 0.55));
-  }
-
-  // contradicts СИЯЮТ (фидбек 6): редкий тип, time-based glow wave по ребру
-  if (vKind > 1.5) {
-    alpha *= 0.55 + 0.45 * sin(uTime * 2.6 + vPhase);
-  }
-
-  // чистый градиент цвет-из → цвет-в: fog не подмешиваем, чтобы переход
-  // между слоями читался (фидбек 5); таяние дальних делает alpha
-  gl_FragColor = vec4(vColor * alpha, alpha);
-}
-`;

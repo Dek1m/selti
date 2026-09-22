@@ -18,9 +18,9 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { bfsLevels } from "./bfs";
 import { EDGE_VISIBLE_CAP, selectVisibleEdges, selectVisibleNodes } from "./edges";
 import { selectLabeledNodes, type LabelCandidate } from "./lod";
-import { ellipseLayout, spiralLayout, FULL_SPIRAL, type LayoutBounds } from "./layout";
+import { ellipseLayout, mixedLayout, FULL_VOLUME, type LayoutBounds, type VolumeBounds } from "./layout";
 import { unpackNodeString } from "./pack";
-import { EDGE_FRAGMENT, EDGE_VERTEX, STAR_FRAGMENT, STAR_VERTEX } from "./shaders";
+import { STAR_FRAGMENT, STAR_VERTEX } from "./shaders";
 import type { PackedCluster, PackedMapSnapshot } from "./types";
 
 const CLICK_SLOP_PX = 5;
@@ -68,7 +68,7 @@ export class FullMapScene {
   private reducedMotion = false;
 
   private fullPoints: THREE.Points | null = null;
-  private fullEdges: THREE.Mesh | null = null;
+  private fullEdges: THREE.LineSegments | null = null;
   private nebulaGroup = new THREE.Group();
   private nebulaTexture: THREE.Texture | null = null;
   private labelLayer: HTMLDivElement;
@@ -76,8 +76,6 @@ export class FullMapScene {
   private bfsAttr: THREE.BufferAttribute | null = null;
   private highlightAttr: THREE.BufferAttribute | null = null;
   private clusterHighlightAttr: THREE.BufferAttribute | null = null;
-  private edgeIndex: THREE.BufferAttribute | null = null;
-  private edgeIndexArray: Uint32Array | null = null;
   private nodeIndex: THREE.BufferAttribute | null = null;
   private nodeIndexArray: Uint32Array | null = null;
   private nodeVisibleCount = 0;
@@ -154,8 +152,13 @@ export class FullMapScene {
       ].join(" / ");
       quad = `quad: ${corners.join(",")} | cornersPx(A/B/B') ${cornersPx} | ${parts.slice(0, 1).join(" | ")}`;
     }
+    const mainEdgePos = this.mainEdges?.geometry.getAttribute("position") as THREE.BufferAttribute | undefined;
+    const raw6 = mainEdgePos
+      ? [0, 3].map((f) => `${mainEdgePos.getX(f).toFixed(0)},${mainEdgePos.getY(f).toFixed(0)},${mainEdgePos.getZ(f).toFixed(0)}`).join(" / ")
+      : "none";
 
     const parentChain = parents.join(" < ");
+    // бисект-меш: зелёный wireframe на геометрии лент
     // позиционный буфер: первые два узла + NaN-скан (диагноз Мастера)
     let nanCount = 0;
     const npos = this.packed.nodePositions;
@@ -171,6 +174,7 @@ export class FullMapScene {
       `edgeMesh visible=${this.fullEdges.visible} drawRange=${geo.drawRange.count} bs=${bs ? bs.radius.toFixed(0) : "null"} renderOrder=${this.fullEdges.renderOrder} mw0-3=[${this.fullEdges.matrixWorld.elements.slice(0, 4).map((v) => v.toFixed(2)).join(",")}] parent=${parentChain}`,
       `uViewport=(${uViewport.x | 0}x${uViewport.y | 0}) uEdgeWidth=${material.uniforms.uEdgeWidth.value.toFixed(1)}`,
       `pipeline calls=${info.calls} tris=${info.triangles} points=${info.points}`,
+      `mainEdge pos0/1: ${raw6}`,
       quad,
     ].join(" | ");
   }
@@ -258,21 +262,31 @@ export class FullMapScene {
   }
 
   /** Build/replace the GPU buffers from a packed snapshot. */
-  load(packed: PackedMapSnapshot, layout: { kind: "spiral" | "ellipse"; bounds: LayoutBounds } = { kind: "spiral", bounds: FULL_SPIRAL }): void {
+  load(
+    packed: PackedMapSnapshot,
+    layout: { kind: "volume"; bounds: VolumeBounds } | { kind: "ellipse"; bounds: LayoutBounds } = {
+      kind: "volume",
+      bounds: FULL_VOLUME,
+    },
+  ): void {
     this.disposeMap();
     this.packed = packed;
     this.levels = null;
     this.hoverIndex = null;
 
     // разворот Мастера: клиентская детерминированная раскладка — full =
-    // спираль («галактическая рука»), созвездие = компактный объём;
-    // серверные координаты full-снапшота игнорируем
+    // объём EVE-стиля (60% кластерные сгустки + 40% фон), созвездие =
+    // компактный объём; серверные координаты full-снапшота игнорируем
     const uuids: string[] = [];
     for (let i = 0; i < packed.nodeCount; i++) {
       uuids.push(unpackNodeString(packed, i, 0));
     }
-    if (layout.kind === "spiral") {
-      spiralLayout(uuids, packed.nodePositions, { ...layout.bounds, gap: 40, spread: 15 });
+    if (layout.kind === "volume") {
+      const slotOf = (i: number) => packed.nodeMeta[i * 4 + 1] | 0;
+      mixedLayout(uuids, slotOf, packed.clusters.length, packed.nodePositions, {
+        span: layout.bounds.span,
+        height: layout.bounds.height,
+      });
     } else {
       ellipseLayout(uuids, packed.nodePositions, layout.bounds);
     }
@@ -333,7 +347,7 @@ export class FullMapScene {
     this.fullPoints.frustumCulled = false;
     this.scene.add(this.fullPoints);
 
-    this.buildFullEdges(packed);
+    this.buildEdgeLines();
     this.rebuildClusterRadii(packed);
     this.rebuildVisibleNodes(performance.now(), true);
     this.cullEdges(null);
@@ -374,143 +388,68 @@ export class FullMapScene {
     });
   }
 
-  /** Full-graph gates: two vertices per edge, per-vertex colors → gradient. */
   /**
-   * Ribbon edge factory (итерация 3): 4 вершины на ребро (концы A/B ×
-   * стороны ±1) + 6 индексов — экранный квад шириной uEdgeWidth px.
-   * Используется и полным графом, и кластерными воротами.
+   * Рёбра — THREE.LineSegments (эталон EVE, финал): три меша —
+   * основной с vertexColors (градиент слой→слой из коробки), янтарные
+   * supersedes и красные contradicts. Куллинг перезаписывает
+   * position/color буферы видимого набора (кап 1200 суммарно).
    */
-  private buildRibbonEdges(
-    m: number,
-    vertexData: (e: number) => {
-      a: [number, number, number];
-      b: [number, number, number];
-      colorA: [number, number, number];
-      colorB: [number, number, number];
-      weight: number;
-      kind: number;
-      highlight: number;
-    },
-  ): { geometry: THREE.BufferGeometry; indexArray: Uint32Array; indexAttr: THREE.BufferAttribute } {
-    const V = m * 4; // A+, A-, B+, B-
-    const positions = new Float32Array(V * 3);
-    const others = new Float32Array(V * 3);
-    const colors = new Float32Array(V * 3);
-    const weights = new Float32Array(V);
-    const kinds = new Float32Array(V);
-    const ends = new Float32Array(V);
-    const sides = new Float32Array(V);
-    const highlights = new Float32Array(V);
-
-    const writeCorner = (v: number, p: [number, number, number], o: [number, number, number], c: [number, number, number], weight: number, kind: number, end: number, side: number, highlight: number) => {
-      positions.set(p, v * 3);
-      others.set(o, v * 3);
-      colors.set(c, v * 3);
-      weights[v] = weight;
-      kinds[v] = kind;
-      ends[v] = end;
-      sides[v] = side;
-      highlights[v] = highlight;
+  private buildEdgeLines(): void {
+    const cap = EDGE_VISIBLE_CAP;
+    const make = (vertexColors: boolean) => {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(cap * 6), 3));
+      if (vertexColors) geometry.setAttribute("color", new THREE.BufferAttribute(new Float32Array(cap * 6), 3));
+      geometry.setDrawRange(0, 0);
+      return geometry;
     };
 
-    for (let e = 0; e < m; e++) {
-      const d = vertexData(e);
-      const base = e * 4;
-      writeCorner(base, d.a, d.b, d.colorA, d.weight, d.kind, 0, 1, d.highlight);
-      writeCorner(base + 1, d.a, d.b, d.colorA, d.weight, d.kind, 0, -1, d.highlight);
-      writeCorner(base + 2, d.b, d.a, d.colorB, d.weight, d.kind, 1, 1, d.highlight);
-      writeCorner(base + 3, d.b, d.a, d.colorB, d.weight, d.kind, 1, -1, d.highlight);
-    }
-
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    geometry.setAttribute("aOther", new THREE.BufferAttribute(others, 3));
-    geometry.setAttribute("aColor", new THREE.BufferAttribute(colors, 3));
-    geometry.setAttribute("aWeight", new THREE.BufferAttribute(weights, 1));
-    geometry.setAttribute("aKind", new THREE.BufferAttribute(kinds, 1));
-    geometry.setAttribute("aEnd", new THREE.BufferAttribute(ends, 1));
-    geometry.setAttribute("aSide", new THREE.BufferAttribute(sides, 1));
-    geometry.setAttribute("aHighlight", new THREE.BufferAttribute(highlights, 1));
-
-    // index = edge identity × 6 corner indices; edge-culling rewrites this
-    const indexArray = new Uint32Array(m * 6);
-    for (let e = 0; e < m; e++) {
-      const b = e * 4;
-      const o = e * 6;
-      // A+, B+, A-  /  B+, B-, A+
-      indexArray[o] = b;
-      indexArray[o + 1] = b + 2;
-      indexArray[o + 2] = b + 1;
-      indexArray[o + 3] = b + 2;
-      indexArray[o + 4] = b + 3;
-      indexArray[o + 5] = b + 1;
-    }
-    const indexAttr = new THREE.BufferAttribute(indexArray, 1);
-    geometry.setIndex(indexAttr);
-    return { geometry, indexArray, indexAttr };
-  }
-
-  private edgeMaterial(): THREE.ShaderMaterial {
-    return new THREE.ShaderMaterial({
-      vertexShader: EDGE_VERTEX,
-      fragmentShader: EDGE_FRAGMENT,
-      uniforms: {
-        uTime: { value: 0 },
-        uViewport: { value: new THREE.Vector2(1, 1) },
-        uEdgeWidth: { value: 6.0 },
-        uDebugSolid: { value: this.edgeDebug ? 1 : 0 },
-      },
-      transparent: true,
-      depthWrite: false,
-      depthTest: false, // рёбра — свет: не перекрываются атомами (мастер-фикс)
-      // ленты строятся в screen space — обход зависит от знака перпендикуляра,
-      // без DoubleSide половина квадов culled как back-facing (симптом:
-      // «рёбра исчезают при движении камеры»)
-      side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending,
-    });
-  }
-
-  private buildFullEdges(packed: PackedMapSnapshot): void {
-    const m = packed.edgeCount;
-    const nsRgb = this.palette?.namespaceRgb ?? [];
     const contradicts = this.palette?.contradicts ?? new THREE.Color("#ff7a8a");
+    const warn = this.palette?.supersedes ?? new THREE.Color("#ffc15e");
 
-    const { geometry, indexArray, indexAttr } = this.buildRibbonEdges(m, (e) => {
-      const src = packed.edgeData[e * 3];
-      const tgt = packed.edgeData[e * 3 + 1];
-      const typeIdx = packed.edgeData[e * 3 + 2];
-      const kindName = packed.edgeTypes[typeIdx] ?? "";
-      const kind = kindName === "supersedes" ? 1 : kindName === "contradicts" ? 2 : 0;
-
-      const srcRgb = nsRgb[packed.nodeMeta[src * 4] | 0] ?? [0.54, 0.59, 0.67];
-      const tgtRgb = nsRgb[packed.nodeMeta[tgt * 4] | 0] ?? [0.54, 0.59, 0.67];
-      // contradicts burns red regardless of endpoint layers (2D parity)
-      const colorA: [number, number, number] =
-        kind === 2 ? [contradicts.r, contradicts.g, contradicts.b] : srcRgb;
-      const colorB: [number, number, number] =
-        kind === 2 ? [contradicts.r, contradicts.g, contradicts.b] : tgtRgb;
-
-      return {
-        a: [packed.nodePositions[src * 3], packed.nodePositions[src * 3 + 1], packed.nodePositions[src * 3 + 2]],
-        b: [packed.nodePositions[tgt * 3], packed.nodePositions[tgt * 3 + 1], packed.nodePositions[tgt * 3 + 2]],
-        colorA,
-        colorB,
-        weight: packed.edgeWeights[e],
-        kind,
-        highlight: 0,
-      };
-    });
-
-    this.edgeIndexArray = indexArray;
-    this.edgeIndex = indexAttr;
-
-    this.fullEdges = new THREE.Mesh(geometry, this.edgeMaterial());
-    this.fullEdges.frustumCulled = false;
-    this.scene.add(this.fullEdges);
+    this.mainEdges = new THREE.LineSegments(
+      make(true),
+      new THREE.LineBasicMaterial({
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.55,
+        blending: THREE.AdditiveBlending,
+        depthTest: false,
+        depthWrite: false,
+      }),
+    );
+    this.supersedesEdges = new THREE.LineSegments(
+      make(false),
+      new THREE.LineBasicMaterial({
+        color: warn,
+        transparent: true,
+        opacity: 0.85,
+        blending: THREE.AdditiveBlending,
+        depthTest: false,
+        depthWrite: false,
+      }),
+    );
+    this.contradictsEdges = new THREE.LineSegments(
+      make(false),
+      new THREE.LineBasicMaterial({
+        color: contradicts,
+        transparent: true,
+        opacity: 0.9,
+        blending: THREE.AdditiveBlending,
+        depthTest: false,
+        depthWrite: false,
+      }),
+    );
+    for (const mesh of [this.mainEdges, this.supersedesEdges, this.contradictsEdges]) {
+      mesh.frustumCulled = false;
+      this.scene.add(mesh);
+    }
   }
 
-  /** Soft radial sprite used as the "туманность" shell around lit regions. */
+  private mainEdges: THREE.LineSegments | null = null;
+  private supersedesEdges: THREE.LineSegments | null = null;
+  private contradictsEdges: THREE.LineSegments | null = null;
+
   private makeNebulaTexture(): THREE.Texture {
     const size = 128;
     const canvas = document.createElement("canvas");
@@ -875,13 +814,13 @@ export class FullMapScene {
   private candScore: number[] | null = null;
 
   /**
-   * Edge culling + cap: рёбра только у видимых звёзд, максимум
-   * EDGE_VISIBLE_CAP по приоритету «weight × важность концов»,
-   * служебный слой скрыт тумблером. Throttle 150 мс.
+   * Edge culling + кап 1200 (эталон EVE): выбранные рёбра раскладываются
+   * в position/color буферы трёх LineSegments-мешей (main/supersedes/
+   * contradicts). Пары вершин копируются из nodePositions, цвета main —
+   * из спектра слоёв концов (градиент из коробки). Throttle 150 мс.
    */
   private cullEdges(now: number | null): void {
-    if (!this.packed || !this.fullEdges || !this.edgeIndex || !this.edgeIndexArray) return;
-    if (!this.nodeVisible) return;
+    if (!this.packed || !this.nodeVisible || !this.mainEdges || !this.supersedesEdges || !this.contradictsEdges) return;
     if (now !== null && now - this.lastEdgeCull < EDGE_CULL_COOLDOWN_MS) return;
     if (now !== null) this.lastEdgeCull = now;
 
@@ -900,28 +839,63 @@ export class FullMapScene {
       this.nodeVisible,
       { showAuxiliary: this.showAuxiliaryEdges, cap: EDGE_VISIBLE_CAP, stats },
     );
-    if (this.edgeDebug && stats && now !== null && now - this.lastEdgeDebugLog > 2000) {
+    if (this.edgeDebug && now !== null && now - this.lastEdgeDebugLog > 2000) {
       this.lastEdgeDebugLog = now;
       console.debug(
-        '[fullmap] nodes ' + this.nodeVisibleCount + '/' + this.packed.nodeCount +
-        ' · edges candidates ' + stats.candidates + ' → drawn ' + stats.drawn +
-        ' (cap ' + EDGE_VISIBLE_CAP + ') · both-ends-visible ' + stats.bothVisible,
+        `[fullmap] nodes ${this.nodeVisibleCount}/${this.packed.nodeCount} · edges candidates ${stats.candidates} → drawn ${stats.drawn} (cap ${EDGE_VISIBLE_CAP}) · both-ends-visible ${stats.bothVisible}`,
       );
     }
 
-    const index = this.edgeIndexArray;
+    const positions = this.packed.nodePositions;
+    const meta = this.packed.nodeMeta;
+    const nsRgb = this.palette?.namespaceRgb ?? [];
+
+    const mainPos = (this.mainEdges.geometry.getAttribute("position") as THREE.BufferAttribute).array as Float32Array;
+    const mainCol = (this.mainEdges.geometry.getAttribute("color") as THREE.BufferAttribute).array as Float32Array;
+    const supPos = (this.supersedesEdges.geometry.getAttribute("position") as THREE.BufferAttribute).array as Float32Array;
+    const conPos = (this.contradictsEdges.geometry.getAttribute("position") as THREE.BufferAttribute).array as Float32Array;
+    let mainN = 0;
+    let supN = 0;
+    let conN = 0;
+
     for (let k = 0; k < selected.length; k++) {
-      const b = selected[k] * 4;
-      const o = k * 6;
-      index[o] = b;
-      index[o + 1] = b + 2;
-      index[o + 2] = b + 1;
-      index[o + 3] = b + 2;
-      index[o + 4] = b + 3;
-      index[o + 5] = b + 1;
+      const e = selected[k];
+      const src = this.packed.edgeData[e * 3];
+      const tgt = this.packed.edgeData[e * 3 + 1];
+      const kindName = this.packed.edgeTypes[this.packed.edgeData[e * 3 + 2]] ?? "";
+
+      let buf: Float32Array;
+      let slot: number;
+      if (kindName === "supersedes") {
+        buf = supPos;
+        slot = supN++ * 6;
+      } else if (kindName === "contradicts") {
+        buf = conPos;
+        slot = conN++ * 6;
+      } else {
+        buf = mainPos;
+        slot = mainN * 6;
+        const cA = nsRgb[meta[src * 4] | 0] ?? [0.54, 0.59, 0.67];
+        const cB = nsRgb[meta[tgt * 4] | 0] ?? [0.54, 0.59, 0.67];
+        mainCol[slot] = cA[0]; mainCol[slot + 1] = cA[1]; mainCol[slot + 2] = cA[2];
+        mainCol[slot + 3] = cB[0]; mainCol[slot + 4] = cB[1]; mainCol[slot + 5] = cB[2];
+        mainN++;
+      }
+      buf[slot] = positions[src * 3];
+      buf[slot + 1] = positions[src * 3 + 1];
+      buf[slot + 2] = positions[src * 3 + 2];
+      buf[slot + 3] = positions[tgt * 3];
+      buf[slot + 4] = positions[tgt * 3 + 1];
+      buf[slot + 5] = positions[tgt * 3 + 2];
     }
-    this.edgeIndex.needsUpdate = true;
-    this.fullEdges.geometry.setDrawRange(0, selected.length * 6);
+
+    (this.mainEdges.geometry.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
+    (this.mainEdges.geometry.getAttribute("color") as THREE.BufferAttribute).needsUpdate = true;
+    this.mainEdges.geometry.setDrawRange(0, mainN * 2);
+    (this.supersedesEdges.geometry.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
+    this.supersedesEdges.geometry.setDrawRange(0, supN * 2);
+    (this.contradictsEdges.geometry.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
+    this.contradictsEdges.geometry.setDrawRange(0, conN * 2);
   }
 
   /** Top-K DOM labels (§7): только видимые звёзды, throttle 140 мс. */
@@ -1044,7 +1018,7 @@ export class FullMapScene {
   }
 
   private disposeMap(): void {
-    for (const object of [this.fullPoints, this.fullEdges]) {
+    for (const object of [this.fullPoints, this.mainEdges, this.supersedesEdges, this.contradictsEdges]) {
       if (!object) continue;
       this.scene.remove(object);
       object.geometry.dispose();
@@ -1052,8 +1026,9 @@ export class FullMapScene {
     }
     this.fullPoints = null;
     this.fullEdges = null;
-    this.edgeIndex = null;
-    this.edgeIndexArray = null;
+    this.mainEdges = null;
+    this.supersedesEdges = null;
+    this.contradictsEdges = null;
     this.nodeIndex = null;
     this.nodeIndexArray = null;
     this.nodeVisibleCount = 0;

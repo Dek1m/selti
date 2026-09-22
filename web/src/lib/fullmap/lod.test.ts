@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { selectLabeledNodes, type LabelCandidate } from "./lod";
-import { FULL_LAYOUT, CONSTELLATION_LAYOUT, FULL_SPIRAL, ellipseLayout, spiralLayout, hashUuid } from "./layout";
+import { FULL_LAYOUT, CONSTELLATION_LAYOUT, FULL_VOLUME, ellipseLayout, mixedLayout, hashUuid } from "./layout";
 
 const candidate = (over: Partial<LabelCandidate>): LabelCandidate => ({
   index: 0,
@@ -108,26 +108,25 @@ describe("ellipseLayout — детерминированный 3D-объём", (
   });
 });
 
-describe("spiralLayout — спираль full-карты", () => {
+describe("mixedLayout — объёмная раскладка full-карты (эталон EVE)", () => {
   const uuids = Array.from({ length: 15_000 }, (_, i) => `${i.toString(16).padStart(8, "0")}-g`);
+  const slotOf = (i: number) => i % 40; // 40 кластеров
 
-  it("is deterministic and stays inside the spiral bounds", () => {
-    const a = spiralLayout(uuids, new Float32Array(uuids.length * 3), FULL_SPIRAL);
-    const b = spiralLayout(uuids, new Float32Array(uuids.length * 3), FULL_SPIRAL);
+  it("is deterministic and stays inside the volume bounds", () => {
+    const a = mixedLayout(uuids, slotOf, 40, new Float32Array(uuids.length * 3), FULL_VOLUME);
+    const b = mixedLayout(uuids, slotOf, 40, new Float32Array(uuids.length * 3), FULL_VOLUME);
     expect([...a]).toEqual([...b]);
     for (let i = 0; i < uuids.length; i++) {
       expect(Number.isNaN(a[i * 3])).toBe(false);
-      expect(Math.abs(a[i * 3 + 1])).toBeLessThanOrEqual(FULL_SPIRAL.thickness);
-      expect(Math.hypot(a[i * 3], a[i * 3 + 2])).toBeLessThan(FULL_SPIRAL.radius * 1.05);
+      expect(Math.abs(a[i * 3])).toBeLessThanOrEqual(FULL_VOLUME.span * 1.6); // гауссиана + хвосты
+      expect(Math.abs(a[i * 3 + 1])).toBeLessThanOrEqual(FULL_VOLUME.height * 2.2);
     }
   });
 
-  it("reads as a spiral: most points far from center, none clumped at origin", () => {
-    const a = spiralLayout(uuids, new Float32Array(uuids.length * 3), FULL_SPIRAL);
-    let nearCenter = 0;
-    for (let i = 0; i < uuids.length; i++) {
-      if (Math.hypot(a[i * 3], a[i * 3 + 2]) < 60) nearCenter++;
-    }
-    expect(nearCenter).toBeLessThan(300); // 2% — не «каша в центре»
+  it("объёмный: узлы заполняют вертикаль, не «блин»", () => {
+    const a = mixedLayout(uuids, slotOf, 40, new Float32Array(uuids.length * 3), FULL_VOLUME);
+    const ys = new Set();
+    for (let i = 0; i < uuids.length; i++) ys.add(a[i * 3 + 1].toFixed(0));
+    expect(ys.size).toBeGreaterThan(500);
   });
 });

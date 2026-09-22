@@ -10,7 +10,7 @@ import * as THREE from "three";
 import { searchGranules, type SearchFilters } from "../api/selti";
 import { FullMapScene, type ScenePalette } from "../lib/fullmap/scene";
 import { packSnapshot, unpackNodeString } from "../lib/fullmap/pack";
-import { CONSTELLATION_LAYOUT } from "../lib/fullmap/layout";
+import { CONSTELLATION_LAYOUT, FULL_VOLUME } from "../lib/fullmap/layout";
 import type { PackedMapSnapshot, RawMapSnapshot } from "../lib/fullmap/types";
 import { hslToRgb, namespaceColor, resolveCssColor } from "../lib/colors";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
@@ -200,7 +200,7 @@ export function FullMapLayer({ mode = "full", constellationSnapshot = null, quer
         palette.namespaceRgb = packed.namespaces.map((uid) => nsToRgb(uid));
         indexByIdRef.current = buildUuidIndex(packed);
         scene.setPalette(palette);
-        scene.load(packed);
+        scene.load(packed, { kind: "volume", bounds: FULL_VOLUME });
         onStats({
           nodes: packed.nodeCount,
           edges: packed.edgeCount,
