@@ -182,6 +182,7 @@ export class FullMapScene {
       `uViewport=(${uViewport.x | 0}x${uViewport.y | 0}) uEdgeWidth=${material.uniforms.uEdgeWidth.value.toFixed(1)}`,
       `pipeline calls=${info.calls} tris=${info.triangles} points=${info.points}`,
       `mainEdge pos0/1: ${raw6}`,
+      `suns used=${this.suns ? this.suns.count : "none"} (cap 40, range 250)`,
       quad,
     ].join(" | ");
   }

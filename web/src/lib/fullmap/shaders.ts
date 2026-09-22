@@ -154,8 +154,8 @@ void main() {
  * и кроссфейд с Points по дистанции камеры (появляется ближе 250).
  */
 export const SUN_VERTEX = /* glsl */ `
-attribute mat4 instanceMatrix; // от InstancedMesh
-attribute vec3 instanceColor;  // цвет слоя (three связывает автоматически)
+// NB: instanceMatrix/instanceColor объявляет сам three (USE_INSTANCING
+// prefix для InstancedMesh) — свои объявления ломают компиляцию
 attribute float aInstSeed;
 
 varying vec3 vObjPos;
