@@ -168,7 +168,7 @@ export class FullMapScene {
       `pos0=${f3(0)} pos1=${f3(1)} len=${npos.length} nan=${nanCount}`,
       `nodes ${this.nodeVisibleCount}/${this.packed.nodeCount}`,
       `edges cand/drawn/both ${this.lastEdgeStats.candidates}/${this.lastEdgeStats.drawn}/${this.lastEdgeStats.bothVisible}`,
-      `edgeMesh visible=${this.fullEdges.visible} drawRange=${geo.drawRange.count} bs=${bs ? bs.radius.toFixed(0) : "null"} parent=${parentChain}`,
+      `edgeMesh visible=${this.fullEdges.visible} drawRange=${geo.drawRange.count} bs=${bs ? bs.radius.toFixed(0) : "null"} renderOrder=${this.fullEdges.renderOrder} mw0-3=[${this.fullEdges.matrixWorld.elements.slice(0, 4).map((v) => v.toFixed(2)).join(",")}] parent=${parentChain}`,
       `uViewport=(${uViewport.x | 0}x${uViewport.y | 0}) uEdgeWidth=${material.uniforms.uEdgeWidth.value.toFixed(1)}`,
       `pipeline calls=${info.calls} tris=${info.triangles} points=${info.points}`,
       quad,
@@ -457,7 +457,7 @@ export class FullMapScene {
       uniforms: {
         uTime: { value: 0 },
         uViewport: { value: new THREE.Vector2(1, 1) },
-        uEdgeWidth: { value: 4.0 },
+        uEdgeWidth: { value: 6.0 },
         uDebugSolid: { value: this.edgeDebug ? 1 : 0 },
       },
       transparent: true,
@@ -1039,7 +1039,7 @@ export class FullMapScene {
       const material = edges?.material as THREE.ShaderMaterial | undefined;
       if (!material) continue;
       (material.uniforms.uViewport.value as THREE.Vector2).set(width * pixelRatio, height * pixelRatio);
-      material.uniforms.uEdgeWidth.value = 4.0 * pixelRatio;
+      material.uniforms.uEdgeWidth.value = 6.0 * pixelRatio;
     }
   }
 
