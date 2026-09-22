@@ -214,8 +214,9 @@ void main() {
     sin(ang * 5.0 + uTime * 1.3 + vSeed * 1.7) * 0.30;
   atmo *= 1.0 + 0.55 * flare;
 
-  // ── КОЛЬЦО-КОРОНА поверх (суммируется с атмосферой) ──
-  float ring = smoothstep(0.34, 0.60, r) * (1.0 - smoothstep(0.60, 0.96, r));
+  // ── ЯВНОЕ КРУГЛОЕ КОЛЬЦО-ГАЛО сразу за кромкой диска (диск в кваде до r≈0.455)
+  // тонкое яркое: резко загорается за кромкой, мягко гаснет наружу
+  float haloRing = smoothstep(0.46, 0.54, r) * (1.0 - smoothstep(0.64, 0.82, r));
   float outer = (1.0 - smoothstep(0.5, 1.02, r)) * 0.3;
 
   // рандом per-star: интенсивность 0.5-1.0, мерцание 0.3-0.7 Гц
@@ -228,8 +229,12 @@ void main() {
   // цвет атмосферы: слой с нагревом к белому у кромки (ярче ободок)
   vec3 atmoTint = mix(vLayerColor, vec3(1.0), 0.45 * atmoRise);
 
-  float alpha = (atmo * 1.0 + ring * 0.8 + outer * 0.25) * intensity * flicker;
+  // кольцо: яркая линия цвета слоя с нагревом к белому — «звезда в короне»
+  vec3 ringTint = mix(vLayerColor, vec3(1.0), 0.6);
+  float ringAlpha = haloRing * 0.95 * intensity * flicker;
+  float alpha = (atmo * 1.0 + outer * 0.25) * intensity * flicker + ringAlpha;
   vec3 col = mix(tint, atmoTint, atmoRise);
+  col = mix(col, ringTint, haloRing);
   gl_FragColor = vec4(col * alpha, alpha);
 }
 `;
