@@ -13,6 +13,19 @@
   #panel .good { color: #5fe8c8; }
 </style>
 <script>
+  (function () {
+    const orig = console.error.bind(console);
+    const origW = console.warn.bind(console);
+    const buf = [];
+    const flush = () => {
+      const p = document.getElementById("panel");
+      if (p && buf.length) p.innerHTML = '<span class="bad">' + buf.join("<br>") + "</span><br>" + p.innerHTML;
+    };
+    console.error = (...a) => { buf.push("C-ERR: " + a.map((x) => String(x).slice(0, 300)).join(" ")); orig(...a); flush(); };
+    console.warn = (...a) => { buf.push("C-WARN: " + a.map((x) => String(x).slice(0, 200)).join(" ")); origW(...a); flush(); };
+  })();
+</script>
+<script>
   window.addEventListener("error", function (e) {
     var p = document.getElementById("panel");
     if (p) p.innerHTML = '<span class="bad">ERROR: ' + ((e.error && e.error.stack) || e.message) + '</span>';
@@ -48,6 +61,7 @@ try {
 }
 renderer.setPixelRatio(1);
 renderer.setSize(innerWidth, innerHeight);
+renderer.debug.checkShaderErrors = true;
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
