@@ -58,8 +58,14 @@ varying float vSeed;
 varying float vAlpha;
 
 void main() {
-  // ПРИГОВОР: vAlpha инвертирована — полная вблизи (подлёт в 50 юнитов),
-  // плавное растворение к 250, где Points уже берут своё
+  // БИСЕКТ: вершины солнца в центр экрана — если квадратиков нет,
+  // draw не доходит до растеризации (буфер/атрибуты/программа)
+  gl_Position = vec4(position.xy * 0.002, 0.0, 1.0);
+  gl_PointSize = 24.0;
+  vAlpha = 1.0;
+  vColor = vec3(0.2, 1.0, 0.4);
+  vObjPos = position;
+  gl_Position = vec4(position.xy * 0.002, 0.0, 1.0);
   vec4 local = vec4(position * (1.0 + 0.04 * sin(uTime * 1.3 + aInstSeed * 6.2831)), 1.0);
   vec4 world = instanceMatrix * local;
   vec4 mv = modelViewMatrix * world;
