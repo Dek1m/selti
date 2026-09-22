@@ -81,6 +81,11 @@ class SearchResult(BaseModel):
     score_rrf: float | None = None
     score_decay: float | None = None
     score_importance: float | None = None
+    # ── Фаза 3 (волна 3): ассоциативное расширение search
+    # (strategy="activation") — true у активированных соседей графа
+    # (score = PPR-ранг, не rrf-композит). Гибридная выдача поле НЕ
+    # сериализует (бит-в-бит прежний JSON) — исключение в таске. ──
+    activated: bool = False
 
 
 class MemoryListResult(BaseModel):

@@ -4,7 +4,10 @@ link_new_granule — асинхронный автолинкинг новой г
 (постановка — MemoryService.store через linker_dispatch, store НЕ дорожает).
 name_reconciler — beat-кампания резолва висячих target_name (сухой прогон
 по умолчанию: бой включается конфигом после ручной проверки отчёта).
-co_occurrence — beat-кампания L1c для исторического корпуса.
+co_occurrence — beat-кампания L1c для исторического корпуса (Фаза 3:
+косинус-гейт + маркер l1c_done).
+prune_cooccurrence_history — one-off кампания Фазы 3 (ручной celery-call):
+ретроспективный гейт исторических l1c, dry_run по умолчанию.
 l2_verdicts — beat-воркер очереди LLM-вердиктов (в manual-режиме очередь
 не трогает — её разбирает человек-агент тулами review/verdict).
 linker_review / linker_manual_verdict — ручной разбор очереди L2
@@ -152,9 +155,34 @@ def name_reconciler(self, dry_run: bool | None = None) -> dict[str, Any]:
     routing_key="memory",
 )
 def co_occurrence(self, batch: int | None = None) -> dict[str, Any]:
-    """L1c для исторического корпуса: соседи той же сессии → related_to 0.5."""
+    """L1c для исторического корпуса: соседи той же сессии → related_to 0.5
+    сквозь косинус-гейт; обработанные гранулы помечаются l1c_done."""
     linker = _get_linker()
     return run_async(linker.run_co_occurrence, batch=batch)
+
+
+@shared_task(
+    bind=True,
+    base=SeltiTask,
+    name="memory_server.tasks.linker_tasks.prune_cooccurrence_history",
+    max_retries=0,  # one-off ручной запуск: ретрай спрячет от человека отказ
+    soft_time_limit=1800,
+    time_limit=2400,
+    queue="memory",
+    routing_key="memory",
+)
+def prune_cooccurrence_history(
+    self, dry_run: bool = True, batch: int | None = None
+) -> dict[str, Any]:
+    """One-off кампания Фазы 3: ретроспективный косинус-гейт исторических
+    l1c-рёбер — непрошедшие получают pruned_at (НЕ DELETE); мосты между
+    кластерами иммунны. dry_run=True (дефолт) — только отчёт (выживет/
+    погибнет, распределение по кластерам, топ примеров); бой — явным
+    celery-call с dry_run=False. Идемпотентна: повтор по прогнанному — no-op."""
+    linker = _get_linker()
+    return run_async(
+        linker.run_prune_cooccurrence_history, dry_run=dry_run, batch=batch
+    )
 
 
 @shared_task(

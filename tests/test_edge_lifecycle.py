@@ -146,15 +146,19 @@ class TestLazyIdempotency:
         assert lazy > materialized_twice  # материализация затухала бы дважды
 
     def test_no_daily_weight_batch_in_queries(self):
-        """Ежедневный decay-UPDATE веса НЕ существует: единственные
-        пишущие рёбра запросы — reinforce/pruned_at/restore."""
+        """Ежедневный decay-UPDATE веса НЕ существует: единственные пишущие
+        вес запросы — reinforce/restore + mutual-кассета L1c (Фаза 3:
+        reinforce существующей пары внутри INSERT co-occurrence — событие
+        линкера, не ежедневный батч)."""
         sqls = {name: getattr(q, name) for name in dir(q)
                 if name.isupper() and isinstance(getattr(q, name), str)}
         weight_writers = [
             name for name, sql in sqls.items()
             if "UPDATE relations" in sql and "weight" in sql.split("WHERE")[0].split("SET")[-1]
         ]
-        assert set(weight_writers) == {"REINFORCE_RELATIONS", "RESTORE_EDGE"}
+        assert set(weight_writers) == {
+            "REINFORCE_RELATIONS", "RESTORE_EDGE", "INSERT_COOCCURRENCE_LINKS",
+        }
 
     def test_prune_writes_only_pruned_at(self):
         """Материализуется ТОЛЬКО pruned_at (никаких весов/статусов)."""

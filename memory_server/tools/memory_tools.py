@@ -173,6 +173,7 @@ async def memory_search(
     namespace: str | None = None,
     project_id: str | None = None,
     include_historical: bool = False,
+    strategy: str = "hybrid",
     ctx: Context | None = None,
 ) -> list[dict[str, Any]]:
     """Search memories by semantic similarity (hybrid: dense + full-text).
@@ -185,6 +186,11 @@ async def memory_search(
     omit to search everywhere (global layer included).
     include_historical: set True for time-travel — superseded/retracted
     versions are included (validity filter disabled).
+    strategy: "hybrid" (default — dense+FTS fusion) | "activation"
+    (associative expansion: seed hits of the hybrid search plus their
+    activated graph neighbours by personalized PageRank; expansions carry
+    activated=true, total top-K = limit). Activation requires the
+    search_activation_enabled flag.
     """
     results = await celery_call(
         TASK_SEARCH,
@@ -195,6 +201,7 @@ async def memory_search(
         namespace=namespace,
         project_id=project_id,
         include_historical=include_historical,
+        strategy=strategy,
     )
     SEARCH_RESULTS.labels(tool="memory_search").observe(len(results))
     return results

@@ -23,10 +23,12 @@ l2_verdicts забирает пачками. Verdict-cache — Redis, ключ �
 from __future__ import annotations
 
 import json
+import uuid as uuid_module
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 import asyncpg
+import numpy as np
 
 from memory_server.config import Settings
 from memory_server.db import queries as q
@@ -41,6 +43,7 @@ from memory_server.llm_client import (
 from memory_server.logger import get_logger
 from memory_server.memory.qdrant_store import QdrantStore
 from memory_server.metrics import (
+    LINKER_L1C_GATE_FAILURES_TOTAL,
     LINKER_L2_QUEUE_SIZE,
     LINKER_LINKS_CREATED_TOTAL,
     LINKER_LLM_VERDICTS_TOTAL,
@@ -101,6 +104,16 @@ def verdict_cache_key(a_id: str, b_id: str, a_hash: str | None, b_hash: str | No
         ((a_id, a_hash or "-"), (b_id, b_hash or "-")), key=lambda t: t[0]
     )
     return f"{_VERDICT_CACHE_PREFIX}:{lo}:{hi}:{lo_hash}:{hi_hash}"
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Косинус двух векторов; numpy — на 4096-мерных векторах гейта L1c
+    (батч до 11 пар за вызов) чистый Python медленнее на порядок.
+    Вырожденный нулевой модуль → 0.0 (пара гейт не проходит)."""
+    va = np.asarray(a, dtype=np.float64)
+    vb = np.asarray(b, dtype=np.float64)
+    denom = float(np.linalg.norm(va) * np.linalg.norm(vb))
+    return float(va @ vb) / denom if denom > 0.0 else 0.0
 
 
 class Linker:
@@ -209,9 +222,15 @@ class Linker:
         L1a: ANN соседей [synonym, verdict) → related_to weight=score.
         L2: соседи [verdict, dedup[ns]) → Redis-очередь вердиктов
         (не наполняется при выключенном LLM — сирот подберёт V3.4).
-        L1c: соседи той же сессии → related_to 0.5.
+        L1c: соседи той же сессии → related_to 0.5 сквозь косинус-гейт.
         """
-        report: dict[str, Any] = {"granule_id": granule_id, "l1a_created": 0, "l1c_created": 0, "l2_enqueued": 0}
+        report: dict[str, Any] = {
+            "granule_id": granule_id,
+            "l1a_created": 0,
+            "l1c_created": 0,
+            "l1c_reinforced": 0,
+            "l2_enqueued": 0,
+        }
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(q.SELECT_NEW_GRANULE_FOR_LINKER, granule_id)
             if row is None:
@@ -284,20 +303,111 @@ class Linker:
         granule_id: str,
         row: asyncpg.Record,
     ) -> None:
-        """L1c: соседи той же сессии → related_to 0.5 (кап config, свежие)."""
+        """L1c: соседи той же сессии → related_to 0.5 сквозь косинус-гейт
+        (Фаза 3) + mutual-reinforce существующих пар + маркер l1c_done."""
         if not self.config.linker_l1c_enabled or not row["sid"]:
             return
-        created = await conn.fetch(
-            q.INSERT_COOCCURRENCE_LINKS,
+        outcome = await self._process_cooccurrence(
+            conn, granule_id, row["project_id"], row["ns_id"], row["sid"]
+        )
+        report["l1c_created"] += outcome["created"]
+        report["l1c_reinforced"] += outcome["reinforced"]
+
+    def _gate_l1c_neighbors(
+        self, granule_id: str, neighbor_ids: list[str]
+    ) -> list[str] | None:
+        """Косинус-гейт L1c (Фаза 3): id соседей, прошедших порог.
+
+        Один батч retrieve на источник+соседей, парная оценка в Python.
+        None — fail-closed (Qdrant недоступен / нет вектора источника):
+        рёбер не создаём, l1c_done не пишем — гранула вернётся на ретрай
+        (вердикт Эны: без оценки пара не рождается). Сосед без вектора —
+        пара неоценима, отсеивается точечно (это не отказ). Гейт 0.0 —
+        выключен: проходят все, Qdrant не дёргается.
+        """
+        gate = self.config.linker_l1c_gate_min
+        if gate <= 0.0:
+            return neighbor_ids
+        if self.qdrant is None:
+            self._l1c_gate_fail(granule_id, "qdrant_not_configured")
+            return None
+        try:
+            vectors = self.qdrant.retrieve_vectors([granule_id, *neighbor_ids])
+        except Exception as exc:
+            self._l1c_gate_fail(granule_id, f"retrieve_error: {exc}")
+            return None
+        source_vec = vectors.get(granule_id)
+        if source_vec is None:
+            self._l1c_gate_fail(granule_id, "no_source_vector")
+            return None
+        source_arr = np.asarray(source_vec, dtype=np.float64)
+        source_norm = float(np.linalg.norm(source_arr))  # один раз на батч
+        passed: list[str] = []
+        for neighbor_id in neighbor_ids:
+            vec = vectors.get(neighbor_id)
+            if vec is None:
+                continue
+            arr = np.asarray(vec, dtype=np.float64)
+            denom = source_norm * float(np.linalg.norm(arr))
+            if denom > 0.0 and float(source_arr @ arr) / denom >= gate:
+                passed.append(neighbor_id)
+        return passed
+
+    @staticmethod
+    def _l1c_gate_fail(granule_id: str, reason: str) -> None:
+        """Fail-closed гейта: WARNING + метрика; рёбер нет, маркера нет."""
+        logger.warning(
+            "linker: l1c gate fail-closed, no edges",
+            extra={"id": granule_id, "reason": reason},
+        )
+        LINKER_L1C_GATE_FAILURES_TOTAL.inc()
+
+    async def _process_cooccurrence(
+        self,
+        conn: asyncpg.Connection,
+        granule_id: str,
+        project_id: Any,
+        namespace_id: str,
+        session_id: str,
+    ) -> dict[str, int | bool]:
+        """Обработка одной гранулы (автолинк и beat-кампания): соседи →
+        косинус-гейт → INSERT с mutual-reinforce → маркер l1c_done.
+
+        Возврат — {created, reinforced, fail_closed}: ключи отчёта у путей
+        разные (l1c_* у автолинка, links_* у кампании), накопление за
+        вызывающими. Маркер пишется и при нулевых вставках (все соседи
+        отсеяны гейтом) — иначе гранула вечно крутилась бы в выборке
+        кампании. Fail-closed гейта прерывает ДО маркера: гранула
+        останется кандидатом и дождётся живого Qdrant.
+        """
+        neighbors = await conn.fetch(
+            q.SELECT_COOCCURRENCE_NEIGHBORS,
             granule_id,
-            row["project_id"],
-            row["ns_id"],
-            row["sid"],
+            project_id,
+            namespace_id,
+            session_id,
             self.config.linker_cooccurrence_cap,
         )
-        report["l1c_created"] = len(created)
-        if created:
-            LINKER_LINKS_CREATED_TOTAL.labels(layer="l1c").inc(len(created))
+        if not neighbors:
+            # без соседей гранула выпадает из beat-выборки сама (EXISTS-гард)
+            return {"created": 0, "reinforced": 0, "fail_closed": False}
+        gated = self._gate_l1c_neighbors(granule_id, [row["id"] for row in neighbors])
+        if gated is None:
+            return {"created": 0, "reinforced": 0, "fail_closed": True}
+        created = reinforced = 0
+        if gated:
+            stats = await conn.fetchrow(
+                q.INSERT_COOCCURRENCE_LINKS,
+                granule_id,
+                gated,
+                self.config.edge_reinforce_alpha,
+                session_id,
+            )
+            created, reinforced = stats["created"], stats["reinforced"]
+            if created:
+                LINKER_LINKS_CREATED_TOTAL.labels(layer="l1c").inc(created)
+        await conn.execute(q.MARK_L1C_DONE, granule_id)
+        return {"created": created, "reinforced": reinforced, "fail_closed": False}
 
     # ── Кампания name_reconciler (V3.2, ADR-019 C L3) ──
 
@@ -350,30 +460,155 @@ class Linker:
     # ── Кампания co-occurrence (L1c для исторического корпуса) ──
 
     async def run_co_occurrence(self, batch: int | None = None) -> dict[str, Any]:
-        """Beat-кампания L1c: гранулы с session_id без l1c-рёбер, батчами.
+        """Beat-кампания L1c: гранулы с session_id и без l1c_done, батчами.
 
-        Выборка идемпотентна: после первого прогона гранула получает l1c-ребро
-        (есть соседи ⇒ ребро будет) и выпадает из пула кандидатов.
+        Идемпотентность (Фаза 3): обработанная гранула получает маркер
+        l1c_done в metadata — В ТОМ ЧИСЛЕ при нулевых вставках (все соседи
+        отсеяны косинус-гейтом), иначе гранула крутилась бы в выборке
+        вечно. Fail-closed гейта маркер НЕ пишет — гранула вернётся
+        следующим прогоном (видна в отчёте как l1c_gate_failures).
         """
         limit = batch or self.config.linker_reconciler_batch
-        created_total = 0
+        report: dict[str, Any] = {
+            "candidates": 0,
+            "links_created": 0,
+            "links_reinforced": 0,
+            "l1c_gate_failures": 0,
+        }
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(q.SELECT_COOCCURRENCE_CANDIDATES, limit)
+            report["candidates"] = len(rows)
             for row in rows:
-                created = await conn.fetch(
-                    q.INSERT_COOCCURRENCE_LINKS,
+                outcome = await self._process_cooccurrence(
+                    conn,
                     row["id"],
                     row["project_id"],
                     row["namespace_id"],
                     row["session_id"],
-                    self.config.linker_cooccurrence_cap,
                 )
-                created_total += len(created)
-            if created_total:
-                LINKER_LINKS_CREATED_TOTAL.labels(layer="l1c").inc(created_total)
-        report = {"candidates": len(rows), "links_created": created_total}
+                report["links_created"] += outcome["created"]
+                report["links_reinforced"] += outcome["reinforced"]
+                if outcome["fail_closed"]:
+                    report["l1c_gate_failures"] += 1
         logger.info("co_occurrence: done", extra=report)
         return report
+
+    # ── One-off кампания чистки истории L1c (Фаза 3) ──
+
+    async def run_prune_cooccurrence_history(
+        self,
+        dry_run: bool | None = None,
+        batch: int | None = None,
+        top_examples: int = 10,
+    ) -> dict[str, Any]:
+        """Ретроспективный косинус-гейт для исторических рёбер L1c
+        (диагностика 22.09: 81 132 ребра weight 0.5, 100% singleton).
+
+        Непрошедшие гейт получают pruned_at=now() — НЕ DELETE (история и
+        restore остаются). Иммунитет (вердикт Эны): межкластерные мосты
+        (оба cluster_id NOT NULL и разные) не прунятся; manual/l2/inherited
+        среди l1c не встречаются, но выборка защищена фильтрами.
+
+        Курсор (created_at, id): live-мутации не зацикливают прогон на
+        неоценимых парах. Идемпотентность: pruned_at IS NULL в выборке —
+        повтор по прогнанному no-op по записи. Qdrant недоступен → отказ
+        кампании (ok=False): без векторов прунить нельзя. dry_run (дефолт
+        True) — только отчёт: выживет/погибнет, распределение выживших по
+        кластерам, топ примеров на отсечение.
+        """
+        dry = True if dry_run is None else dry_run
+        batch_size = batch or self.config.linker_l1c_prune_batch
+        gate = self.config.linker_l1c_gate_min
+        if gate > 0.0 and self.qdrant is None:
+            # fail-closed: без Qdrant ретроспективная оценка невозможна
+            logger.warning("prune_cooccurrence_history: qdrant not configured")
+            return {"ok": False, "dry_run": dry, "reason": "qdrant_not_configured"}
+        prune_key = "would_prune" if dry else "pruned"
+        report: dict[str, Any] = {
+            "ok": True,
+            "dry_run": dry,
+            "gate": gate,
+            "scanned": 0,
+            "survived": 0,
+            "unverifiable": 0,
+            prune_key: 0,
+            "clusters": {},
+            "examples": [],
+        }
+        cursor_ts: Any = None
+        cursor_id: str | None = None
+        async with self.pool.acquire() as conn:
+            while True:
+                rows = await conn.fetch(
+                    q.SELECT_COOCCURRENCE_PRUNE_CANDIDATES,
+                    batch_size,
+                    cursor_ts,
+                    cursor_id,
+                )
+                if not rows:
+                    break
+                cursor_ts, cursor_id = rows[-1]["created_at"], rows[-1]["id"]
+
+                vectors: dict[str, list[float]] = {}
+                if gate > 0.0:
+                    endpoints = sorted(
+                        {end for row in rows for end in (row["source_id"], row["target_id"])}
+                    )
+                    try:
+                        vectors = self.qdrant.retrieve_vectors(endpoints)
+                    except Exception as exc:
+                        report["ok"] = False
+                        report["reason"] = f"qdrant_unavailable: {exc}"
+                        logger.warning(
+                            "prune_cooccurrence_history: qdrant unavailable, aborted",
+                            extra={"scanned": report["scanned"]},
+                        )
+                        break
+
+                prune_ids: list[str] = []
+                for row in rows:
+                    report["scanned"] += 1
+                    # мосты исключены выборкой: кластер пары = общий, либо NULL
+                    cluster_label = row["src_cluster"] or "unclustered"
+                    if gate <= 0.0:
+                        report["survived"] += 1
+                        self._bump_cluster(report, cluster_label)
+                        continue
+                    vec_src = vectors.get(row["source_id"])
+                    vec_tgt = vectors.get(row["target_id"])
+                    if vec_src is None or vec_tgt is None:
+                        # пара неоценима — без оценки не пруним, отдельный счёт
+                        report["unverifiable"] += 1
+                        continue
+                    similarity = _cosine_similarity(vec_src, vec_tgt)
+                    if similarity >= gate:
+                        report["survived"] += 1
+                        self._bump_cluster(report, cluster_label)
+                        continue
+                    report[prune_key] += 1
+                    if len(report["examples"]) < top_examples:
+                        report["examples"].append({
+                            "edge_id": row["id"],
+                            "source_id": row["source_id"],
+                            "target_id": row["target_id"],
+                            "cosine": round(similarity, 4),
+                        })
+                    if not dry:
+                        prune_ids.append(row["id"])
+                if prune_ids:
+                    await conn.fetch(
+                        q.PRUNE_EDGES_APPLY,
+                        [uuid_module.UUID(e) for e in prune_ids],
+                    )
+        logger.info("prune_cooccurrence_history: done", extra={
+            k: v for k, v in report.items() if k not in ("clusters", "examples")
+        })
+        return report
+
+    @staticmethod
+    def _bump_cluster(report: dict[str, Any], cluster_label: str) -> None:
+        """Счёт выживших по кластерам для отчёта кампании."""
+        report["clusters"][cluster_label] = report["clusters"].get(cluster_label, 0) + 1
 
     # ── L2: воркер вердиктов ──
 

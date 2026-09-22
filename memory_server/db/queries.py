@@ -1037,44 +1037,91 @@ COUNT_PENDING_TARGET_NAMES = """
     WHERE target_id IS NULL AND target_name IS NOT NULL
 """
 
-# Co-occurrence L1c (V3.2): соседи той же сессии (project+namespace+session_id)
-# → related_to 0.5. Однонаправленно от обрабатываемой гранулы к свежим соседям;
+# Co-occurrence L1c (V3.2 + Фаза 3): соседи той же сессии (project+
+# namespace+session_id) → related_to 0.5. Выборка соседей вынесена из
+# INSERT (Фаза 3: косинус-гейт оценивает пары в Python ДО вставки —
+# один батч retrieve на source+соседей, непрошедшие гейт не доходят до
+# SQL). Порядок/фильтры прежние: свежие, живые, кап на гранулу.
+SELECT_COOCCURRENCE_NEIGHBORS = """
+    SELECT m.id::text
+    FROM memories m
+    WHERE m.project_id IS NOT DISTINCT FROM $2::uuid
+      AND m.namespace_id = $3::uuid
+      AND m.metadata->>'session_id' = $4
+      AND m.id <> $1::uuid
+      AND m.status = 'asserted' AND m.valid_to IS NULL
+    ORDER BY m.created_at DESC
+    LIMIT $5
+"""
+
+# L1c-вставка от гейта (Фаза 3): соседи — уже отфильтрованный гейтом
+# unnest-массив. Однонаправленно от обрабатываемой гранулы к соседям;
 # NOT EXISTS гасит оба направления (не плодим встречные related_to-дубли).
+# Существующая пара в ЛЮБОМ направлении — не DO NOTHING, а reinforce-касание
+# (mutual, Фаза 3): повторная встреча в сессии подтверждает связь —
+# used_count+1, last_used_at=now(), weight → 1.0 по α (канонизация пары —
+# OR-сопоставление направлений, как REINFORCE_RELATIONS). DO NOTHING
+# сохранён как страховка гонки частичного unique-индекса.
+# $1 granule, $2 uuid[] гейтнутые соседи, $3 α reinforce, $4 session_id.
 INSERT_COOCCURRENCE_LINKS = """
-    INSERT INTO relations (source_id, target_id, link_type, weight, metadata)
-    SELECT $1, n.id, 'related_to', 0.5,
-           jsonb_build_object('source', 'linker_v3', 'layer', 'l1c',
-                              'session_id', $4)
-    FROM (
-        SELECT m.id
-        FROM memories m
-        WHERE m.project_id IS NOT DISTINCT FROM $2::uuid
-          AND m.namespace_id = $3::uuid
-          AND m.metadata->>'session_id' = $4
-          AND m.id <> $1::uuid
-          AND m.status = 'asserted' AND m.valid_to IS NULL
-        ORDER BY m.created_at DESC
-        LIMIT $5
-    ) n
-    WHERE NOT EXISTS (
-        SELECT 1 FROM relations r
+    WITH candidates AS (
+        SELECT unnest($2::uuid[]) AS neighbor_id
+    ),
+    inserted AS (
+        INSERT INTO relations (source_id, target_id, link_type, weight, metadata)
+        SELECT $1::uuid, c.neighbor_id, 'related_to', 0.5,
+               jsonb_build_object('source', 'linker_v3', 'layer', 'l1c',
+                                  'session_id', $4)
+        FROM candidates c
+        WHERE NOT EXISTS (
+            SELECT 1 FROM relations r
+            WHERE r.link_type = 'related_to'
+              AND ((r.source_id = $1::uuid AND r.target_id = c.neighbor_id)
+                   OR (r.source_id = c.neighbor_id AND r.target_id = $1::uuid))
+        )
+        ON CONFLICT (source_id, target_id, link_type) WHERE target_id IS NOT NULL
+        DO NOTHING
+        RETURNING id
+    ),
+    reinforced AS (
+        UPDATE relations r
+        SET used_count   = r.used_count + 1,
+            last_used_at = now(),
+            weight       = LEAST(1.0, r.weight + (1.0 - r.weight) * $3::float8)
+        FROM candidates c
         WHERE r.link_type = 'related_to'
-          AND ((r.source_id = $1::uuid AND r.target_id = n.id)
-               OR (r.source_id = n.id AND r.target_id = $1::uuid))
+          AND ((r.source_id = $1::uuid AND r.target_id = c.neighbor_id)
+               OR (r.source_id = c.neighbor_id AND r.target_id = $1::uuid))
+        RETURNING r.id
     )
-    ON CONFLICT (source_id, target_id, link_type) WHERE target_id IS NOT NULL
-    DO NOTHING
+    SELECT (SELECT count(*) FROM inserted)  AS created,
+           (SELECT count(*) FROM reinforced) AS reinforced
+"""
+
+# Маркер «гранула обработана L1c» (Фаза 3): пишется после обработки В ТОМ
+# ЧИСЛЕ при нулевых вставках (все соседи отсеяны гейтом) — иначе гранула
+# вечно крутилась бы в beat-выборке кампании. JSONB-merge по одной грануле;
+# гард в WHERE — идемпотентность повтора.
+MARK_L1C_DONE = """
+    UPDATE memories
+    SET metadata   = metadata || '{"l1c_done": true}'::jsonb,
+        updated_at = now()
+    WHERE id = $1::uuid
+      AND NOT COALESCE((metadata->>'l1c_done')::boolean, false)
     RETURNING id
 """
 
 # Beat-кампания co-occurrence: гранулы с session_id, БЕЗ l1c-рёбер и с живыми
 # соседями (гранулы без соседей не крутятся в выборке вечно — идемпотентность).
+# l1c_done (Фаза 3): обработанные гейтом гранулы (в т.ч. 0 вставок) выпадают
+# из выборки — ретрай только для fail-closed (Qdrant недоступен).
 SELECT_COOCCURRENCE_CANDIDATES = """
     SELECT m.id::text, m.project_id, m.namespace_id::text,
            m.metadata->>'session_id' AS session_id
     FROM memories m
     WHERE m.metadata->>'session_id' IS NOT NULL
       AND m.status = 'asserted' AND m.valid_to IS NULL
+      AND NOT COALESCE((m.metadata->>'l1c_done')::boolean, false)
       AND NOT EXISTS (
           -- Любые l1c (в обе стороны): INSERT гасит встречные пары, поэтому
           -- гранула с полностью покрытыми соседями никогда не получит
@@ -1093,6 +1140,41 @@ SELECT_COOCCURRENCE_CANDIDATES = """
             AND m2.status = 'asserted' AND m2.valid_to IS NULL
       )
     ORDER BY m.created_at DESC
+    LIMIT $1
+"""
+
+# One-off кампания prune_cooccurrence_history (Фаза 3): исторические l1c
+# (владение linker_v3/layer l1c), не прошедшие косинус-гейт → pruned_at.
+# Иммунитет (вердикт Эны): межкластерные мосты (оба cluster_id NOT NULL и
+# разные) НЕ прунятся; manual/l2/inherited среди l1c не встречаются, но
+# фильтры стоят защитой (source='linker_v3' отсекает manual, layer='l1c'
+# отсекает l2, inherited_from IS NULL — REWIRE, frozen — вечные концы).
+# Курсор (created_at, id): live-мутации (pruned_at) не сдвигают выборку —
+# прогон не зацикливается на неоценимых парах; повтор по прогнанному — no-op
+# по записи (pruned_at IS NULL + уже пруненные исключены).
+# $1 LIMIT, $2/$3 курсор (NULL = старт).
+SELECT_COOCCURRENCE_PRUNE_CANDIDATES = """
+    SELECT r.id::text, r.source_id::text AS source_id, r.target_id::text AS target_id,
+           src.cluster_id::text AS src_cluster, tgt.cluster_id::text AS tgt_cluster,
+           r.created_at
+    FROM relations r
+    JOIN memories src ON src.id = r.source_id
+    JOIN memories tgt ON tgt.id = r.target_id
+    WHERE r.pruned_at IS NULL
+      AND r.target_id IS NOT NULL
+      AND r.metadata->>'source' = 'linker_v3'
+      AND r.metadata->>'layer' = 'l1c'
+      AND r.inherited_from IS NULL
+      AND NOT src.frozen
+      AND NOT tgt.frozen
+      AND NOT (
+          src.cluster_id IS NOT NULL
+          AND tgt.cluster_id IS NOT NULL
+          AND src.cluster_id IS DISTINCT FROM tgt.cluster_id
+      )
+      AND ($2::timestamptz IS NULL
+           OR (r.created_at, r.id) > ($2::timestamptz, $3::uuid))
+    ORDER BY r.created_at, r.id
     LIMIT $1
 """
 

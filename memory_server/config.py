@@ -135,6 +135,16 @@ class Settings(BaseSettings):
     linker_llm_retries: int = 1
     linker_verdict_cache_ttl: int = 30 * 24 * 3600  # 30 дней (ADR-019 C)
 
+    # ── Фаза 3 (волна 3): L1c-гейт + чистка истории co-occurrence ──
+    # Одна сессия ≠ смысловая близость: ребро L1c создаётся/выживает только
+    # при косинусе эмбеддингов пары ≥ порога (батч retrieve source+соседи,
+    # оценка в Python). 0.0 = гейт выключен (все пары проходят). Qdrant
+    # недоступен → fail-closed: рёбер нет, гранула вернётся на ретрай.
+    linker_l1c_gate_min: float = 0.30
+    # One-off кампания prune_cooccurrence_history: пар исторических l1c
+    # за итерацию (векторы концов — retrieve-батчами Qdrant по 256).
+    linker_l1c_prune_batch: int = 256
+
     # ── V3.5 «Жизнь графа знаний»: жизнь рёбер (Ф1) + PPR-traverse (Ф2) ──
     # Формулы — вердикты Эны 22.09 (закрывают дыры Д1/Д2 тест-плана):
     # вес ребра НЕ материализуется ежедневным батчем — ЛЕНИВАЯ проекция
@@ -173,6 +183,16 @@ class Settings(BaseSettings):
     # проводник касаем, только если flow(src→tgt) = r[src]×M[tgt,src] ≥
     # порога и оба конца в топ-K выдачи (одно касание на пару за запрос).
     edge_reinforce_flow_min: float = 0.001
+
+    # ── Ассоциативное расширение search (Фаза 3, требование Мастера:
+    # через СТАРЫЙ тул memory_search) ──
+    # strategy="activation": фаза 1 — RRF-поиск даёт seed-гранулы (топ
+    # search_activation_seed_limit, 8–12), фаза 2 — PPR-распространение
+    # ActivationSpreader'ом по живому графу, фаза 3 — seed + активированные
+    # соседи (поле activated=true), общий размер = limit поиска.
+    # False до приёмки: activation → внятная ошибка, гибрид бит-в-бит прежний.
+    search_activation_enabled: bool = False
+    search_activation_seed_limit: int = 10
 
     api_key: str = ""
 

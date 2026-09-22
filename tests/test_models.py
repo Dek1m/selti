@@ -104,7 +104,9 @@ def test_search_result_serialization():
     sr = SearchResult(id="s1", content="text", metadata={"k": "v"}, score=0.8)
     dumped = sr.model_dump(mode="json")
     # Фаза 5.1: контракт расширяется только в конец (правило плана) —
-    # score-разложение и мета карточки выдачи UI идут после полей Фазы 0
+    # score-разложение и мета карточки выдачи UI идут после полей Фазы 0;
+    # Фаза 3 (волна 3): activated — флаг ассоциативного расширения, в
+    # гибридной выдаче таска исключается (JSON бит-в-бит прежний)
     assert dumped == {
         "id": "s1",
         "content": "text",
@@ -120,6 +122,7 @@ def test_search_result_serialization():
         "score_rrf": None,
         "score_decay": None,
         "score_importance": None,
+        "activated": False,
     }
 
 

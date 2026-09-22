@@ -100,6 +100,12 @@ _RESTORE_BETA = 0.5
 # недопустима), activation — PPR по эффективному графу.
 _TRAVERSE_STRATEGIES = ("bfs", "activation")
 
+# Стратегии search (Фаза 3, волна 3): hybrid — прежний контракт (дефолт,
+# бит-в-бит регрессия недопустима), activation — seed гибридного поиска →
+# PPR-расширение ассоциативными соседями (требование Мастера: через СТАРЫЙ
+# тул memory_search, нового тула не заводим).
+_SEARCH_STRATEGIES = ("hybrid", "activation")
+
 
 def canonical_edge_pairs(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
     """Пары гранул → канонические (least, greatest) без дублей и петель.
@@ -345,8 +351,33 @@ class MemoryService:
         created_before: datetime | None = None,
         status: str | None = None,
         offset: int = 0,
+        strategy: str = "hybrid",
     ) -> list[SearchResult]:
         async with async_measure_duration(logger, "search", namespace=namespace, user_id=user_id):
+            if strategy not in _SEARCH_STRATEGIES:
+                raise ValueError(
+                    f"strategy must be one of {'|'.join(_SEARCH_STRATEGIES)}, got: {strategy!r}"
+                )
+            if strategy == "activation":
+                # До приёмки выключен: внятная ошибка, НЕ тихий hybrid (Ф3-ERR-01)
+                if not self.config.search_activation_enabled:
+                    raise ValueError(
+                        "search strategy 'activation' is disabled "
+                        "(search_activation_enabled=False)"
+                    )
+                if offset:
+                    raise ValueError(
+                        "offset pagination is not supported for strategy='activation'"
+                    )
+                return await self._search_activation(
+                    query=query,
+                    user_id=user_id,
+                    limit=limit,
+                    threshold=threshold,
+                    namespace=namespace,
+                    project_id=project_id,
+                    include_historical=include_historical,
+                )
             resolved_project = await self.resolve_project(project_id)
             query_embedding = await self.embedding.embed(query)
             if not self.config.hybrid_search_enabled:
@@ -391,6 +422,103 @@ class MemoryService:
                     [(r.id, other.id) for r, other in combinations(results, 2)]
                 )
             return results
+
+    async def _search_activation(
+        self,
+        query: str,
+        user_id: str | None,
+        limit: int,
+        threshold: float,
+        namespace: str | None,
+        project_id: str | None,
+        include_historical: bool,
+    ) -> list[SearchResult]:
+        """Ассоциативное расширение выдачи (Фаза 3, требование Мастера).
+
+        Фаза 1: гибридный RRF-поиск даёт seed-гранулы (топ
+        search_activation_seed_limit, 8–12). Фаза 2: ActivationSpreader
+        (тот же PPR-движок, что traverse-activation) распространяет
+        активацию по живому графу с ленивыми w_eff (fetch_activation_edges,
+        зеркала related_to — в SQL). Фаза 3: seed-хиты (обычный score) +
+        активированные соседи НЕ из seed'ов (score = PPR-ранг, поле
+        activated=True), общий размер ≤ limit. REST-фильтры окно/статус
+        фазы 5.1 к расширениям не применяются: сосед живого графа по
+        определению asserted (фильтр уже отработал на seed'ах)."""
+        query_embedding = await self.embedding.embed(query)
+        seeds = await self._search_hybrid(
+            query=query,
+            query_embedding=query_embedding,
+            user_id=user_id,
+            limit=min(self.config.search_activation_seed_limit, limit),
+            threshold=threshold,
+            namespace=namespace,
+            project_id=await self.resolve_project(project_id),
+            include_historical=include_historical,
+        )
+        results = list(seeds)
+        if not results:
+            ZERO_RESULT_SEARCHES_TOTAL.labels(namespace=namespace or "all").inc()
+            return results
+
+        seed_ids = [r.id for r in seeds]
+        need = limit - len(results)
+        if need > 0:
+            edges = await self.repository.fetch_activation_edges(
+                self.config.edge_decay_lambda,
+                self.config.edge_decay_lambda_min,
+                None,
+                self.config.traverse_symmetric_link_types,
+            )
+            spreader = ActivationSpreader(edges, damping=self.config.ppr_damping)
+            # +len(seed_ids) — запас: seed'ы почти наверняка в топе ранга,
+            # расширениям нужен остаток сверх них
+            ranked = spreader.spread(
+                seed_ids,
+                iterations=self.config.traverse_activation_iterations,
+                top_k=limit + len(seed_ids),
+            )
+            activated = [
+                (granule_id, score)
+                for granule_id, score in ranked
+                if granule_id not in set(seed_ids)
+            ][:need]
+            if activated:
+                # карточки соседей — та же батч-выборка, что у activation-
+                # traverse (fetch_by_ids с фильтром актуальности в SQL)
+                cards = {
+                    str(row["id"]): row
+                    for row in await self.repository.fetch_by_ids(
+                        [granule_id for granule_id, _ in activated]
+                    )
+                }
+                for granule_id, score in activated:
+                    card = cards.get(granule_id)
+                    if card is None:
+                        continue  # гранула закрылась между графом и карточками
+                    results.append(
+                        SearchResult(
+                            id=granule_id,
+                            content=card["content"],
+                            metadata=card["metadata"] or {},
+                            importance=card["importance"],
+                            score=round(score, 6),
+                            project_id=card["project_id"],
+                            status=card["status"],
+                            namespace=card["namespace"],
+                            created_at=card["created_at"],
+                            last_accessed_at=card["last_accessed_at"],
+                            frozen=card["frozen"],
+                            activated=True,
+                        )
+                    )
+
+        # Выданные вместе гранулы «встретились» — тот же контракт, что у
+        # гибридного search (все C(k,2) пары финальной выдачи; пустые
+        # seed'ы уже закрыты ранним return с метрикой zero-result)
+        self._dispatch_reinforce(
+            [(r.id, other.id) for r, other in combinations(results, 2)]
+        )
+        return results
 
     async def _search_hybrid(
         self,

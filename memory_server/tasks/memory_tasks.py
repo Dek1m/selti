@@ -244,12 +244,16 @@ def search_memories(
     created_before: str | None = None,
     status: str | None = None,
     offset: int = 0,
+    strategy: str = "hybrid",
 ) -> list[dict[str, Any]]:
     """Search memories (hybrid: dense + FTS, Фаза 1.1).
 
     created_after/created_before — ISO-строки (Celery JSON не несёт
     datetime), парсятся здесь; REST-фильтры /api/search (Фаза 5.1).
     offset — пагинация /api/search (Фаза 5.2).
+    strategy — "hybrid" (дефолт, выдача бит-в-бит прежняя) | "activation"
+    (Фаза 3: seed гибридного поиска + ассоциативные соседи по PPR, у
+    расширений поле activated=true; требует search_activation_enabled).
     """
     if not query or not query.strip():
         raise ValidationError("query cannot be empty")
@@ -268,8 +272,14 @@ def search_memories(
         created_before=datetime.fromisoformat(created_before) if created_before else None,
         status=status,
         offset=offset,
+        strategy=strategy,
     )
-    return [r.model_dump(mode="json") for r in results]
+    # Гибридная выдача — БЕЗ ключа activated (бит-в-бит прежний JSON);
+    # помечаются только активированные расширения (Фаза 3)
+    return [
+        r.model_dump(mode="json", exclude=None if r.activated else {"activated"})
+        for r in results
+    ]
 
 
 # ── List ────────────────────────────────────────────────────────

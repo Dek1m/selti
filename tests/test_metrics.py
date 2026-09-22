@@ -20,6 +20,7 @@ from memory_server.metrics import (
     EMBEDDING_DURATION,
     HTTP_REQUESTS_TOTAL,
     HTTP_REQUEST_DURATION,
+    LINKER_L1C_GATE_FAILURES_TOTAL,
     MEMORY_COUNT,
     MEMORY_GROWTH_RATE,
     SEARCH_RESULTS,
@@ -32,6 +33,11 @@ class TestMetricsTypes:
 
     def test_http_requests_total_is_counter(self):
         assert isinstance(HTTP_REQUESTS_TOTAL, Counter)
+
+    def test_l1c_gate_failures_is_counter(self):
+        """Фаза 3: fail-closed каскады гейта L1c — Counter без лейблов."""
+        assert isinstance(LINKER_L1C_GATE_FAILURES_TOTAL, Counter)
+        assert LINKER_L1C_GATE_FAILURES_TOTAL._labelnames == ()
 
     def test_http_request_duration_is_histogram(self):
         assert isinstance(HTTP_REQUEST_DURATION, Histogram)

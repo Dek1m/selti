@@ -347,6 +347,14 @@ LINKER_L2_QUEUE_SIZE = Gauge(
     "Pending L2 verdict queue size (granules waiting for LLM)",
 )
 
+# Фаза 3 (волна 3): L1c-гейт не смог оценить пары (Qdrant недоступен /
+# нет вектора источника) — fail-closed, рёбер не создано, гранула
+# осталась кандидатом на ретрай. Рост = деградация Qdrant на пути линкера.
+LINKER_L1C_GATE_FAILURES_TOTAL = Counter(
+    f"{PREFIX}_linker_l1c_gate_failures_total",
+    "Total L1c co-occurrence cosine-gate failures (fail-closed, no edges created)",
+)
+
 # ============================================================
 # Полная карта 3D (PLAN_FULL_MAP_3D, M1/M2)
 # ============================================================

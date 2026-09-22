@@ -306,23 +306,28 @@ class TestNameReconciler:
 class TestCoOccurrence:
     def test_sql_shape(self):
         """related_to 0.5, соседи той же сессии (project IS NOT DISTINCT FROM
-        включает NULL=NULL), свежие, кап, дубли в обоих направлениях гасятся."""
+        включает NULL=NULL), свежие, кап, дубли в обоих направлениях гасятся;
+        соседи выбираются отдельным запросом (гейт Фазы 3 оценивает пары
+        в Python ДО вставки), INSERT получает уже гейтнутый unnest-массив."""
         sql = q.INSERT_COOCCURRENCE_LINKS
         assert "'related_to', 0.5" in sql
-        assert "m.project_id IS NOT DISTINCT FROM $2::uuid" in sql
-        assert "m.metadata->>'session_id' = $4" in sql
-        assert "m.namespace_id = $3::uuid" in sql
-        assert "ORDER BY m.created_at DESC" in sql
-        assert "LIMIT $5" in sql
+        assert "unnest($2::uuid[])" in sql
         assert "ON CONFLICT (source_id, target_id, link_type)" in sql
         assert "DO NOTHING" in sql
         # встречный дубль: пара уже связана в любом направлении — не дублируем
-        assert "(r.source_id = $1::uuid AND r.target_id = n.id)" in sql
-        assert "(r.source_id = n.id AND r.target_id = $1::uuid)" in sql
+        assert "(r.source_id = $1::uuid AND r.target_id = c.neighbor_id)" in sql
+        assert "(r.source_id = c.neighbor_id AND r.target_id = $1::uuid)" in sql
+        neighbors = q.SELECT_COOCCURRENCE_NEIGHBORS
+        assert "m.project_id IS NOT DISTINCT FROM $2::uuid" in neighbors
+        assert "m.metadata->>'session_id' = $4" in neighbors
+        assert "m.namespace_id = $3::uuid" in neighbors
+        assert "ORDER BY m.created_at DESC" in neighbors
+        assert "LIMIT $5" in neighbors
 
     @pytest.mark.asyncio
     async def test_creates_edges_with_cap(self, mock_pool):
-        """Кампания: INSERT на каждую гранулу-кандидата, кап из конфига."""
+        """Кампания: соседей → гейт (off) → INSERT на каждую гранулу-кандидата,
+        кап из конфига; l1c_done пишется обеим обработанным гранулам."""
         conn = mock_pool.acquire.return_value.__aenter__.return_value
         conn.fetch = AsyncMock(
             side_effect=[
@@ -330,31 +335,41 @@ class TestCoOccurrence:
                     {"id": GID, "project_id": None, "namespace_id": "ns", "session_id": "s1"},
                     {"id": CAND_A, "project_id": None, "namespace_id": "ns", "session_id": "s1"},
                 ],
-                [{"id": "rel-1"}, {"id": "rel-2"}],  # INSERT для GID
-                [],  # INSERT для CAND_A: соседи уже связаны NOT EXISTS-ом
+                [{"id": CAND_B}],  # соседи GID
+                [],  # соседи CAND_A: без соседей (EXISTS-гард выборки)
             ]
         )
-        linker = make_linker(mock_pool, linker_l1c_enabled=True)
+        conn.fetchrow = AsyncMock(return_value={"created": 1, "reinforced": 0})
+        conn.execute = AsyncMock()
+        linker = make_linker(mock_pool, linker_l1c_enabled=True, linker_l1c_gate_min=0.0)
 
         report = await linker.run_co_occurrence()
 
-        assert report == {"candidates": 2, "links_created": 2}
+        assert report == {
+            "candidates": 2, "links_created": 1, "links_reinforced": 0,
+            "l1c_gate_failures": 0,
+        }
         cap = conn.fetch.await_args_list[1].args[-1]
         assert cap == linker.config.linker_cooccurrence_cap == 10
+        assert conn.execute.await_count == 1  # l1c_done только грануле с соседями
 
     @pytest.mark.asyncio
     async def test_duplicate_edges_not_created(self, mock_pool):
-        """NOT EXISTS в SQL гасит дубли — INSERT возвращает пусто, кампания
-        идемпотентна (повтор по обработанному — no-op)."""
+        """Существующие пары не дублируются — INSERT отчитывает reinforce
+        вместо создания (mutual, Фаза 3), кампания идемпотентна по отчёту."""
         conn = mock_pool.acquire.return_value.__aenter__.return_value
         conn.fetch = AsyncMock(
             side_effect=[
                 [{"id": GID, "project_id": None, "namespace_id": "ns", "session_id": "s1"}],
-                [],  # все пары уже связаны
+                [{"id": CAND_A}, {"id": CAND_B}],  # соседи
             ]
         )
-        linker = make_linker(mock_pool, linker_l1c_enabled=True)
-        assert await linker.run_co_occurrence() == {"candidates": 1, "links_created": 0}
+        conn.fetchrow = AsyncMock(return_value={"created": 0, "reinforced": 2})
+        conn.execute = AsyncMock()
+        linker = make_linker(mock_pool, linker_l1c_enabled=True, linker_l1c_gate_min=0.0)
+        report = await linker.run_co_occurrence()
+        assert report["links_created"] == 0
+        assert report["links_reinforced"] == 2
 
     def test_candidates_query_requires_living_neighbors(self):
         """Гранулы без соседей не крутятся в выборке вечно (идемпотентность пула)."""
@@ -367,15 +382,24 @@ class TestCoOccurrence:
     async def test_new_granule_gets_l1c_same_session(self, mock_pool):
         """link_new_granule: сессия у гранулы → co-occurrence рёбра сразу."""
         conn = mock_pool.acquire.return_value.__aenter__.return_value
-        conn.fetchrow = AsyncMock(return_value=granule_row(sid="ses-1"))
-        conn.fetch = AsyncMock(return_value=[{"id": "rel-1"}])
-        linker = make_linker(mock_pool, linker_l1c_enabled=True)  # без qdrant
+        conn.fetchrow = AsyncMock(
+            side_effect=[
+                granule_row(sid="ses-1"),  # SELECT_NEW_GRANULE_FOR_LINKER
+                {"created": 1, "reinforced": 0},  # INSERT_COOCCURRENCE_LINKS
+            ]
+        )
+        conn.fetch = AsyncMock(return_value=[{"id": CAND_A}])
+        conn.execute = AsyncMock()
+        linker = make_linker(
+            mock_pool, linker_l1c_enabled=True, linker_l1c_gate_min=0.0
+        )  # без qdrant
 
         report = await linker.link_new_granule(GID)
 
         assert report["l1c_created"] == 1
-        insert_sql = conn.fetch.await_args_list[0].args[0]
+        insert_sql = conn.fetchrow.await_args_list[1].args[0]
         assert insert_sql == q.INSERT_COOCCURRENCE_LINKS
+        assert conn.execute.await_args_list[0].args[0] == q.MARK_L1C_DONE
 
 
 # ══════════════════════════════════════════════════════════════════
