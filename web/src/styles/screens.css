@@ -227,6 +227,8 @@
 /* error-boundary fallback: readable over the star field, HUD-framed */
 .graph-crash { background: rgba(5, 8, 14, 0.82); }
 .graph-crash h3 { color: var(--sl-danger); }
+/* кнопка «Повторить» — компактная, не растягивается флексом state-block */
+.graph-crash .btn { width: fit-content; height: 36px; align-self: center; margin: 10px auto 0; }
 .graph-crash p {
   max-width: 460px;
   font-family: var(--sl-font-mono); font-size: 12px; line-height: 1.6;

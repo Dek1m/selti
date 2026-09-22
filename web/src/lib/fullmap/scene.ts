@@ -386,6 +386,7 @@ export class FullMapScene {
         uTime: { value: 0 },
         uTwinkle: { value: this.reducedMotion ? 0 : 1 },
         uDepthCap: { value: 99 },
+        uFocusBlur: { value: 0 },
         uFogColor: { value: this.palette?.fog ?? new THREE.Color("#060a12") },
         uIceColor: { value: this.palette?.ice ?? new THREE.Color("#7dd3fc") },
       },
