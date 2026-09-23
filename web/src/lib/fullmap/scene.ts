@@ -42,6 +42,12 @@ const LABEL_COOLDOWN_MS = 140;
  * выгружается из draw-range. Бесшовность гарантируется тем, что fade
  * звёзд достигает нуля ровно на этой дистанции (FADE_END шейдера = 3200).
  */
+function flyLog(msg: string): void {
+  const w = window as unknown as { __flyLog?: string[] };
+  if (!w.__flyLog) w.__flyLog = [];
+  w.__flyLog.push(msg);
+}
+
 export const VIEW_SPHERE_R = 3200;
 
 const NODE_VISIBLE_CAP = 280;
@@ -123,6 +129,7 @@ export class FullMapScene {
     for (let i = 0; i < npos.length; i++) if (Number.isNaN(npos[i])) nanCount++;
 
     return [
+      `flylog [${((window as unknown as { __flyLog: string[] }).__flyLog ?? []).slice(-4).join(" | ")}]`,
       `build ${__BUILD_ID__}`,
       `nodes ${this.nodeVisibleCount}/${this.packed.nodeCount} nan=${nanCount}`,
       `edges main/sup/con drawn ${drawCount(this.mainEdges) / 2}/${drawCount(this.supersedesEdges) / 2}/${drawCount(this.contradictsEdges) / 2} (cap ${EDGE_VISIBLE_CAP}) cand ${this.lastEdgeStats.candidates} both ${this.lastEdgeStats.bothVisible}`,
@@ -736,6 +743,7 @@ export class FullMapScene {
   private static readonly FOCUS_OFFSET = new THREE.Vector3(60, 85, 170);
 
   focusNode(index: number): void {
+    flyLog("focusNode#" + index + " rm=" + this.reducedMotion);
     if (!this.packed) return;
     const target = new THREE.Vector3(
       this.packed.nodePositions[index * 3],
@@ -755,6 +763,7 @@ export class FullMapScene {
       this.controls.update();
       return;
     }
+    flyLog("flyTo set");
     this.flyAnimation = {
       fromPos: this.camera.position.clone(),
       toPos: position.clone(),
@@ -768,6 +777,7 @@ export class FullMapScene {
   private stepFly(now: number): void {
     const flight = this.flyAnimation;
     if (!flight) return;
+    flyLog("step t=" + ((now - flight.start) / flight.duration).toFixed(2));
     const t = Math.min(1, (now - flight.start) / flight.duration);
     const eased = 1 - Math.pow(1 - t, 3); // easeOutCubic
     this.camera.position.lerpVectors(flight.fromPos, flight.toPos, eased);
