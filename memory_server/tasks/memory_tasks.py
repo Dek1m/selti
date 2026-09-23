@@ -663,7 +663,9 @@ def ingest_batch(
     # только после INSERT первого вхождения, проставляем пост-фактум
     pending_dup_links: list[tuple[int, str]] = []
 
-    if service.config.dedup_enabled:
+    # dedup_enabled — runtime-ключ (Фаза «Конфигурация»): читаем из снапшота,
+    # а не с сервиса (атрибут .config у MemoryService больше не существует)
+    if get_state().get_runtime_config_sync().get("dedup_enabled"):
         decisions = run_async(service.dedup.check_batch, valid_entries, user_id)
         for entry, decision in zip(valid_entries, decisions):
             ns = entry.get("namespace", "default")
