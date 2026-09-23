@@ -1,6 +1,7 @@
 """Полная карта 3D (PLAN_FULL_MAP_3D M1/M2 + GALACTIC_LAYOUT v2) — задачи Celery, очередь memory.
 
 map_meta            — метa снапшота (version, счётчики; кеш Redis 60с)
+map_positions       — координаты map_layout по ids (созвездие, with_positions)
 build_map_snapshot  — холодная сборка снапшота под build-lock, gz-байты
                       в Redis (PLAN: Celery-JSON не переносит байты, web
                       читает Redis сам — как fast-path облачка Фазы 6)
@@ -59,6 +60,26 @@ def map_meta(self) -> dict[str, Any]:
     meta = run_async(service.meta)
     meta["layout_stale"] = run_async(service.layout_stale, meta["version"])
     return meta
+
+
+@shared_task(
+    bind=True,
+    base=SeltiTask,
+    name="memory_server.tasks.map_tasks.map_positions",
+    soft_time_limit=10,
+    time_limit=30,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    queue="memory",
+    routing_key="memory",
+)
+def map_positions(self, ids: list[str]) -> dict[str, list[float]]:
+    """Координаты гранул из map_layout — созвездие web-морды (with_positions).
+
+    Ответ {id: [x, y, z]} — только гранулы со строкой в таблице; до
+    миграции 024 пустой словарь (graceful, см. MapService.positions).
+    """
+    return run_async(_get_map_service().positions, ids)
 
 
 @shared_task(

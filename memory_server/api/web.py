@@ -51,6 +51,7 @@ TASK_NAMESPACES = "memory_server.tasks.memory_tasks.get_namespaces"
 TASK_LINKER_STATS = "memory_server.tasks.linker_tasks.linker_stats"
 TASK_MAP_META = "memory_server.tasks.map_tasks.map_meta"
 TASK_MAP_BUILD = "memory_server.tasks.map_tasks.build_map_snapshot"
+TASK_MAP_POSITIONS = "memory_server.tasks.map_tasks.map_positions"
 TASK_PROJECT_LIST = "memory_server.tasks.project_tasks.list_projects"
 TASK_PROJECT_GET = "memory_server.tasks.project_tasks.get_project"
 TASK_PROJECT_CREATE = "memory_server.tasks.project_tasks.create_project"
@@ -99,6 +100,22 @@ async def _call(task_name: str, **kwargs: Any) -> Any:
 # ═══════════════════════════════════════════════════════════════
 
 
+async def _attach_positions(items: list[dict[str, Any]]) -> None:
+    """Дописать position: [x, y, z] из map_layout (созвездие web-морды).
+
+    LEFT JOIN семантика: поле появляется только у гранул со строкой в
+    таблице — существующий контракт ответа не меняется, только расширяется.
+    """
+    ids = [item["id"] for item in items if item.get("id")]
+    if not ids:
+        return
+    positions = await _call(TASK_MAP_POSITIONS, ids=ids)
+    for item in items:
+        position = positions.get(item["id"])
+        if position is not None:
+            item["position"] = position
+
+
 @router.get("/search")
 async def search(
     query: str,
@@ -112,11 +129,13 @@ async def search(
     created_after: datetime | None = None,
     created_before: datetime | None = None,
     status: GranuleStatus | None = None,
+    with_positions: bool = False,
 ) -> list[dict[str, Any]]:
     """Hybrid-поиск (тот же JSON, что тул memory_search) + фильтры Фазы 5.1:
     namespace/project_id, окно created_at, точный статус. offset —
-    пагинация /ui (Фаза 5.2): слайс детерминированного ранжирования."""
-    return await _call(
+    пагинация /ui (Фаза 5.2): слайс детерминированного ранжирования.
+    with_positions — координаты map_layout на хитах (граф «Созвездие»)."""
+    results = await _call(
         TASK_SEARCH,
         query=query,
         user_id=user_id,
@@ -131,23 +150,40 @@ async def search(
         created_before=created_before.isoformat() if created_before else None,
         status=status,
     )
+    if with_positions:
+        await _attach_positions(results)
+    return results
 
 
 @router.get("/memories/{memory_id}")
-async def get_memory(memory_id: str, include_history: bool = False) -> dict[str, Any]:
+async def get_memory(memory_id: str, include_history: bool = False, with_positions: bool = False) -> dict[str, Any]:
     """Гранула (контракт memory_get); include_history=true добавляет поле
-    history — supersession-цепочка {items, current_id} (контракт memory_get_history)."""
+    history — supersession-цепочка {items, current_id} (контракт memory_get_history).
+    with_positions — поле position из map_layout (граф «Созвездие»)."""
     record = await _call(TASK_GET, memory_id=memory_id)
+    if with_positions:
+        await _attach_positions([record])
     if include_history:
         record["history"] = await _call(TASK_GET_HISTORY, granule_id=memory_id)
     return record
 
 
 @router.get("/memories/{memory_id}/relations")
-async def memory_relations(memory_id: str, link_type: str | None = None) -> dict[str, Any]:
+async def memory_relations(
+    memory_id: str, link_type: str | None = None, with_positions: bool = False
+) -> dict[str, Any]:
     """Входящие/исходящие связи (контракт memory_get_relations) — секция
-    «Связи» карточки гранулы (§5.1 дизайна: синапсы двух направлений)."""
-    return await _call(TASK_GET_RELATIONS, source_id=memory_id, link_type=link_type)
+    «Связи» карточки гранулы (§5.1 дизайна: синапсы двух направлений).
+    with_positions — карта positions соседей {id: [x, y, z]} из map_layout
+    (граф «Созвездие»); без строк — пустая карта."""
+    payload = await _call(TASK_GET_RELATIONS, source_id=memory_id, link_type=link_type)
+    if with_positions:
+        neighbor_ids = sorted(
+            {rel["target_id"] for rel in payload["outgoing"] if rel.get("target_id")}
+            | {rel["source_id"] for rel in payload["incoming"] if rel.get("source_id")}
+        )
+        payload["positions"] = await _call(TASK_MAP_POSITIONS, ids=neighbor_ids)
+    return payload
 
 
 @router.get("/memories/{memory_id}/similar")

@@ -26,6 +26,7 @@ import hashlib
 import time
 from typing import Any, Callable, Iterable
 
+import asyncpg
 import numpy as np
 
 from memory_server.config import Settings
@@ -253,6 +254,22 @@ class MapService:
             return bool(await redis.exists(DIRTY_KEY))
         except Exception:
             return False
+
+    async def positions(self, node_ids: list[str]) -> dict[str, list[float]]:
+        """Координаты map_layout по ids — созвездие web-морды (with_positions).
+
+        Батч одним SELECT; LEFT JOIN семантика: гранула без строки в ответ
+        не попадает. До миграции 024 таблицы нет — тихий пустой словарь
+        (координаты — фича карты, не ядра памяти).
+        """
+        if not node_ids:
+            return {}
+        try:
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(q.MAP_LAYOUT_POSITIONS_SQL, node_ids)
+        except asyncpg.UndefinedTableError:
+            return {}
+        return {str(row["node_id"]): [row["x"], row["y"], row["z"]] for row in rows}
 
     # ── Снапшот: get-or-build под lock ─────────────────────────────
 

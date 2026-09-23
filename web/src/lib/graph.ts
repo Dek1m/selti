@@ -4,6 +4,7 @@
 // deterministic and unit-testable.
 
 import type { RelationsPayload, SearchHit } from "../api/types";
+import type { RawMapSnapshot } from "./fullmap/types";
 
 export interface GraphNode {
   id: string;
@@ -14,6 +15,8 @@ export interface GraphNode {
   seed: boolean;
   /** granule status for seeds; unknown satellites are null */
   status: string | null;
+  /** server map_layout coordinates; null — granule has no map row (fallback layout) */
+  position: [number, number, number] | null;
 }
 
 export interface GraphEdge {
@@ -75,6 +78,8 @@ export interface GraphNodeRecord {
   namespace: string | null;
   importance: number;
   status: string;
+  /** map_layout coordinates (?with_positions=1; absent — no map row) */
+  position?: [number, number, number];
 }
 
 /** Turn a fetched granule into a full star (used to enrich gray strangers). */
@@ -86,6 +91,7 @@ export function graphNodeFromRecord(record: GraphNodeRecord, seed = false): Grap
     importance: record.importance,
     seed,
     status: record.status,
+    position: record.position ?? null,
   };
 }
 
@@ -117,6 +123,7 @@ export function buildGraphModel(
       importance: hit.importance,
       seed: true,
       status: hit.status,
+      position: hit.position ?? null,
     });
   }
 
@@ -154,10 +161,20 @@ export function buildGraphModel(
           importance: hit.importance,
           seed: false,
           status: hit.status,
+          position: hit.position ?? null,
         });
       } else {
-        // True stranger: no metadata known — a slate satellite node
-        nodes.set(id, { id, label: id.slice(0, 8), namespace: null, importance: null, seed: false, status: null });
+        // True stranger: no metadata known — a slate satellite node; its
+        // map row (if any) already arrived with this relation's positions
+        nodes.set(id, {
+          id,
+          label: id.slice(0, 8),
+          namespace: null,
+          importance: null,
+          seed: false,
+          status: null,
+          position: relations.positions?.[id] ?? null,
+        });
       }
     };
     for (const [source, target, linkType, weight] of pairs) {
@@ -180,4 +197,29 @@ export function nodeSize(node: GraphNode): number {
 /** Sigma edge thickness: weight 1..3+ clamps to a 1–3px line. */
 export function edgeThickness(weight: number): number {
   return 1 + Math.min(2, Math.max(0, weight - 1));
+}
+
+/**
+ * Скрытые слои легенды: оставить в снапшоте созвездия только узлы keep-множества.
+ * filter сжимает массив узлов — старые индексы рёбер перемапливаются
+ * (oldIndex→newIndex), иначе рёбра уезжают на чужие узлы; рёбра с
+ * отфильтрованным концом выбрасываются. keepIds пуст (все слои скрыты) —
+ * пустые узлы/рёбра, как раньше.
+ */
+export function filterSnapshotLayers(snapshot: RawMapSnapshot, keepIds: ReadonlySet<string>): RawMapSnapshot {
+  if (keepIds.size === 0) return { ...snapshot, nodes: [], edges: [] };
+  const remap = new Map<number, number>();
+  const nodes = snapshot.nodes.filter((node, index) => {
+    if (!keepIds.has(node[0])) return false;
+    remap.set(index, remap.size);
+    return true;
+  });
+  const edges: RawMapSnapshot["edges"] = [];
+  for (const [src, tgt, typeIdx, weight] of snapshot.edges) {
+    const nextSrc = remap.get(src);
+    const nextTgt = remap.get(tgt);
+    if (nextSrc === undefined || nextTgt === undefined) continue;
+    edges.push([nextSrc, nextTgt, typeIdx, weight]);
+  }
+  return { ...snapshot, nodes, edges };
 }

@@ -1424,6 +1424,14 @@ MAP_LAYOUT_EXISTING_SQL = """
     FROM map_layout
 """
 
+# Позиции гранул для созвездия web-морды (with_positions=1): батч по ids,
+# LEFT JOIN семантика — гранула без строки в ответ не попадает вовсе.
+MAP_LAYOUT_POSITIONS_SQL = """
+    SELECT node_id::text, x, y, z
+    FROM map_layout
+    WHERE node_id = ANY($1::uuid[])
+"""
+
 # Bulk-UPSERT раскладки одним запросом (unnest параллельными массивами):
 # rev — глобальный номер прогона, +1 от максимума читает вызывающий.
 MAP_LAYOUT_UPSERT_SQL = """

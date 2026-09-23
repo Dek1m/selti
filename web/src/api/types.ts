@@ -20,6 +20,8 @@ export interface SearchHit {
   score_rrf: number | null;
   score_decay: number | null;
   score_importance: number | null;
+  /** map_layout coordinates (?with_positions=1; no row — field absent) */
+  position?: [number, number, number];
 }
 
 /** GET /api/memories/{id} — MemoryRecord model */
@@ -44,6 +46,8 @@ export interface MemoryRecord {
   frozen: boolean;
   last_accessed_at: string | null;
   access_count: number;
+  /** map_layout coordinates (?with_positions=1; no row — field absent) */
+  position?: [number, number, number];
 }
 
 /** GET /api/memories/{id}?include_history=true adds this field */
@@ -74,6 +78,8 @@ export interface Relation {
 export interface RelationsPayload {
   incoming: Relation[];
   outgoing: Relation[];
+  /** neighbor map_layout coordinates (?with_positions=1): {id: [x, y, z]} */
+  positions?: Record<string, [number, number, number]>;
 }
 
 /** GET /api/namespaces item — registry entry for the spectrum */

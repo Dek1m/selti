@@ -44,12 +44,19 @@ export interface SearchOutcome {
   tookMs: number;
 }
 
-function searchParams(f: SearchFilters, namespace: string | null, offset: number, limit: number): URLSearchParams {
+function searchParams(
+  f: SearchFilters,
+  namespace: string | null,
+  offset: number,
+  limit: number,
+  withPositions: boolean,
+): URLSearchParams {
   const p = new URLSearchParams({ query: f.query, limit: String(limit), offset: String(offset) });
   if (namespace) p.set("namespace", namespace);
   if (f.project) p.set("project_id", f.project);
   if (f.status) p.set("status", f.status);
   if (f.includeHistorical) p.set("include_historical", "true");
+  if (withPositions) p.set("with_positions", "true");
   if (f.period !== "all") {
     p.set("created_after", new Date(Date.now() - PERIOD_MS[f.period]).toISOString());
   }
@@ -68,7 +75,8 @@ export function mergeHits(lists: SearchHit[][]): SearchHit[] {
   return [...byId.values()].sort((a, b) => b.score - a.score);
 }
 
-export async function searchGranules(f: SearchFilters, page = 1): Promise<SearchOutcome> {
+/** withPositions — карта map_layout на хитах: созвездие ставит звёзды в те же точки, что и полная карта */
+export async function searchGranules(f: SearchFilters, page = 1, withPositions = false): Promise<SearchOutcome> {
   const t0 = performance.now();
   const offset = (page - 1) * PAGE_SIZE;
   const scopes = f.namespaces.length > 0 ? f.namespaces : [null];
@@ -76,7 +84,7 @@ export async function searchGranules(f: SearchFilters, page = 1): Promise<Search
     // Single channel: the backend slices its deterministic ranking.
     const results = await apiGet<SearchHit[]>(
       "/api/search",
-      searchParams(f, scopes[0], offset, PAGE_SIZE),
+      searchParams(f, scopes[0], offset, PAGE_SIZE, withPositions),
     );
     return { results, tookMs: performance.now() - t0 };
   }
@@ -84,7 +92,7 @@ export async function searchGranules(f: SearchFilters, page = 1): Promise<Search
   // merged ranking is sliced afterwards — naive per-channel offsets would
   // skip different heads and double pages across channels.
   const fetches = scopes.map((ns) =>
-    apiGet<SearchHit[]>("/api/search", searchParams(f, ns, 0, offset + PAGE_SIZE)),
+    apiGet<SearchHit[]>("/api/search", searchParams(f, ns, 0, offset + PAGE_SIZE, withPositions)),
   );
   const lists = await Promise.all(fetches);
   return {
@@ -93,12 +101,15 @@ export async function searchGranules(f: SearchFilters, page = 1): Promise<Search
   };
 }
 
-export function getMemory(id: string): Promise<MemoryDetail> {
-  return apiGet<MemoryDetail>(`/api/memories/${encodeURIComponent(id)}`, new URLSearchParams({ include_history: "true" }));
+export function getMemory(id: string, withPositions = false): Promise<MemoryDetail> {
+  const params = new URLSearchParams({ include_history: "true" });
+  if (withPositions) params.set("with_positions", "true");
+  return apiGet<MemoryDetail>(`/api/memories/${encodeURIComponent(id)}`, params);
 }
 
-export function getRelations(id: string): Promise<RelationsPayload> {
-  return apiGet<RelationsPayload>(`/api/memories/${encodeURIComponent(id)}/relations`);
+export function getRelations(id: string, withPositions = false): Promise<RelationsPayload> {
+  const params = withPositions ? new URLSearchParams({ with_positions: "true" }) : undefined;
+  return apiGet<RelationsPayload>(`/api/memories/${encodeURIComponent(id)}/relations`, params);
 }
 
 export function getSimilar(id: string): Promise<SearchHit[]> {

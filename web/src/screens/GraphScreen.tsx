@@ -14,6 +14,7 @@ import { GraphErrorBoundary } from "../components/GraphErrorBoundary";
 import { namespaceColor, resolveCssColor, toRgba } from "../lib/colors";
 import {
   buildGraphModel,
+  filterSnapshotLayers,
   graphNodeFromRecord,
   type GraphModel,
   type GraphNodeRecord,
@@ -64,8 +65,10 @@ function StarfieldLayer() {
 
 /**
  * Модель созвездия → RawMapSnapshot для общего 3D-движка: узлы как
- * [id, label, null, nsIdx, -1, importance, flags], рёбра с типами.
- * Координаты не нужны — движок раскладывает детерминированным объёмом.
+ * [id, label, null, nsIdx, -1, importance, flags, x, y, z]. Серверные
+ * координаты map_layout проходят насквозь; NaN — маркер «нет строки»
+ * (JSON здесь не участвует, снапшот живёт в памяти): движок подложит
+ * под такие узлы детерминированный fallback.
  */
 function modelToSnapshot(model: GraphModel): RawMapSnapshot {
   const namespaces: string[] = [];
@@ -95,6 +98,7 @@ function modelToSnapshot(model: GraphModel): RawMapSnapshot {
   const nodes = model.nodes.map((node, i) => {
     indexOf.set(node.id, i);
     const flags = (node.status === "superseded" || node.status === "retracted" ? 2 : 0) | (node.status === "uncertain" ? 0 : 0);
+    const [x, y, z] = node.position ?? [Number.NaN, Number.NaN, Number.NaN];
     return [
       node.id,
       node.label,
@@ -103,9 +107,9 @@ function modelToSnapshot(model: GraphModel): RawMapSnapshot {
       -1,
       node.importance ?? 3,
       flags,
-      0,
-      0,
-      0,
+      x,
+      y,
+      z,
     ] as RawMapSnapshot["nodes"][number];
   });
 
@@ -161,7 +165,8 @@ export function GraphScreen() {
 
   const search = useQuery({
     queryKey: ["graph-search", query],
-    queryFn: () => searchGranules({ ...GRAPH_FILTERS, query }, 1),
+    // withPositions: созвездие ставит звёзды в координаты полной карты (map_layout)
+    queryFn: () => searchGranules({ ...GRAPH_FILTERS, query }, 1, true),
     enabled: query.length > 0 && view === "constellation",
     staleTime: 60_000,
   });
@@ -171,7 +176,7 @@ export function GraphScreen() {
   const relations = useQueries({
     queries: seeds.map((hit) => ({
       queryKey: ["relations", hit.id],
-      queryFn: () => getRelations(hit.id),
+      queryFn: () => getRelations(hit.id, true),
       staleTime: 60_000,
       retry: 1,
     })),
@@ -198,7 +203,8 @@ export function GraphScreen() {
   const strangerQueries = useQueries({
     queries: strangers.map((id) => ({
       queryKey: ["memory", id],
-      queryFn: () => getMemory(id),
+      // withPositions: stranger-докачка несёт и координату звезды
+      queryFn: () => getMemory(id, true),
       staleTime: 300_000,
       retry: 1,
     })),
@@ -252,22 +258,18 @@ export function GraphScreen() {
 
   // Layer visibility скрытых слоёв — через подсветку легенды: движок full
   // не знает про слои созвездия, поэтому скрываем регионы перерасборкой
-  // модели (простота: скрытые слои просто не отдаются в снапшот)
+  // модели (простота: скрытые слои просто не отдаются в снапшот).
+  // Индексы рёбер перемапливаются — filter сжимает массив узлов, старые
+  // индексы указывали бы на чужие узлы (рендерный баг скрытых слоёв).
   const constellationForEngine = useMemo(() => {
     if (!constellationSnapshot) return null;
     if (hiddenLayers.size === 0) return constellationSnapshot;
-    const keep = enrichedModel
-      ? enrichedModel.nodes.filter((node) => !hiddenLayers.has(node.namespace ?? "default")).map((node) => node.id)
-      : [];
-    const keepSet = new Set(keep);
-    const filtered: RawMapSnapshot = {
-      ...constellationSnapshot,
-      nodes: constellationSnapshot.nodes.filter((node) => keepSet.has(node[0])),
-      edges: constellationSnapshot.edges.filter(
-        (edge) => keepSet.has(constellationSnapshot.nodes[edge[0]][0]) && keepSet.has(constellationSnapshot.nodes[edge[1]][0]),
-      ),
-    };
-    return filtered;
+    const keepIds = new Set(
+      enrichedModel
+        ? enrichedModel.nodes.filter((node) => !hiddenLayers.has(node.namespace ?? "default")).map((node) => node.id)
+        : [],
+    );
+    return filterSnapshotLayers(constellationSnapshot, keepIds);
   }, [constellationSnapshot, hiddenLayers, enrichedModel]);
 
   const reset = () => {

@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 import type { RelationsPayload, SearchHit } from "../api/types";
-import { buildGraphModel, edgeKind, edgeThickness, graphNodeFromRecord, nodeLabel, nodeSize, starGlow } from "./graph";
+import type { RawMapSnapshot } from "./fullmap/types";
+import {
+  buildGraphModel,
+  edgeKind,
+  edgeThickness,
+  filterSnapshotLayers,
+  graphNodeFromRecord,
+  nodeLabel,
+  nodeSize,
+  starGlow,
+} from "./graph";
 import { resolveCssColor, toRgba } from "./colors";
 
 const hit = (id: string, score = 0.5, importance = 3, ns = "code_knowledge"): SearchHit =>
@@ -156,6 +166,7 @@ describe("sigma attribute mapping", () => {
       importance,
       seed: true,
       status: null,
+      position: null,
     });
     expect(nodeSize(node(1))).toBe(4);
     expect(nodeSize(node(5))).toBeCloseTo(13);
@@ -179,17 +190,17 @@ describe("star map mapping (EVE art direction)", () => {
   });
 
   it("scales halo intensity with importance", () => {
-    expect(starGlow({ id: "x", label: "x", namespace: null, importance: 5, seed: true, status: "asserted" })).toBe(1);
-    expect(starGlow({ id: "x", label: "x", namespace: null, importance: 1, seed: true, status: "asserted" })).toBeCloseTo(0.2);
-    expect(starGlow({ id: "x", label: "x", namespace: null, importance: null, seed: false, status: null })).toBeCloseTo(0.3);
+    expect(starGlow({ id: "x", label: "x", namespace: null, importance: 5, seed: true, status: "asserted", position: null })).toBe(1);
+    expect(starGlow({ id: "x", label: "x", namespace: null, importance: 1, seed: true, status: "asserted", position: null })).toBeCloseTo(0.2);
+    expect(starGlow({ id: "x", label: "x", namespace: null, importance: null, seed: false, status: null, position: null })).toBeCloseTo(0.3);
   });
 
   it("marks superseded and retracted granules as extinguished", () => {
     expect(
-      starGlow({ id: "x", label: "x", namespace: null, importance: 5, seed: true, status: "superseded" }),
+      starGlow({ id: "x", label: "x", namespace: null, importance: 5, seed: true, status: "superseded", position: null }),
     ).toBeLessThan(0);
     expect(
-      starGlow({ id: "x", label: "x", namespace: null, importance: 5, seed: true, status: "retracted" }),
+      starGlow({ id: "x", label: "x", namespace: null, importance: 5, seed: true, status: "retracted", position: null }),
     ).toBeLessThan(0);
   });
 });
@@ -212,12 +223,86 @@ describe("graphNodeFromRecord", () => {
       importance: 3,
       seed: false,
       status: "asserted",
+      position: null,
     });
   });
 
   it("keeps a superseded granule extinguished after enrichment", () => {
     const node = graphNodeFromRecord({ ...record, status: "superseded" });
     expect(starGlow(node)).toBeLessThan(0);
+  });
+
+  it("carries map_layout position through enrichment", () => {
+    const placed = graphNodeFromRecord({ ...record, position: [-240.5, 90.0, 812.25] });
+    expect(placed.position).toEqual([-240.5, 90.0, 812.25]);
+  });
+});
+
+describe("filterSnapshotLayers — скрытые слои легенды созвездия", () => {
+  // узел: [id, label, preview, nsIdx, clusterIdx, size, flags, x, y, z]
+  const node = (id: string, nsIdx: number): RawMapSnapshot["nodes"][number] => [
+    id, id, null, nsIdx, -1, 3, 0, 1.5, -2.0, 700.25,
+  ];
+  const snapshot = (): RawMapSnapshot => ({
+    v: "constellation",
+    ns: ["code_knowledge", "project_meta"],
+    et: ["related_to"],
+    clusters: [],
+    nodes: [node("a", 0), node("b", 1), node("c", 0), node("d", 1)],
+    // a—b (0—1), b—c (1—2), c—d (2—3), a—a self (0—0)
+    edges: [
+      [0, 1, 0, 1],
+      [1, 2, 0, 1.5],
+      [2, 3, 0, 2],
+      [0, 0, 0, 1],
+    ],
+  });
+
+  it("hidden layer: surviving edges still point at THEIR nodes (index remap)", () => {
+    // скрываем code_knowledge: выживают b(1) и d(3) → новые индексы 0 и 1;
+    // единственное выжившее ребро c—d имеет скрытый конец и уходит ЦЕЛИКОМ
+    const filtered = filterSnapshotLayers(snapshot(), new Set(["b", "d"]));
+    expect(filtered.nodes.map((n) => n[0])).toEqual(["b", "d"]);
+
+    // каждое ребро — между двумя выжившими uuid (не чужими узлами)
+    for (const [src, tgt] of filtered.edges) {
+      expect(filtered.nodes[src]).toBeDefined();
+      expect(filtered.nodes[tgt]).toBeDefined();
+    }
+    expect(filtered.edges).toEqual([]);
+  });
+
+  it("hidden middle nodes shift indices — edge endpoints keep their uuids", () => {
+    // скрываем b(1) и c(2): выживают a(0), d(3) → новые 0, 1; ребро a—b
+    // выброшено (b скрыт), c—d выброшено, a—a остаётся 0—0
+    const filtered = filterSnapshotLayers(snapshot(), new Set(["a", "d"]));
+    expect(filtered.nodes.map((n) => n[0])).toEqual(["a", "d"]);
+    expect(filtered.edges).toEqual([[0, 0, 0, 1]]);
+
+    // прямая проверка «не уехали на чужие»: концы по uuid
+    const endpointIds = filtered.edges.map(([s, t]) => [filtered.nodes[s][0], filtered.nodes[t][0]]);
+    expect(endpointIds).toEqual([["a", "a"]]);
+  });
+
+  it("keeps a cross-layer edge intact when both ends survive", () => {
+    // скрываем только c: a—b остаётся, индексы a(0)→0, b(1)→1 без сдвига
+    const filtered = filterSnapshotLayers(snapshot(), new Set(["a", "b", "d"]));
+    expect(filtered.edges).toEqual([
+      [0, 1, 0, 1],
+      [0, 0, 0, 1],
+    ]);
+  });
+
+  it("preserves weight and typeIdx through the remap", () => {
+    const filtered = filterSnapshotLayers(snapshot(), new Set(["b", "c"]));
+    // выживает только b—c (1—2 → 0—1) с weight 1.5
+    expect(filtered.edges).toEqual([[0, 1, 0, 1.5]]);
+  });
+
+  it("all layers hidden — empty graph (same as before the fix)", () => {
+    const filtered = filterSnapshotLayers(snapshot(), new Set());
+    expect(filtered.nodes).toEqual([]);
+    expect(filtered.edges).toEqual([]);
   });
 });
 

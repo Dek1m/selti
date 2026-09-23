@@ -100,6 +100,60 @@ export function ellipseLayout(uuids: string[], output: Float32Array, bounds: Lay
 }
 
 
+// ── Созвездие: серверные координаты map_layout + fallback ──
+// (Мастер: «координаты гранул должны браться из таблицы, а тут снова
+// спираль»). Вход output уже несёт серверные позиции из снапшота; узлы
+// без строки в map_layout помечены NaN — им достаётся ellipseLayout.
+
+/**
+ * Смешанная раскладка созвездия: узлы со всеми конечными координатами
+ * (серверная map_layout-строка) остаются в той же точке, что и на
+ * полной карте; NaN-узлы — детерминированный ellipseLayout-fallback,
+ * чтобы звёзды без строки не терялись. Серверная раскладка — живые
+ * данные БД: анти-слипание (occupancy-грид) к ней не применяется.
+ */
+export function serverLayout(uuids: string[], output: Float32Array, bounds: LayoutBounds): Float32Array {
+  const serverIdx: number[] = [];
+  const serverPos: number[] = [];
+  for (let i = 0; i < uuids.length; i++) {
+    if (
+      Number.isFinite(output[i * 3]) &&
+      Number.isFinite(output[i * 3 + 1]) &&
+      Number.isFinite(output[i * 3 + 2])
+    ) {
+      serverIdx.push(i);
+      serverPos.push(output[i * 3], output[i * 3 + 1], output[i * 3 + 2]);
+    }
+  }
+  ellipseLayout(uuids, output, bounds);
+  for (let k = 0; k < serverIdx.length; k++) {
+    const i = serverIdx[k];
+    output[i * 3] = serverPos[k * 3];
+    output[i * 3 + 1] = serverPos[k * 3 + 1];
+    output[i * 3 + 2] = serverPos[k * 3 + 2];
+  }
+  return output;
+}
+
+/**
+ * Габариты фактического облака позиций (серверные + fallback) — стартовый
+ * кадр камеры созвездия. Возвращает null для пустого набора.
+ */
+export function layoutBBox(output: Float32Array, count: number): { min: [number, number, number]; max: [number, number, number] } | null {
+  if (count <= 0) return null;
+  const min: [number, number, number] = [Infinity, Infinity, Infinity];
+  const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < count; i++) {
+    for (let axis = 0; axis < 3; axis++) {
+      const value = output[i * 3 + axis];
+      if (value < min[axis]) min[axis] = value;
+      if (value > max[axis]) max[axis] = value;
+    }
+  }
+  return { min, max };
+}
+
+
 // ── Смешанная раскладка full-карты (эталон EVE): объёмные «руки» —
 // 60% узлов гауссианой вокруг центров своих кластеров (центры сами
 // равномерно-случайно по объёму, sigma своя на кластер), 40% равномерно

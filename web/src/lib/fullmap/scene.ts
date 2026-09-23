@@ -19,7 +19,7 @@ import { bfsLevels } from "./bfs";
 import { EDGE_VISIBLE_CAP, selectVisibleEdges, selectVisibleNodes } from "./edges";
 import { createEdgeBuffers, createEdgeGeometry, createEdgeMaterial, type EdgeLayerBuffers } from "./edgeLayers";
 import { selectLabeledNodes, type LabelCandidate } from "./lod";
-import { ellipseLayout, mixedLayout, FULL_VOLUME, hashUuid, type LayoutBounds, type VolumeBounds } from "./layout";
+import { layoutBBox, mixedLayout, FULL_VOLUME, hashUuid, serverLayout, type LayoutBounds, type VolumeBounds } from "./layout";
 import { PulseOrchestrator } from "./pulses";
 import { unpackNodeString } from "./pack";
 import { createSunLayers } from "./sunLayers";
@@ -266,7 +266,8 @@ export class FullMapScene {
 
     // разворот Мастера: клиентская детерминированная раскладка — full =
     // объём EVE-стиля (60% кластерные сгустки + 40% фон), созвездие =
-    // компактный объём; серверные координаты full-снапшота игнорируем
+    // серверные координаты map_layout + fallback для узлов без строки
+    // (Мастер: «координаты гранул должны браться из таблицы»)
     const uuids: string[] = [];
     for (let i = 0; i < packed.nodeCount; i++) {
       uuids.push(unpackNodeString(packed, i, 0));
@@ -278,7 +279,7 @@ export class FullMapScene {
         height: layout.bounds.height,
       });
     } else {
-      ellipseLayout(uuids, packed.nodePositions, layout.bounds);
+      serverLayout(uuids, packed.nodePositions, layout.bounds);
     }
     // центроиды кластеров (оболочки-туманности) — по НОВЫМ позициям
     const accX = new Float64Array(packed.clusters.length);
@@ -352,7 +353,44 @@ export class FullMapScene {
     this.rebuildClusterRadii(packed);
     this.rebuildVisibleNodes(performance.now(), true);
     this.cullEdges(null);
+    // созвездие: серверные координаты галактики (bbox ±1000) на порядок
+    // шире прежнего диска 220 — стартовый кадр подгоняем под фактическое
+    // облако, иначе камера конструктора оказывается внутри скопления
+    if (layout.kind === "ellipse") this.frameConstellation();
     this.resize();
+  }
+
+  /**
+   * Стартовый кадр созвездия по фактическому bbox (серверные координаты +
+   * fallback): камера над центром облака под прежним ракурсом (0, 620, 950),
+   * дистанция покрывает полудиагональ с запасом. Верхний зажим держит
+   * центр кадра внутри сферы видимости VIEW_SPHERE_R — дальний туман не
+   * съедает середину созвездия даже при широкой выдаче.
+   */
+  private frameConstellation(): void {
+    const packed = this.packed;
+    if (!packed) return;
+    const bbox = layoutBBox(packed.nodePositions, packed.nodeCount);
+    if (!bbox) return;
+    const center = new THREE.Vector3(
+      (bbox.min[0] + bbox.max[0]) / 2,
+      (bbox.min[1] + bbox.max[1]) / 2,
+      (bbox.min[2] + bbox.max[2]) / 2,
+    );
+    const radius = Math.hypot(
+      bbox.max[0] - bbox.min[0],
+      bbox.max[1] - bbox.min[1],
+      bbox.max[2] - bbox.min[2],
+    ) / 2;
+    const fitDist = (radius / Math.tan((this.camera.fov * Math.PI) / 360)) * 1.12;
+    const dist = Math.max(
+      this.controls.minDistance,
+      Math.min(fitDist, VIEW_SPHERE_R * 0.8),
+    );
+    const direction = new THREE.Vector3(0, 620, 950).normalize();
+    this.camera.position.copy(center).addScaledVector(direction, dist);
+    this.controls.target.copy(center);
+    this.controls.update();
   }
 
   /** importance per node, кешируется при load — selectVisibleEdges читает её */
@@ -687,6 +725,15 @@ export class FullMapScene {
     this.flyTo(new THREE.Vector3(0, 2800, 0.001), new THREE.Vector3(0, 0, 0));
   }
 
+  /**
+   * Оффсет подлёта камеры при фокусе гранулы (клик по канвасу и по лейблу —
+   * единая константа): ~200 юнитов — внутренний край зоны объёмных солнц
+   * (250), кольцо-хромосфера и звезда в одном кадре; clamp gl_PointSize
+   * 128·pixelRatio не даёт диску распухнуть в кашу (магнификация ×4
+   * даёт ~31px у важности 5 — запас до клампа четырёхкратный).
+   */
+  private static readonly FOCUS_OFFSET = new THREE.Vector3(60, 85, 170);
+
   focusNode(index: number): void {
     if (!this.packed) return;
     const target = new THREE.Vector3(
@@ -694,7 +741,7 @@ export class FullMapScene {
       this.packed.nodePositions[index * 3 + 1],
       this.packed.nodePositions[index * 3 + 2],
     );
-    const position = target.clone().add(new THREE.Vector3(140, 180, 420));
+    const position = target.clone().add(FullMapScene.FOCUS_OFFSET);
     this.flyTo(position, target);
   }
 
@@ -823,35 +870,9 @@ export class FullMapScene {
     if (!this.framedPrev) {
       this.framedPrev = { pos: this.camera.position.clone(), target: this.controls.target.clone() };
     }
-    this.flyToStar(picked);
+    // единая дистанция подлёта с кликом по лейблу (FOCUS_OFFSET)
+    this.focusNode(picked);
     this.callbacks.onSelect({ index: picked });
-  }
-
-  /**
-   * Космический подлёт «вплотную»: камера останавливается в 50 юнитах от
-   * звезды со своей текущей стороны, звезда — центр-слева (панель справа
-   * не перекрывает). Плавная интерполяция позиции и таргета, 900 мс.
-   */
-  private flyToStar(index: number): void {
-    if (!this.packed) return;
-    const star = new THREE.Vector3(
-      this.packed.nodePositions[index * 3],
-      this.packed.nodePositions[index * 3 + 1],
-      this.packed.nodePositions[index * 3 + 2],
-    );
-    const stopDist = 50;
-    const dir = this.camera.position.clone().sub(star);
-    if (dir.lengthSq() < 1e-6) dir.set(0, 0.3, 1);
-    dir.normalize();
-
-    const camPos = star.clone().add(dir.multiplyScalar(stopDist));
-    // звезда центр-слева: таргет смещаем вправо по экрану на ~15% ширины кадра
-    const viewDir = star.clone().sub(camPos).normalize();
-    const right = new THREE.Vector3().crossVectors(viewDir, new THREE.Vector3(0, 1, 0)).normalize();
-    const halfWidth = stopDist * Math.tan((this.camera.fov * Math.PI) / 360) * this.camera.aspect;
-    const target = star.clone().add(right.multiplyScalar(halfWidth * 0.3));
-
-    this.flyTo(camPos, target, 900);
   }
 
   private framedPrev: { pos: THREE.Vector3; target: THREE.Vector3 } | null = null;
