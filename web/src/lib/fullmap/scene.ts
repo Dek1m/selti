@@ -733,7 +733,7 @@ export class FullMapScene {
    * 128·pixelRatio не даёт диску распухнуть в кашу (магнификация ×4
    * даёт ~31px у важности 5 — запас до клампа четырёхкратный).
    */
-  private static readonly FOCUS_OFFSET = new THREE.Vector3(60, 85, 170);
+  private static readonly FOCUS_OFFSET = new THREE.Vector3(26, 38, 78); // ~90 юнитов — вплотную, как прежний full-подлёт (фидбек Мастера 23.09)
 
   focusNode(index: number): void {
     if (!this.packed) return;
