@@ -542,7 +542,7 @@ export class FullMapScene {
     // оркестратор v2: тик 1.5-2.5с, НЕ каждый кадр; reduced-motion — off
     if (!this.reducedMotion) {
       this.pulseOrch = new PulseOrchestrator();
-      this.pulseTimer = window.setInterval(() => this.pulseTick(), 2000);
+      this.pulseTimer = window.setInterval(() => this.pulseTick(), 700); // было 2000 — частота втрое (Мастер 23.09)
     }
   }
 

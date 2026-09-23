@@ -14,9 +14,9 @@ import { FLASH_SLOTS, PULSE_SLOTS } from "./shaders";
 export const PULSE_DURATION_MIN_S = 1.0;
 export const PULSE_DURATION_MAX_S = 1.8;
 /** вероятность спавна за тик — часть тиков сознательно пустая */
-export const PULSE_SPAWN_CHANCE = 0.8;
-export const PULSE_COOLDOWN_MIN_MS = 1200;
-export const PULSE_COOLDOWN_MAX_MS = 2600;
+export const PULSE_SPAWN_CHANCE = 1.0; // было 0.8 — частота втрое (Мастер 23.09)
+export const PULSE_COOLDOWN_MIN_MS = 400; // было 1200 — частота втрое (Мастер 23.09)
+export const PULSE_COOLDOWN_MAX_MS = 870; // было 2600 — частота втрое (Мастер 23.09)
 
 /** Живой срез буфера рёбер основного слоя (заполняет scene.cullEdges). */
 export interface PulseEdgeSource {
