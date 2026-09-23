@@ -216,7 +216,7 @@ export class FullMapScene {
     this.controls.rotateSpeed = 0.55;
     this.controls.panSpeed = 0.9;
     this.controls.zoomSpeed = 1.1;
-    this.controls.minDistance = 120;
+    this.controls.minDistance = 60; // было 120 — выталкивало камеру из близкого фокуса (фидбек Мастера 23.09)
     this.controls.maxDistance = 9000;
     // Master's mapping: RMB orbits, LMB pans, wheel zooms
     this.controls.mouseButtons = {
