@@ -42,7 +42,7 @@ const LABEL_COOLDOWN_MS = 140;
  * выгружается из draw-range. Бесшовность гарантируется тем, что fade
  * звёзд достигает нуля ровно на этой дистанции (FADE_END шейдера = 3200).
  */
-function flyLog(msg: string): void {
+export function flyLog(msg: string): void {
   const w = window as unknown as { __flyLog?: string[] };
   if (!w.__flyLog) w.__flyLog = [];
   w.__flyLog.push(msg);
