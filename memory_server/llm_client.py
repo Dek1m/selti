@@ -143,8 +143,12 @@ class LinkerLLMClient:
             if self._client is not None:
                 try:
                     await self._client.aclose()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # Старый клиент не закрылся (мёртвый loop) — не блокируем замену
+                    logger.warning(
+                        "Linker LLM client close failed on loop switch",
+                        extra={"error": str(exc), "error_type": type(exc).__name__},
+                    )
                 self._client = None
             self._client_loop = loop
             headers = {"Content-Type": "application/json"}

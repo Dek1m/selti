@@ -17,10 +17,13 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { bfsLevels } from "./bfs";
 import { EDGE_VISIBLE_CAP, selectVisibleEdges, selectVisibleNodes } from "./edges";
+import { createEdgeBuffers, createEdgeGeometry, createEdgeMaterial, type EdgeLayerBuffers } from "./edgeLayers";
 import { selectLabeledNodes, type LabelCandidate } from "./lod";
 import { ellipseLayout, mixedLayout, FULL_VOLUME, hashUuid, type LayoutBounds, type VolumeBounds } from "./layout";
+import { PulseOrchestrator } from "./pulses";
 import { unpackNodeString } from "./pack";
-import { EDGE_FRAGMENT, EDGE_VERTEX, HALO_FRAGMENT, HALO_VERTEX, STAR_FRAGMENT, STAR_VERTEX, SUN_FRAGMENT, SUN_VERTEX } from "./shaders";
+import { createSunLayers } from "./sunLayers";
+import { FLASH_SLOTS, STAR_FRAGMENT, STAR_VERTEX } from "./shaders";
 import type { PackedCluster, PackedMapSnapshot } from "./types";
 
 const CLICK_SLOP_PX = 5;
@@ -75,7 +78,6 @@ export class FullMapScene {
   private reducedMotion = false;
 
   private fullPoints: THREE.Points | null = null;
-  private fullEdges: THREE.LineSegments | null = null;
   private nebulaGroup = new THREE.Group();
   private nebulaTexture: THREE.Texture | null = null;
   private labelLayer: HTMLDivElement;
@@ -96,94 +98,39 @@ export class FullMapScene {
   /**
    * HUD-диагностика (?debug=1 → #fullmap-debug): всё, что нужно, чтобы
    * за один взгляд понять, где рёбра теряются — отбор, drawRange,
-   * boundingSphere, актуальные uniforms и счётчик пайплайна.
+   * актуальные uniforms слоёв, активные импульсы и счётчик пайплайна.
    */
   getDebugInfo(): string {
-    if (!this.fullEdges || !this.packed) return "no edge mesh";
-    const geo = this.fullEdges.geometry;
-    const bs = geo.boundingSphere;
-    const material = this.fullEdges.material as THREE.ShaderMaterial;
-    const uViewport = material.uniforms.uViewport.value as THREE.Vector2;
+    if (!this.packed || !this.mainEdges || !this.supersedesEdges || !this.contradictsEdges) {
+      return "no edge meshes";
+    }
+    const drawCount = (mesh: THREE.LineSegments) => mesh.geometry.drawRange.count;
+    const uniformsOf = (mesh: THREE.LineSegments) => (mesh.material as THREE.ShaderMaterial).uniforms;
+    const starU = this.fullPoints ? (this.fullPoints.material as THREE.ShaderMaterial).uniforms : null;
+    const flashes = starU
+      ? (starU.uFlashes.value as THREE.Vector2[]).map((v) => `#${v.x.toFixed(0)}@${v.y.toFixed(1)}`).join(",")
+      : "none";
+    const pulses = (uniformsOf(this.mainEdges).uPulses.value as THREE.Vector4[])
+      .map((v) => `e${v.x.toFixed(0)}@${v.y.toFixed(1)}+${v.z.toFixed(1)}s→${v.w.toFixed(0)}`)
+      .join(",");
     const info = this.renderer.info.render;
 
-    // parent-цепочка до сцены (пункт 1): Mesh обязан висеть на Scene
-    const parents: string[] = [];
-    let node: THREE.Object3D | null = this.fullEdges;
-    while (node) {
-      parents.push(node.type + (node.name ? `:${node.name}` : ""));
-      node = node.parent;
-    }
-
-    // фактические вершины ПЕРВОГО квада из живого буфера (пункт 2)
-    let quad = "quad: none";
-    const posAttr = geo.getAttribute("position") as THREE.BufferAttribute | undefined;
-    const otherAttr = geo.getAttribute("aOther") as THREE.BufferAttribute | undefined;
-    const sideAttr = geo.getAttribute("aSide") as THREE.BufferAttribute | undefined;
-    const index = geo.getIndex();
-    if (posAttr && otherAttr && sideAttr && index && geo.drawRange.count > 0) {
-      const f = (v: number) => v.toFixed(1);
-      const parts: string[] = [];
-      const corners = [0, 1, 2, 3].map((c) => {
-        const v = index.array[c];
-        const px = posAttr.getX(v);
-        const py = posAttr.getY(v);
-        const pz = posAttr.getZ(v);
-        const ox = otherAttr.getX(v);
-        const oy = otherAttr.getY(v);
-        const oz = otherAttr.getZ(v);
-        parts.push(
-          `v${c}[i=${v}] pos=(${f(px)},${f(py)},${f(pz)}) other=(${f(ox)},${f(oy)},${f(oz)}) side=${sideAttr.getX(v)}`,
-        );
-        const bad = ![px, py, pz, ox, oy, oz].every(Number.isFinite);
-        return bad ? "NaN!" : "ok";
-      });
-      // CPU-эмуляция вершинного шейдера: итоговые экранные px углов
-      this.camera.updateMatrixWorld();
-      const vp = new THREE.Matrix4().multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse);
-      const ve = vp.elements;
-      const vw = this.renderer.domElement.width;
-      const vh = this.renderer.domElement.height;
-      const projPx = (x: number, y: number, z: number) => {
-        const w = ve[3] * x + ve[7] * y + ve[11] * z + ve[15];
-        if (!Number.isFinite(w) || Math.abs(w) < 1e-6) return "w~0";
-        const nx = (ve[0] * x + ve[4] * y + ve[8] * z + ve[12]) / w;
-        const ny = (ve[1] * x + ve[5] * y + ve[9] * z + ve[13]) / w;
-        return `${(((nx + 1) / 2) * vw).toFixed(0)},${(((1 - ny) / 2) * vh).toFixed(0)}`;
-      };
-      const q0 = index.array[0];
-      const q3 = index.array[3];
-      const cornersPx = [
-        projPx(posAttr.getX(q0), posAttr.getY(q0), posAttr.getZ(q0)),
-        projPx(posAttr.getX(q0 + 2), posAttr.getY(q0 + 2), posAttr.getZ(q0 + 2)),
-        projPx(posAttr.getX(q3), posAttr.getY(q3), posAttr.getZ(q3)),
-      ].join(" / ");
-      quad = `quad: ${corners.join(",")} | cornersPx(A/B/B') ${cornersPx} | ${parts.slice(0, 1).join(" | ")}`;
-    }
-    const mainEdgePos = this.mainEdges?.geometry.getAttribute("position") as THREE.BufferAttribute | undefined;
-    const raw6 = mainEdgePos
-      ? [0, 3].map((f) => `${mainEdgePos.getX(f).toFixed(0)},${mainEdgePos.getY(f).toFixed(0)},${mainEdgePos.getZ(f).toFixed(0)}`).join(" / ")
-      : "none";
-
-    const parentChain = parents.join(" < ");
-    // бисект-меш: зелёный wireframe на геометрии лент
-    // позиционный буфер: первые два узла + NaN-скан (диагноз Мастера)
+    // первые вершины живого буфера main (NaN-скан позиций узлов ниже)
+    const posAttr = this.mainEdges.geometry.getAttribute("position") as THREE.BufferAttribute;
+    const raw = [0, 3].map((f) => `${posAttr.getX(f).toFixed(0)},${posAttr.getY(f).toFixed(0)},${posAttr.getZ(f).toFixed(0)}`).join(" / ");
     let nanCount = 0;
     const npos = this.packed.nodePositions;
     for (let i = 0; i < npos.length; i++) if (Number.isNaN(npos[i])) nanCount++;
-    const f3 = (i: number) =>
-      `[${npos[i * 3].toFixed(0)},${npos[i * 3 + 1].toFixed(0)},${npos[i * 3 + 2].toFixed(0)}]`;
 
     return [
       `build ${__BUILD_ID__}`,
-      `pos0=${f3(0)} pos1=${f3(1)} len=${npos.length} nan=${nanCount}`,
-      `nodes ${this.nodeVisibleCount}/${this.packed.nodeCount}`,
-      `edges cand/drawn/both ${this.lastEdgeStats.candidates}/${this.lastEdgeStats.drawn}/${this.lastEdgeStats.bothVisible}`,
-      `edgeMesh visible=${this.fullEdges.visible} drawRange=${geo.drawRange.count} bs=${bs ? bs.radius.toFixed(0) : "null"} renderOrder=${this.fullEdges.renderOrder} mw0-3=[${this.fullEdges.matrixWorld.elements.slice(0, 4).map((v) => v.toFixed(2)).join(",")}] parent=${parentChain}`,
-      `uViewport=(${uViewport.x | 0}x${uViewport.y | 0}) uEdgeWidth=${material.uniforms.uEdgeWidth.value.toFixed(1)}`,
+      `nodes ${this.nodeVisibleCount}/${this.packed.nodeCount} nan=${nanCount}`,
+      `edges main/sup/con drawn ${drawCount(this.mainEdges) / 2}/${drawCount(this.supersedesEdges) / 2}/${drawCount(this.contradictsEdges) / 2} (cap ${EDGE_VISIBLE_CAP}) cand ${this.lastEdgeStats.candidates} both ${this.lastEdgeStats.bothVisible}`,
+      `uSpike=${uniformsOf(this.mainEdges).uSpike.value} uDim=${uniformsOf(this.mainEdges).uDim.value} uBase=${uniformsOf(this.mainEdges).uBaseAlpha.value}`,
+      `pulses [${pulses}] flashes [${flashes}]`,
+      `mainEdge pos0/1: ${raw}`,
       `pipeline calls=${info.calls} tris=${info.triangles} points=${info.points}`,
-      `mainEdge pos0/1: ${raw6}`,
       `suns used=${this.suns ? this.suns.count : "none"} (cap 40, range 250)`,
-      quad,
     ].join(" | ");
   }
   private lastEdgeCull = 0;
@@ -376,14 +323,18 @@ export class FullMapScene {
     geometry.setAttribute("aFlags", new THREE.BufferAttribute(flags, 1));
     // per-star twinkle phase из хэша uuid (фидбек Мастера: уникальная фаза)
     const phases = new Float32Array(n);
+    // глобальный индекс звезды для матчинга всполохов (статичен)
+    const starIds = new Float32Array(n);
     for (let i = 0; i < n; i++) {
       phases[i] = (hashUuid(uuids[i]) >>> 8) / 0x1000000 * 6.2831;
+      starIds[i] = i;
     }
     this.bfsAttr = new THREE.BufferAttribute(bfs, 1);
     this.highlightAttr = new THREE.BufferAttribute(highlight, 1);
     geometry.setAttribute("aBfs", this.bfsAttr);
     geometry.setAttribute("aHighlight", this.highlightAttr);
     geometry.setAttribute("aPhase", new THREE.BufferAttribute(phases, 1));
+    geometry.setAttribute("aIndex", new THREE.BufferAttribute(starIds, 1));
     // viewport-culled draw set (фидбек 1): Points рисует только индексы,
     // отобранные rebuildVisibleNodes — скрытые узлы не рендерятся вовсе
     this.nodeIndexArray = new Uint32Array(n);
@@ -401,9 +352,6 @@ export class FullMapScene {
     this.rebuildClusterRadii(packed);
     this.rebuildVisibleNodes(performance.now(), true);
     this.cullEdges(null);
-    // ribbon-материалы созданы здесь впервые — их uViewport обязан получить
-    // реальные размеры немедленно (иначе ленты строятся от viewport 1×1
-    // и улетают мимо экрана: «рёбер нет вообще»)
     this.resize();
   }
 
@@ -413,42 +361,11 @@ export class FullMapScene {
   /** InstancedMesh сфер-солнц: 40 инстансов, палитра из цвета слоя. */
   private buildSuns(): void {
     const SUN_CAP = 40;
-    const seed = new THREE.InstancedBufferAttribute(new Float32Array(SUN_CAP), 1);
-    this.sunsSeed = seed;
-
-    const sphereGeo = new THREE.SphereGeometry(1, 20, 14);
-    sphereGeo.setAttribute("aInstSeed", seed);
-    const sphereMaterial = new THREE.ShaderMaterial({
-      vertexShader: SUN_VERTEX,
-      fragmentShader: SUN_FRAGMENT,
-      uniforms: { uTime: { value: 0 } },
-      transparent: true,
-      depthWrite: true,
-    });
-    this.suns = new THREE.InstancedMesh(sphereGeo, sphereMaterial, SUN_CAP);
-    this.suns.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.suns.count = 0;
-    this.suns.frustumCulled = false;
+    const layers = createSunLayers(SUN_CAP);
+    this.suns = layers.suns;
+    this.halo = layers.halo;
+    this.sunsSeed = layers.seed;
     this.scene.add(this.suns);
-
-    // кольцевое гало: billboard-квад ×2.2 радиуса, аддитивная, статичное —
-    // тонкая хромосфера у кромки диска (диск в кваде до r≈0.455)
-    const haloGeo = new THREE.PlaneGeometry(2, 2);
-    const haloMaterial = new THREE.ShaderMaterial({
-      vertexShader: HALO_VERTEX,
-      fragmentShader: HALO_FRAGMENT,
-      uniforms: {},
-      transparent: true,
-      depthWrite: false,
-      depthTest: false,
-      side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending,
-    });
-    this.halo = new THREE.InstancedMesh(haloGeo, haloMaterial, SUN_CAP);
-    this.halo.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.halo.count = 0;
-    this.halo.frustumCulled = false;
-    this.halo.renderOrder = 5;
     this.scene.add(this.halo);
   }
 
@@ -533,6 +450,10 @@ export class FullMapScene {
         uTwinkle: { value: this.reducedMotion ? 0 : 1 },
         uDepthCap: { value: 99 },
         uFocusBlur: { value: 0 },
+        // всполохи звезды-истока (пишет оркестратор импульсов)
+        uFlashes: {
+          value: Array.from({ length: FLASH_SLOTS }, () => new THREE.Vector2(-1, -1000)),
+        },
         uFogColor: { value: this.palette?.fog ?? new THREE.Color("#060a12") },
         uIceColor: { value: this.palette?.ice ?? new THREE.Color("#7dd3fc") },
       },
@@ -545,55 +466,30 @@ export class FullMapScene {
   /**
    * Рёбра — THREE.LineSegments (эталон EVE, финал): три меша —
    * основной (градиент слой→слой) и янтарные supersedes / красные
-   * contradicts. Материал общий — шейдерный EDGE_VERTEX/EDGE_FRAGMENT
-   * (заказ Мастера «синаптические импульсы»): базовый вид идентичен
-   * прежнему LineBasicMaterial (градиент, фиксированная alpha слоя),
-   * поверх — редкие световые спайки, целиком в GLSL. Куллинг
-   * перезаписывает position/aColor/aSeed (кап 700 на меш).
+   * contradicts. Материал общий — шейдерный EDGE_VERTEX/EDGE_FRAGMENT:
+   * базовый вид идентичен прежнему LineBasicMaterial (градиент, фиксиро-
+   * ванная alpha слоя), поверх — редкие импульсы по расписанию JS-
+   * оркестратора (pulses.ts). Куллинг перезаписывает position/aColor/
+   * aEdgeId (кап 700 на меш).
    */
   private buildEdgeLines(): void {
     const cap = EDGE_VISIBLE_CAP;
-    const make = () => {
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(cap * 6), 3));
-      geometry.setAttribute("aColor", new THREE.BufferAttribute(new Float32Array(cap * 6), 3));
-      // ось импульса/градиента: чётная вершина — исток (0), нечётная — цель (1);
-      // пары не перемешиваются куллингом, буфер заполняется один раз
-      const t = new Float32Array(cap * 2);
-      for (let i = 0; i < cap; i++) {
-        t[i * 2] = 0;
-        t[i * 2 + 1] = 1;
-      }
-      geometry.setAttribute("aT", new THREE.BufferAttribute(t, 1));
-      geometry.setAttribute("aSeed", new THREE.BufferAttribute(new Float32Array(cap * 2), 1));
-      geometry.setDrawRange(0, 0);
-      return geometry;
-    };
-
-    const edgeMaterial = (baseAlpha: number, blending: THREE.Blending) =>
-      new THREE.ShaderMaterial({
-        vertexShader: EDGE_VERTEX,
-        fragmentShader: EDGE_FRAGMENT,
-        uniforms: {
-          uTime: { value: 0 },
-          uSpike: { value: this.reducedMotion ? 0 : 1 },
-          uBaseAlpha: { value: baseAlpha },
-          uDim: { value: 0 },
-        },
-        transparent: true,
-        blending,
-        depthTest: false,
-        depthWrite: false,
-      });
 
     const contradicts = this.palette?.contradicts ?? new THREE.Color("#ff7a8a");
     const warn = this.palette?.supersedes ?? new THREE.Color("#ffc15e");
 
     // main — NormalBlending (additive на плотных линиях белеет, фидбек);
     // спец-слои — additive, как раньше
-    this.mainEdges = new THREE.LineSegments(make(), edgeMaterial(0.22, THREE.NormalBlending));
-    this.supersedesEdges = new THREE.LineSegments(make(), edgeMaterial(0.6, THREE.AdditiveBlending));
-    this.contradictsEdges = new THREE.LineSegments(make(), edgeMaterial(0.75, THREE.AdditiveBlending));
+    this.mainEdges = new THREE.LineSegments(createEdgeGeometry(cap), createEdgeMaterial(0.22, THREE.NormalBlending, this.reducedMotion));
+    this.supersedesEdges = new THREE.LineSegments(createEdgeGeometry(cap), createEdgeMaterial(0.6, THREE.AdditiveBlending, this.reducedMotion));
+    this.contradictsEdges = new THREE.LineSegments(createEdgeGeometry(cap), createEdgeMaterial(0.75, THREE.AdditiveBlending, this.reducedMotion));
+
+    // живой JS-срез буферов: оркестратор выбирает импульсы из ВИДИМЫХ рёбер
+    this.edgeBuffers = {
+      main: createEdgeBuffers(cap),
+      supersedes: createEdgeBuffers(cap),
+      contradicts: createEdgeBuffers(cap),
+    };
 
     // спец-слои монохромны: цвет заливается один раз, куллинг его не трогает
     this.fillEdgeFixedColor(this.supersedesEdges, warn);
@@ -603,7 +499,52 @@ export class FullMapScene {
       mesh.frustumCulled = false;
       this.scene.add(mesh);
     }
+
+    // оркестратор v2: тик 1.5-2.5с, НЕ каждый кадр; reduced-motion — off
+    if (!this.reducedMotion) {
+      this.pulseOrch = new PulseOrchestrator();
+      this.pulseTimer = window.setInterval(() => this.pulseTick(), 2000);
+    }
   }
+
+  /**
+   * Тик оркестратора: спавн редких импульсов + запись uniform-массивов
+   * (рёбра и всполохи звёзд из одного события spawn). Между тиками
+   * ноль per-frame CPU: GLSL анимирует по uTime сам.
+   */
+  private pulseTick(): void {
+    if (this.disposed || !this.pulseOrch || !this.edgeBuffers) return;
+    // спавн из основного слоя (основная масса рёбер); матч в шейдере — по
+    // глобальному id, чужие слои с тем же id не пересекаются
+    this.pulseOrch.tick(this.elapsedNow, this.edgeBuffers.main);
+
+    const pulseData = this.pulseOrch.edgeUniformData();
+    for (const mesh of [this.mainEdges, this.supersedesEdges, this.contradictsEdges]) {
+      const material = mesh?.material as THREE.ShaderMaterial | undefined;
+      if (!material) continue;
+      const uniforms = material.uniforms.uPulses.value as THREE.Vector4[];
+      for (let i = 0; i < uniforms.length; i++) {
+        const [edgeId, start, duration, toB] = pulseData[i];
+        uniforms[i].set(edgeId, start, duration, toB);
+      }
+    }
+
+    const starMaterial = this.fullPoints?.material as THREE.ShaderMaterial | undefined;
+    if (starMaterial) {
+      const flashData = this.pulseOrch.flashUniformData();
+      const flashes = starMaterial.uniforms.uFlashes.value as THREE.Vector2[];
+      for (let i = 0; i < flashes.length; i++) {
+        const [starIndex, start] = flashData[i];
+        flashes[i].set(starIndex, start);
+      }
+    }
+  }
+
+  private pulseOrch: PulseOrchestrator | null = null;
+  private pulseTimer: number | null = null;
+  /** последний elapsed кадра — шкала тиков оркестратора = шкала uTime */
+  private elapsedNow = 0;
+  private edgeBuffers: { main: EdgeLayerBuffers; supersedes: EdgeLayerBuffers; contradicts: EdgeLayerBuffers } | null = null;
 
   /** Монохромная заливка aColor спец-слоя (одинаковый rgb на оба конца). */
   private fillEdgeFixedColor(mesh: THREE.LineSegments, color: THREE.Color): void {
@@ -1050,10 +991,10 @@ export class FullMapScene {
 
   /**
    * Edge culling + кап 700 (эталон EVE): выбранные рёбра раскладываются
-   * в position/aColor/aSeed буферы трёх LineSegments-мешей (main/supersedes/
-   * contradicts). Пары вершин копируются из nodePositions, цвета main —
-   * из спектра слоёв концов (градиент), seed — из хэша пары узлов (ось
-   * спайков импульсов). Throttle 150 мс.
+   * в position/aColor/aEdgeId буферы трёх LineSegments-мешей (main/
+   * supersedes/contradicts). Пары вершин копируются из nodePositions,
+   * цвета main — из спектра слоёв концов (градиент), aEdgeId — глобальный
+   * индекс ребра (матч импульсов оркестратора). Throttle 150 мс.
    */
   private cullEdges(now: number | null): void {
     if (!this.packed || !this.nodeVisible || !this.mainEdges || !this.supersedesEdges || !this.contradictsEdges) return;
@@ -1088,11 +1029,12 @@ export class FullMapScene {
 
     const mainPos = (this.mainEdges.geometry.getAttribute("position") as THREE.BufferAttribute).array as Float32Array;
     const mainCol = (this.mainEdges.geometry.getAttribute("aColor") as THREE.BufferAttribute).array as Float32Array;
-    const mainSeed = (this.mainEdges.geometry.getAttribute("aSeed") as THREE.BufferAttribute).array as Float32Array;
+    const mainIdAttr = (this.mainEdges.geometry.getAttribute("aEdgeId") as THREE.BufferAttribute).array as Float32Array;
     const supPos = (this.supersedesEdges.geometry.getAttribute("position") as THREE.BufferAttribute).array as Float32Array;
-    const supSeed = (this.supersedesEdges.geometry.getAttribute("aSeed") as THREE.BufferAttribute).array as Float32Array;
+    const supIdAttr = (this.supersedesEdges.geometry.getAttribute("aEdgeId") as THREE.BufferAttribute).array as Float32Array;
     const conPos = (this.contradictsEdges.geometry.getAttribute("position") as THREE.BufferAttribute).array as Float32Array;
-    const conSeed = (this.contradictsEdges.geometry.getAttribute("aSeed") as THREE.BufferAttribute).array as Float32Array;
+    const conIdAttr = (this.contradictsEdges.geometry.getAttribute("aEdgeId") as THREE.BufferAttribute).array as Float32Array;
+    const bufMeta = this.edgeBuffers;
     let mainN = 0;
     let supN = 0;
     let conN = 0;
@@ -1102,24 +1044,29 @@ export class FullMapScene {
       const src = this.packed.edgeData[e * 3];
       const tgt = this.packed.edgeData[e * 3 + 1];
       const kindName = this.packed.edgeTypes[this.packed.edgeData[e * 3 + 2]] ?? "";
-      // per-edge seed спайка: хэш ПАРЫ узлов, стабилен между куллингами —
-      // расписание импульсов не прыгает при перезаписи буферов
-      const seed = (hashUuid(`${src}:${tgt}`) >>> 8) / 0x1000000;
 
       let buf: Float32Array;
-      let seedBuf: Float32Array;
+      let idAttr: Float32Array;
+      let jsIds: Float32Array;
+      let jsNodes: Int32Array;
       let slot: number;
       if (kindName === "supersedes") {
         buf = supPos;
-        seedBuf = supSeed;
+        idAttr = supIdAttr;
+        jsIds = bufMeta.supersedes.ids;
+        jsNodes = bufMeta.supersedes.nodes;
         slot = supN++ * 6;
       } else if (kindName === "contradicts") {
         buf = conPos;
-        seedBuf = conSeed;
+        idAttr = conIdAttr;
+        jsIds = bufMeta.contradicts.ids;
+        jsNodes = bufMeta.contradicts.nodes;
         slot = conN++ * 6;
       } else {
         buf = mainPos;
-        seedBuf = mainSeed;
+        idAttr = mainIdAttr;
+        jsIds = bufMeta.main.ids;
+        jsNodes = bufMeta.main.nodes;
         slot = mainN * 6;
         const cA = nsRgb[meta[src * 4] | 0] ?? [0.54, 0.59, 0.67];
         const cB = nsRgb[meta[tgt * 4] | 0] ?? [0.54, 0.59, 0.67];
@@ -1133,20 +1080,34 @@ export class FullMapScene {
       buf[slot + 3] = positions[tgt * 3];
       buf[slot + 4] = positions[tgt * 3 + 1];
       buf[slot + 5] = positions[tgt * 3 + 2];
-      // оба конца ребра несут один seed (slot / 3 = вершинный слот)
-      seedBuf[slot / 3] = seed;
-      seedBuf[slot / 3 + 1] = seed;
+      // глобальный id ребра на обе вершины: импульс матчится в шейдере по
+      // нему, перезапись слота куллингом не переносит спайк на чужое ребро
+      const edgeSlot = slot / 6;
+      idAttr[slot / 3] = e;
+      idAttr[slot / 3 + 1] = e;
+      // JS-срез для оркестратора: выбор случайного видимого ребра + исток
+      jsIds[edgeSlot] = e;
+      jsNodes[edgeSlot * 2] = src;
+      jsNodes[edgeSlot * 2 + 1] = tgt;
     }
+    // пустые хвосты срезов — невалидные id (маска -1), чтобы оркестратор и
+    // шейдер не подсвечивали мусор за пределами нарисованного набора
+    bufMetaFill(bufMeta.main.ids, mainN);
+    bufMetaFill(bufMeta.supersedes.ids, supN);
+    bufMetaFill(bufMeta.contradicts.ids, conN);
+    bufMeta.main.count = mainN;
+    bufMeta.supersedes.count = supN;
+    bufMeta.contradicts.count = conN;
 
     (this.mainEdges.geometry.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
     (this.mainEdges.geometry.getAttribute("aColor") as THREE.BufferAttribute).needsUpdate = true;
-    (this.mainEdges.geometry.getAttribute("aSeed") as THREE.BufferAttribute).needsUpdate = true;
+    (this.mainEdges.geometry.getAttribute("aEdgeId") as THREE.BufferAttribute).needsUpdate = true;
     this.mainEdges.geometry.setDrawRange(0, mainN * 2);
     (this.supersedesEdges.geometry.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
-    (this.supersedesEdges.geometry.getAttribute("aSeed") as THREE.BufferAttribute).needsUpdate = true;
+    (this.supersedesEdges.geometry.getAttribute("aEdgeId") as THREE.BufferAttribute).needsUpdate = true;
     this.supersedesEdges.geometry.setDrawRange(0, supN * 2);
     (this.contradictsEdges.geometry.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
-    (this.contradictsEdges.geometry.getAttribute("aSeed") as THREE.BufferAttribute).needsUpdate = true;
+    (this.contradictsEdges.geometry.getAttribute("aEdgeId") as THREE.BufferAttribute).needsUpdate = true;
     this.contradictsEdges.geometry.setDrawRange(0, conN * 2);
   }
 
@@ -1230,6 +1191,9 @@ export class FullMapScene {
 
     this.stepFly(now);
     this.controls.update();
+    // шкала тиков оркестратора = шкала uTime шейдеров (последний кадр;
+    // расхождение с реальным моментом тика < один кадр — несущественно)
+    this.elapsedNow = elapsed;
 
     // время: twinkle звёзд + анимация плазмы солнц
     const starMaterial = this.fullPoints?.material as THREE.ShaderMaterial | undefined;
@@ -1318,16 +1282,10 @@ export class FullMapScene {
       const material = points?.material as THREE.ShaderMaterial | undefined;
       if (material) material.uniforms.uPixelRatio.value = pixelRatio;
     }
-    // ribbon edges: viewport в физических px, толщина — 2 CSS px
-    for (const edges of [this.fullEdges]) {
-      const material = edges?.material as THREE.ShaderMaterial | undefined;
-      if (!material) continue;
-      (material.uniforms.uViewport.value as THREE.Vector2).set(width * pixelRatio, height * pixelRatio);
-      material.uniforms.uEdgeWidth.value = 6.0 * pixelRatio;
-    }
   }
 
   private disposeMap(): void {
+    this.stopPulseOrchestrator();
     for (const object of [this.fullPoints, this.suns, this.halo, this.mainEdges, this.supersedesEdges, this.contradictsEdges]) {
       if (!object) continue;
       this.scene.remove(object);
@@ -1337,10 +1295,10 @@ export class FullMapScene {
     this.suns = null;
     this.halo = null;
     this.fullPoints = null;
-    this.fullEdges = null;
     this.mainEdges = null;
     this.supersedesEdges = null;
     this.contradictsEdges = null;
+    this.edgeBuffers = null;
     this.nodeIndex = null;
     this.nodeIndexArray = null;
     this.nodeVisibleCount = 0;
@@ -1352,8 +1310,18 @@ export class FullMapScene {
     this.renderLabels([]);
   }
 
+  /** Полная остановка оркестратора (rebuild карты, unmount, reduced-motion). */
+  private stopPulseOrchestrator(): void {
+    if (this.pulseTimer !== null) {
+      window.clearInterval(this.pulseTimer);
+      this.pulseTimer = null;
+    }
+    this.pulseOrch = null;
+  }
+
   dispose(): void {
     this.disposed = true;
+    this.stopPulseOrchestrator();
     cancelAnimationFrame(this.frame);
     this.resizeObserver.disconnect();
     this.disposeMap();
@@ -1362,4 +1330,9 @@ export class FullMapScene {
     this.renderer.dispose();
     this.renderer.domElement.remove();
   }
+}
+
+/** Хвосты JS-среза за пределами нарисованного набора — невалидный id (-1). */
+function bufMetaFill(ids: Float32Array, count: number): void {
+  for (let i = count; i < ids.length; i++) ids[i] = -1;
 }

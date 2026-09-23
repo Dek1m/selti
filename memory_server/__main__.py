@@ -13,6 +13,7 @@ from prometheus_client import generate_latest, REGISTRY, multiprocess, Collector
 from starlette.types import ASGIApp, Scope, Receive, Send
 
 from memory_server.config import settings
+from memory_server.logger import get_logger
 from memory_server.metrics import (
     HTTP_REQUESTS_TOTAL,
     HTTP_REQUEST_DURATION,
@@ -97,7 +98,13 @@ async def lifespan(app: FastAPI):
     state = get_state()
     try:
         app.state.pool = await state.get_pool()
-    except Exception:
+    except Exception as exc:
+        # Молчаливый отказ пула оставил бы /health красным без причины:
+        # фиксируем, но процесс не роняем (пул может подняться позже)
+        logger.exception(
+            "lifespan: postgres pool unavailable at startup",
+            extra={"error": str(exc), "error_type": type(exc).__name__},
+        )
         app.state.pool = None
 
     async with mcp_http_app.lifespan(app):
@@ -158,7 +165,7 @@ async def auth_middleware(request: Request, call_next):
     return Response(status_code=403, content="Forbidden")
 
 
-# ---- Middleware: correlation ID + HTTP-метрики ----
+# ---- Middleware: correlation ID + HTTP-метрики + access-лог ----
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
     request_id = str(uuid.uuid4())
@@ -171,13 +178,31 @@ async def metrics_middleware(request: Request, call_next):
     try:
         response: Response = await call_next(request)
     except Exception:
+        # Traceback залогирует uvicorn.error; здесь — только счётчик
         HTTP_REQUESTS_TOTAL.labels(method=method, endpoint=endpoint, status="500").inc()
         raise
 
     duration = time.monotonic() - start
+    duration_ms = round(duration * 1000, 1)
     status = str(response.status_code)
     HTTP_REQUESTS_TOTAL.labels(method=method, endpoint=endpoint, status=status).inc()
     HTTP_REQUEST_DURATION.labels(method=method, endpoint=endpoint).observe(duration)
+
+    # Access-лог (стандарт §4.1: вход/выход API обязателен; uvicorn
+    # access_log=False — единственный маркер запроса здесь).
+    # Уровень: DEBUG служебные пути, WARN медленные (>500ms), INFO прочие
+    log_extra = {
+        "method": method,
+        "path": endpoint,
+        "status": response.status_code,
+        "duration_ms": duration_ms,
+    }
+    if endpoint in _SERVICE_PATHS:
+        logger.debug("http_request_completed", extra=log_extra)
+    elif duration_ms > 500:
+        logger.warning("http_request_completed: slow", extra=log_extra)
+    else:
+        logger.info("http_request_completed", extra=log_extra)
 
     response.headers["X-Correlation-ID"] = request_id
     return response
@@ -199,6 +224,12 @@ app.add_middleware(
 # ---- Liveness: процесс жив, без проверок зависимостей ----
 # Readiness (PG/Redis/Celery) остаётся на /health — liveness не должен
 # падать из-за медленного бэкенда, иначе оркестратор убивает живой процесс
+
+logger = get_logger(__name__)
+
+# Шумные служебные пути (скрапы Prometheus, health-check оркестратора):
+# в access-логе — только DEBUG, чтобы не топить бизнес-события
+_SERVICE_PATHS = ("/health", "/live", "/metrics")
 @app.get("/live")
 async def live():
     return {"status": "alive", "server": settings.mcp_server_name}

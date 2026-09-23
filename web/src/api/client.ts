@@ -38,11 +38,17 @@ async function parseError(res: Response): Promise<ApiError> {
   return new ApiError(res.status, detail);
 }
 
-/** GET path as JSON with typed result; non-2xx → ApiError. */
+/** GET path as JSON with typed result; non-2xx → ApiError (logged to console). */
 export async function apiGet<T>(path: string, params?: URLSearchParams): Promise<T> {
   const res = await fetch(buildUrl(path, params), {
     headers: { Accept: "application/json", ...authHeaders() },
   });
-  if (!res.ok) throw await parseError(res);
+  if (!res.ok) {
+    const err = await parseError(res);
+    // Local console-only diagnostics (no remote sink by design);
+    // screens surface the error themselves via state blocks
+    console.error(`[api] ${res.status} ${path}: ${err.message}`);
+    throw err;
+  }
   return (await res.json()) as T;
 }

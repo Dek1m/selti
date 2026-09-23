@@ -8,8 +8,14 @@
 // segment: 1 = member of a hit cluster, 2 = the hit itself).
 // Distance fade + fog in the fragment stage melt the far field (§4.4).
 
+// Активные импульсы/всполохи на кадр: «единицы» по фидбек Мастера 22.09.
+// Единый источник правды для GLSL-массивов и JS-оркестратора (pulses.ts).
+export const PULSE_SLOTS = 2;
+export const FLASH_SLOTS = 2;
+
 export const STAR_VERTEX = /* glsl */ `
 attribute float aSize;       // importance 1..5
+attribute float aIndex;      // глобальный индекс звезды (матч всполохов)
 attribute vec3 aColor;       // namespace spectrum
 attribute float aFlags;      // bit0 = frozen, bit1 = погасшая (созвездие)
 attribute float aBfs;        // BFS level from selection (-1 = no selection)
@@ -22,6 +28,10 @@ uniform float uTime;
 uniform float uTwinkle;      // 0 when prefers-reduced-motion
 uniform float uDepthCap;     // M4: кап уровней BFS (99 = бесконечность)
 uniform float uFocusBlur;    // 1 = стеклянный расфокус невыбранных
+// всполохи «отдаёт энергию» (v2 импульсов): x — индекс звезды (<0 пусто),
+// y — момент старта (сек, шкала uTime); пишутся JS-оркестратором из одного
+// события spawn с импульсом ребра
+uniform vec2 uFlashes[${FLASH_SLOTS}];
 
 varying vec3 vColor;
 varying float vGlow;
@@ -36,6 +46,7 @@ varying float vTwinkleAmp;
 varying float vTwinkleFreq;
 varying float vBlur;
 varying float vSunCross;     // кроссфейд Points → 3D-солнце вблизи
+varying float vFlash;        // 0..1 затухающий всполох звезды-истока
 
 const float FADE_START = 1500.0;
 const float FADE_END = 3200.0; // == VIEW_SPHERE_R (стык сферы видимости)
@@ -80,12 +91,23 @@ void main() {
 
   vBlur = (uFocusBlur > 0.5 && level >= 1.0) ? 1.0 : 0.0;
 
+  // всполох звезды-истока в момент старта импульса: мгновенная атака,
+  // экспоненциальный спад ~0.5с (TAIL: 1/e за 0.18с, хвост до ~0.5с)
+  float flash = 0.0;
+  for (int i = 0; i < ${FLASH_SLOTS}; i++) {
+    float match = step(abs(aIndex - uFlashes[i].x), 0.5);
+    float age = uTime - uFlashes[i].y;
+    flash = max(flash, match * exp(-max(age, 0.0) * 5.5));
+  }
+  vFlash = flash;
+  sizePx *= 1.0 + flash * 1.7;
+
   gl_PointSize = clamp(sizePx, 3.0 * uPixelRatio, 128.0 * uPixelRatio);
   gl_Position = projectionMatrix * mvPosition;
 
   vColor = aColor;
   float glow = (aSize <= 0.0) ? 0.3 : 0.2 + clamp((aSize - 1.0) / 4.0, 0.0, 1.0) * 0.8;
-  vGlow = glow * highlightBoost;
+  vGlow = glow * highlightBoost * (1.0 + flash * 1.4);
 }
 `;
 
@@ -109,6 +131,7 @@ varying float vTwinkleAmp;
 varying float vTwinkleFreq;
 varying float vBlur;
 varying float vSunCross;
+varying float vFlash;
 
 void main() {
   vec2 uv = gl_PointCoord * 2.0 - 1.0;
@@ -118,6 +141,8 @@ void main() {
   float luma = dot(vColor, vec3(0.2126, 0.7152, 0.0722));
   vec3 color = mix(vColor, vec3(luma), vDesat);
   color = mix(color, uIceColor, vFrozen * 0.55);
+  // всполох подогревает цвет к white-hot (энергия уходит в импульс)
+  color = mix(color, vec3(1.0), vFlash * 0.5);
 
   // эталон EVE: чёткое яркое ядро ~55% диаметра + ЛЁГКИЙ маленький ореол;
   // при расфокусе ядро исчезает — остаётся мягкое пятно
@@ -143,6 +168,10 @@ void main() {
   // заметное перемигивание фоновых звёзд (±35% альфы), выбранная не мигает
   alpha *= 1.0 + vTwinkleAmp * sin(uTime * vTwinkleFreq + vTwinklePhase);
 
+  // всполох добавляет яркость поверх мигания (до glass/fade, чтобы дальние
+  // всполохи тоже гасились дистанцией честно)
+  alpha *= 1.0 + vFlash * 1.6;
+
   alpha *= vGlass * vFade;
   // кроссфейд с 3D-солнцем вблизи
   alpha *= vSunCross;
@@ -162,29 +191,29 @@ void main() {
 `;
 
 /**
- * Рёбра полного графа: LineSegments + кастомный шейдер (заказ Мастера
- * 22.09 «синаптические импульсы»). Базовый вид ребра повторяет прежний
- * LineBasicMaterial: градиент цвет(исток) → цвет(цель), сплошная линия
- * с фиксированной непрозрачностью слоя (uBaseAlpha). Поверх — РЕДКИЕ
- * световые импульсы: короткая яркая гауссова волна с затухающим хвостом
- * скользит вдоль ребра из конца в конец, как спайк по нервному синапсу.
- * Вся математика спайка — во фрагменте, только из uTime и per-edge seed:
- * ноль per-frame CPU-работы. uSpike = 0 (prefers-reduced-motion) выключает
- * импульсы полностью, базовый вид ребра не меняется.
+ * Рёбра полного графа: LineSegments + кастомный шейдер. Базовый вид
+ * повторяет прежний LineBasicMaterial: градиент цвет(исток) → цвет(цель),
+ * сплошная линия с фиксированной непрозрачностью слоя (uBaseAlpha).
+ * Поверх — редкие световые импульсы (v2, фидбек Мастера 22.09): расписание
+ * ведёт JS-оркестратор (pulses.ts) — на экране единицы импульсов, фазы
+ * вразнобой, часть рёбер не импульсирует вовсе. Импульс матчится по
+ * ГЛОБАЛЬНОМУ id ребра (aEdgeId), поэтому перезапись слотов буфера куллингом
+ * не переносит спайк на чужое ребро. uSpike = 0 (prefers-reduced-motion)
+ * выключает импульсы полностью, базовый вид ребра не меняется.
  */
 export const EDGE_VERTEX = /* glsl */ `
 attribute vec3 aColor;  // цвет конца ребра: namespace-спектр или спец-тип
 attribute float aT;     // 0 у истока, 1 у цели — интерполируется в vT
-attribute float aSeed;  // per-edge seed (хэш пары узлов), стабилен между куллингами
+attribute float aEdgeId; // глобальный индекс ребра в снапшоте (матч импульсов)
 
 varying vec3 vColor;
 varying float vT;
-varying float vSeed;
+varying float vEdgeId;
 
 void main() {
   vColor = aColor;
   vT = aT;
-  vSeed = aSeed;
+  vEdgeId = aEdgeId;
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }
 `;
@@ -196,68 +225,53 @@ uniform float uTime;
 uniform float uSpike;     // 1 = импульсы включены, 0 = prefers-reduced-motion
 uniform float uBaseAlpha; // базовая непрозрачность слоя (main 0.22 / sup 0.6 / con 0.75)
 uniform float uDim;       // расфокус при выбранной звезде: 0 нет, 0.7 = ×0.3
+// активные импульсы (пишет оркестратор раз в 1-3с, не каждый кадр):
+// x — edgeId (≤ -1.0 — слот пуст), y — старт (сек, шкала uTime),
+// z — длительность пробега (сек), w — направление (1 = к цели, 0 = к истоку)
+uniform vec4 uPulses[${PULSE_SLOTS}];
 
 varying vec3 vColor;
 varying float vT;
-varying float vSeed;
+varying float vEdgeId;
 
-// ── Калибровка синаптических импульсов (заказ Мастера 22.09) ──
-// РЕДКО: одно видимое ребро спайкует в среднем раз в SPIKE_INTERVAL секунд
-// (среднее 30 с → при сотнях рёбер одновременно светятся единицы).
-const float SPIKE_INTERVAL_MIN = 20.0; // сек между спайками одного ребра
-const float SPIKE_INTERVAL_MAX = 40.0;
-// длительность пробега; скорость = длина ребра / dur — рандомна per-импульс
-const float SPIKE_DURATION_MIN = 0.8; // сек
-const float SPIKE_DURATION_MAX = 1.5;
-const float SPIKE_SIGMA = 0.065;      // ширина гауссова пика (доля длины ребра)
-const float SPIKE_TAIL_DECAY = 16.0;  // спад хвоста позади пика (на 1/16 длины)
-const float SPIKE_TAIL_GAIN = 0.55;   // яркость хвоста относительно головы
-const float SPIKE_ALPHA = 0.55;       // аддитивная добавка альфы в пике
-const float SPIKE_WHITE_HEAT = 0.6;   // подогрев локального цвета ребра к белому
-const float SPIKE_BRIGHT_VAR = 0.25;  // лёгкая вариация яркости ±25%
-
-float hash11(float n) {
-  return fract(sin(n) * 43758.5453123);
-}
+// ── Калибровка импульса ──
+const float PULSE_SIGMA = 0.065;      // ширина гауссова пика (доля длины ребра)
+const float PULSE_TAIL_DECAY = 16.0;  // спад хвоста позади пика (на 1/16 длины)
+const float PULSE_TAIL_GAIN = 0.55;   // яркость хвоста относительно головы
+const float PULSE_ALPHA = 0.55;       // аддитивная добавка альфы в пике
+const float PULSE_WHITE_HEAT = 0.6;   // подогрев локального цвета ребра к белому
 
 void main() {
-  // расписание детерминировано из seed: период и момент старта внутри него
-  float interval = mix(SPIKE_INTERVAL_MIN, SPIKE_INTERVAL_MAX, hash11(vSeed * 71.13));
-  float phase = hash11(vSeed * 137.9) * interval;
+  float spike = 0.0;
+  for (int i = 0; i < ${PULSE_SLOTS}; i++) {
+    float match = step(abs(vEdgeId - uPulses[i].x), 0.5);
+    float age = uTime - uPulses[i].y;
+    float dur = max(uPulses[i].z, 0.0001);
+    float isRunning = step(0.0, age) * step(age, dur);
+    float p = clamp(age / dur, 0.0, 1.0);
 
-  // per-импульсные параметры (длительность/направление/яркость) сменяются
-  // от цикла к циклу — тоже детерминированно: seed + номер цикла
-  float cyc = floor((uTime + phase) / interval);
-  float hDur = hash11(vSeed * 19.7 + cyc * 3.71);
-  float hDir = hash11(vSeed * 47.3 + cyc * 8.53);
-  float hAmp = hash11(vSeed * 89.1 + cyc * 5.29);
+    // направление: к цели (A→B) или к истоку (B→A); один импульс — одна
+    // линия, бьёт строго в одну сторону
+    float toB = uPulses[i].w;
+    float peak = mix(1.0 - p, p, toB);
 
-  float lt = mod(uTime + phase, interval); // локальное время цикла
-  float dur = mix(SPIKE_DURATION_MIN, SPIKE_DURATION_MAX, hDur);
-  float p = lt / dur;                      // прогресс пробега 0..1
-  float active = step(lt, dur);            // вне пробега ребро «спит»
+    // голова — мягкий гауссов пик; хвост — короткий экспоненциальный,
+    // тянется строго ПОЗАДИ движения
+    float d = vT - peak;
+    float head = exp(-d * d / (2.0 * PULSE_SIGMA * PULSE_SIGMA));
+    float behind = (peak - vT) * (toB * 2.0 - 1.0);
+    float tail = exp(-max(behind, 0.0) * PULSE_TAIL_DECAY) * step(0.0, behind);
 
-  // направление: к цели (A→B) или к истоку (B→A)
-  float toB = step(0.5, hDir);
-  float peak = mix(1.0 - p, p, toB);
-
-  // голова — мягкий гауссов пик (не резкая точка); хвост — короткий
-  // экспоненциальный, тянется строго ПОЗАДИ движения
-  float d = vT - peak;
-  float head = exp(-d * d / (2.0 * SPIKE_SIGMA * SPIKE_SIGMA));
-  float behind = (peak - vT) * (toB * 2.0 - 1.0);
-  float tail = exp(-max(behind, 0.0) * SPIKE_TAIL_DECAY) * step(0.0, behind);
-
-  // мягкое появление без вспышки на узле; у конца хвост тает естественно
-  float env = smoothstep(0.0, 0.18, p);
-  float amp = SPIKE_ALPHA * (1.0 + SPIKE_BRIGHT_VAR * (hAmp * 2.0 - 1.0));
-  float spike = (head + tail * SPIKE_TAIL_GAIN) * amp * env * active * uSpike;
+    // мягкое появление без вспышки на узле; у конца хвост тает естественно
+    float env = smoothstep(0.0, 0.18, p);
+    spike += (head + tail * PULSE_TAIL_GAIN) * PULSE_ALPHA * env * isRunning * match;
+  }
+  spike = min(spike * uSpike, 1.0);
 
   // самостоятельный аддитивный слой поверх базового вида: цвет подогревается
   // к белому от ЛОКАЛЬНОГО цвета градиента — namespace-палитра не ломается
-  float shape = clamp(spike, 0.0, 1.0);
-  vec3 hot = mix(vColor, vec3(1.0), SPIKE_WHITE_HEAT);
-  vec3 color = mix(vColor, hot, shape);
+  vec3 hot = mix(vColor, vec3(1.0), PULSE_WHITE_HEAT);
+  vec3 color = mix(vColor, hot, spike);
   float alpha = (uBaseAlpha + spike) * (1.0 - uDim);
   gl_FragColor = vec4(color, min(alpha, 1.0));
 }
