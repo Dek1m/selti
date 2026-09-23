@@ -297,7 +297,8 @@ export function FullMapLayer({ mode = "full", constellationSnapshot = null, quer
   return (
     <div className="map-root" role="application" aria-label="Полная карта памяти в 3D">
       <div ref={containerRef} className="map-canvas-host" />
-      <div ref={labelLayerRef} className="map-labels" aria-hidden="true" />
+      {/* aria-hidden снят: подписи кликабельны (выбор + фокус камеры) */}
+      <div ref={labelLayerRef} className="map-labels" />
 
       {tooltip && (
         <div

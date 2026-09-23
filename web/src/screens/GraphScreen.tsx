@@ -19,6 +19,7 @@ import {
   type GraphNodeRecord,
 } from "../lib/graph";
 import { drawStarfield } from "../lib/starfield";
+import { getSearchQuery, setSearchQuery } from "../lib/searchMemory";
 import type { RawMapSnapshot } from "../lib/fullmap/types";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 
@@ -120,7 +121,9 @@ function modelToSnapshot(model: GraphModel): RawMapSnapshot {
 
 export function GraphScreen() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const [input, setInput] = useState(searchParams.get("q") ?? "");
+  // запрос переживает переходы экранов (фидбек Мастера): шэрлинк ?q=
+  // приоритетнее, иначе поле восстанавливается из общего хранилища
+  const [input, setInput] = useState(() => searchParams.get("q") ?? getSearchQuery());
   const query = useDebouncedValue(input, 300).trim();
   const [selected, setSelected] = useState<string | null>(null);
   const [legendOpen, setLegendOpen] = useState(true);
@@ -148,6 +151,10 @@ export function GraphScreen() {
     if (next.toString() !== searchParams.toString()) setSearchParams(next, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [query]);
+
+  // общий источник запроса с экраном Поиска: пишем на каждый ввод (запись
+  // дешёвая, debounce не нужен) — восстановление уже сделано ленивым стейтом
+  useEffect(() => setSearchQuery(input), [input]);
 
   // New query → new constellation, selection drops
   useEffect(() => setSelected(null), [query]);

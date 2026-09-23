@@ -10,6 +10,7 @@ import { GranulePanel } from "../components/GranulePanel";
 import { ResultsSkeleton } from "../components/Skeletons";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { useUrlSync } from "../hooks/useUrlSync";
+import { getSearchQuery, setSearchQuery } from "../lib/searchMemory";
 import { useFilters } from "../store/filters";
 
 // Real-query examples (§4.1) — clicked, they fill the hero search
@@ -107,6 +108,16 @@ export function SearchScreen({ panelId }: { panelId?: string }) {
   }, [activeIndex]);
 
   const heroMode = !submitted && !panelId;
+
+  // ── запрос переживает переходы экранов (фидбек Мастера) ──
+  // restore объявлен ДО записи: на маунте сначала читаем общий источник,
+  // лишь потом write-эффект (с "" этого рендера) чистит ключ — после
+  // ре-рендера с восстановленным текстом ключ вернётся на место
+  useEffect(() => {
+    const saved = getSearchQuery();
+    if (saved && !useFilters.getState().query) useFilters.getState().setQuery(saved);
+  }, []);
+  useEffect(() => setSearchQuery(query), [query]);
 
   return (
     <div className={heroMode ? "stage hero-mode" : "stage"}>

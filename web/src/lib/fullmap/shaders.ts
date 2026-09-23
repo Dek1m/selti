@@ -39,6 +39,7 @@ varying float vGlass;
 varying float vDesat;
 varying float vFrozen;
 varying float vDimmed;
+varying float vSel;         // 1 = эта звезда выбрана (BFS level 0)
 varying float vHighlight;
 varying float vFade;
 varying float vTwinklePhase;
@@ -75,6 +76,8 @@ void main() {
   }
   vGlass = glass;
   vDesat = (level < 0.0) ? 0.0 : smoothstep(0.0, 6.0, level) * 0.85;
+  // выбранная — ровно level 0 (BFS-уровни целые): без == на float
+  vSel = step(-0.5, level) * step(level, 0.5);
 
   vHighlight = aHighlight;
   float highlightBoost = (aHighlight >= 2.0) ? 1.7 : (aHighlight >= 1.0) ? 1.3 : 1.0;
@@ -124,6 +127,7 @@ varying float vGlass;
 varying float vDesat;
 varying float vFrozen;
 varying float vDimmed;
+varying float vSel;
 varying float vHighlight;
 varying float vFade;
 varying float vTwinklePhase;
@@ -141,6 +145,9 @@ void main() {
   float luma = dot(vColor, vec3(0.2126, 0.7152, 0.0722));
   vec3 color = mix(vColor, vec3(luma), vDesat);
   color = mix(color, uIceColor, vFrozen * 0.55);
+  // погасшая гранула: тусклая приглушённая ТОЧКА без колец и свечения —
+  // полая форма изъята (фидбек Мастера), лёд/дезатурация остаются
+  color = mix(color, vec3(luma), vDimmed * 0.45);
   // всполох подогревает цвет к white-hot (энергия уходит в импульс)
   color = mix(color, vec3(1.0), vFlash * 0.5);
 
@@ -165,6 +172,15 @@ void main() {
     : 0.0;
   alpha = max(alpha, hitRing * 0.9);
 
+  // выбранная гранула: ровное СТАБИЛЬНОЕ кольцо-подсветка у кромки —
+  // язык хромосферы солнц; не мерцает (twinkle у level 0 подавлен в
+  // вершинном), гаснет только дистанцией и кроссфейдом к 3D-солнцу
+  float selRing = vSel * smoothstep(0.55, 0.64, dist) * (1.0 - smoothstep(0.72, 0.92, dist));
+  alpha = max(alpha, selRing * 0.95);
+
+  // погасшая — тусклая точка: приглушение до twinkle, мерцает как обычная
+  alpha *= 1.0 - vDimmed * 0.5;
+
   // заметное перемигивание фоновых звёзд (±35% альфы), выбранная не мигает
   alpha *= 1.0 + vTwinkleAmp * sin(uTime * vTwinkleFreq + vTwinklePhase);
 
@@ -176,6 +192,11 @@ void main() {
   // кроссфейд с 3D-солнцем вблизи
   alpha *= vSunCross;
 
+  // цвет кольца выбора — ДО hue-перелива: кольцо ровное, без калейдоскопа;
+  // white-hot внутренний край → тёплый цвет слоя наружу (как HALO солнц)
+  float selHeat = 1.0 - smoothstep(0.6, 0.92, dist);
+  vec3 selCol = mix(color, vec3(1.0), 0.55 * selHeat);
+
   // тонкий hue-перелив ореола (только вне ядра — «не рэйв»)
   float hueW = (0.15 + 0.15 * sin(uTime * 0.8 + vTwinklePhase)) * haloT;
   vec3 shifted = vec3(color.b, color.r, color.g);
@@ -186,6 +207,7 @@ void main() {
   // кольцо хита с тёплым white-hot нагревом — цвет слоя остаётся читаемым
   vec3 ringCol = mix(color, vec3(1.0), 0.45);
   outCol = mix(outCol, ringCol, hitRing);
+  outCol = mix(outCol, selCol, selRing);
   gl_FragColor = vec4(outCol * alpha, alpha);
 }
 `;

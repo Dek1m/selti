@@ -1153,12 +1153,33 @@ export class FullMapScene {
   /** Отступ подписи от правой кромки диска звезды (правило Мастера). */
   private static readonly LABEL_EDGE_GAP_PX = 5;
 
+  /**
+   * Клик по подписи = выбор гранулы + фокус камеры (фидбек Мастера):
+   * тот же коллбек onSelect, что у канвас-клика, камеру ведёт focusNode
+   * (умеренный подлёт — с лейбла часто прыжок издалека). Лейблы лежат в
+   * отдельном DOM-слое-сиблинге канваса, событие до OrbitControls не
+   * доходит — перехват drag исключён конструктивно.
+   */
+  private onLabelClick = (event: MouseEvent): void => {
+    const index = Number((event.currentTarget as HTMLDivElement).dataset.index);
+    if (!this.packed || !Number.isInteger(index) || index < 0 || index >= this.packed.nodeCount) return;
+    // до-позиция — как у канвас-клика: клик в пустоту позже вернёт рамку
+    if (!this.framedPrev) {
+      this.framedPrev = { pos: this.camera.position.clone(), target: this.controls.target.clone() };
+    }
+    this.focusNode(index);
+    this.callbacks.onSelect({ index });
+  };
+
   private renderLabels(picks: Array<{ index: number; x: number; y: number; radiusPx: number }>): void {
     if (!this.packed) return;
     const viewW = this.renderer.domElement.clientWidth;
     while (this.labels.length < picks.length) {
       const div = document.createElement('div');
       div.className = 'map-label';
+      // пул живёт дольше одного набора: индекс узла читается из dataset
+      // в момент клика, обработчик вешается один раз
+      div.addEventListener('click', this.onLabelClick);
       this.labelLayer.appendChild(div);
       this.labels.push(div);
     }
@@ -1166,9 +1187,11 @@ export class FullMapScene {
       const pick = picks[i];
       if (!pick) {
         div.style.display = 'none';
+        delete div.dataset.index; // Number('') === 0 — узел 0 по ошибке
         return;
       }
       div.textContent = unpackNodeString(this.packed!, pick.index, 1);
+      div.dataset.index = String(pick.index);
       div.style.display = 'block';
       // подпись СПРАВА от кромки диска: x = кромка + 5px, вертикаль — центр
       // звезды; у правого края окна флип влево (кромка − 5px, якорь справа)
