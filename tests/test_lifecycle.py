@@ -267,6 +267,16 @@ class TestServiceLifecycle:
             mock_service.runtime.get("stale_threshold"), mock_service.runtime.get("stale_days")
         )
 
+    def test_decay_sql_does_not_touch_updated_at(self):
+        """Контракт (решение Мастера 23.09): затухание меняет только confidence.
+        Ежедневный штамп updated_at обнулял возрастной сигнал потребителей
+        ORDER BY updated_at — ранжирование облачка «свежее поднимается»
+        переставало различать возраст после первой ночи батча."""
+        from memory_server.db.queries import DECAY_CONFIDENCE
+
+        assert "updated_at" not in DECAY_CONFIDENCE
+        assert "confidence = GREATEST" in DECAY_CONFIDENCE
+
     @pytest.mark.asyncio
     async def test_gc_disabled_by_default_never_deletes(self, mock_service):
         """V3.1 стоп-кран (F ADR-019, дыра 7): дефолт — purge выключен,

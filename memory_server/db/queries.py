@@ -384,10 +384,14 @@ RETRACT_MEMORY = """
 # ниже floor не сползаем — там зона mark_stale/ручной ревизии. GREATEST
 # обязателен: WHERE confidence > floor не спасает от одношагового
 # проседания (0.1005 × 0.995 = 0.0999975 < 0.1).
+# updated_at НЕ трогаем (решение Мастера 23.09): затухание не меняет контент,
+# а ежедневный штамп updated_at обнулял возрастной сигнал потребителей
+# ORDER BY updated_at — в т.ч. ранжирования облачка (_rank_candidates,
+# «свежее поднимается»): после первой ночи батча все гранулы выглядели
+# однодневными, и облако застывало по голой importance.
 DECAY_CONFIDENCE = """
     UPDATE memories AS m
-    SET confidence = GREATEST(m.confidence * COALESCE(r.rate, $3::float8), $4::float8),
-        updated_at = now()
+    SET confidence = GREATEST(m.confidence * COALESCE(r.rate, $3::float8), $4::float8)
     FROM namespaces n
     LEFT JOIN unnest($1::text[], $2::float8[]) AS r(uid, rate) ON r.uid = n.uid
     WHERE m.namespace_id = n.id
