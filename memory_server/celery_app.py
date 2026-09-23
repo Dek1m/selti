@@ -13,6 +13,7 @@
 """
 
 import logging
+import os
 from time import monotonic
 
 from celery import Celery
@@ -177,6 +178,24 @@ class RuntimeScheduler(Scheduler):
     sync_every = 30.0
     _current_raw: dict | None = None
 
+    # Heartbeat-файл: mtime обновляется после КАЖДОГО успешного тика.
+    # In-memory планировщик не пишет /data/celerybeat-schedule-wal (файл
+    # sqlite-бэкенда PersistentScheduler), на который смотрел прод-healthcheck.
+    # Healthcheck «mtime beat-heartbeat < 300s» ловит и падение тиков:
+    # исключение в родительском tick() → файл не трогается → красный.
+    heartbeat_file = os.environ.get("BEAT_HEARTBEAT_FILE", "/data/beat-heartbeat")
+
+    def _touch_heartbeat(self) -> None:
+        try:
+            with open(self.heartbeat_file, "ab"):
+                os.utime(self.heartbeat_file, None)
+        except OSError as exc:
+            # Не роняем beat из-за health-маркера (read-only FS и т.п.)
+            logger.warning(
+                "beat: heartbeat file not writable",
+                extra={"path": self.heartbeat_file, "error": str(exc)[:120]},
+            )
+
     def setup_schedule(self) -> None:
         self._current_raw = None
         self.sync()
@@ -206,7 +225,10 @@ class RuntimeScheduler(Scheduler):
         # event_timeout первым аргументом подменяла event_t на None →
         # "'NoneType' object is not callable" на каждом due-тике beat
         # (прод-инцидент 23.09). Проксируем аргументы прозрачно, без подмены.
-        return super().tick(*args, **kwargs)
+        result = super().tick(*args, **kwargs)
+        # после успешного тика (исключение родителя = маркер не обновится)
+        self._touch_heartbeat()
+        return result
 
 
 # Fallback-расписание из дефолтов реестра (без IO) — актуализируется

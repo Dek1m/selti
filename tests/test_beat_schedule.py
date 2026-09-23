@@ -123,3 +123,39 @@ class TestRuntimeSchedulerTick:
         # родителя не подменены
         assert captured["args"] == (scheduler,)
         assert captured["kwargs"] == {}
+
+
+class TestBeatHeartbeat:
+    def _scheduler(self, tmp_path, monkeypatch) -> RuntimeScheduler:
+        monkeypatch.setenv("BEAT_HEARTBEAT_FILE", str(tmp_path / "beat-heartbeat"))
+        # атрибут класса читается при import — подменяем на инстансе
+        scheduler = RuntimeScheduler(app=MagicMock())
+        scheduler.heartbeat_file = str(tmp_path / "beat-heartbeat")
+        scheduler.should_sync = lambda: False  # type: ignore[method-assign]
+        return scheduler
+
+    def test_successful_tick_touches_heartbeat(self, tmp_path, monkeypatch):
+        """Прод-инцидент 23.09: in-memory RuntimeScheduler не пишет
+        /data/celerybeat-schedule-wal — healthcheck по WAL навечно красный.
+        Маркер: mtime beat-heartbeat обновляется после успешного тика."""
+        from celery.beat import Scheduler
+
+        hb = tmp_path / "beat-heartbeat"
+        scheduler = self._scheduler(tmp_path, monkeypatch)
+        with patch.object(Scheduler, "tick", return_value=0.5):
+            scheduler.tick()
+        assert hb.exists()
+
+    def test_crashing_parent_tick_does_not_touch_heartbeat(self, tmp_path, monkeypatch):
+        from celery.beat import Scheduler
+
+        hb = tmp_path / "beat-heartbeat"
+        scheduler = self._scheduler(tmp_path, monkeypatch)
+
+        def crashing_tick(*args, **kwargs):
+            raise TypeError("'NoneType' object is not callable")
+
+        with patch.object(Scheduler, "tick", crashing_tick):
+            with pytest.raises(TypeError):
+                scheduler.tick()
+        assert not hb.exists()
