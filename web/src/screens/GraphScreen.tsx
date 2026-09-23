@@ -70,7 +70,15 @@ function StarfieldLayer() {
  * (JSON здесь не участвует, снапшот живёт в памяти): движок подложит
  * под такие узлы детерминированный fallback.
  */
+let __snapIdCounter = 0;
+
 function modelToSnapshot(model: GraphModel): RawMapSnapshot {
+  const snapshot = modelToSnapshotInner(model);
+  (snapshot as unknown as { __id?: number }).__id = ++__snapIdCounter;
+  return snapshot;
+}
+
+function modelToSnapshotInner(model: GraphModel): RawMapSnapshot {
   const namespaces: string[] = [];
   const nsIndex = new Map<string, number>();
   const nsIdxOf = (uid: string | null): number => {
