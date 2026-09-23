@@ -196,11 +196,17 @@ class RuntimeScheduler(Scheduler):
             extra={"entries": len(schedule), "changed": True},
         )
 
-    def tick(self, event_timeout=None):
+    def tick(self, *args: object, **kwargs: object) -> float:
         if self.should_sync():
             self.sync()
             self.last_sync = monotonic()
-        return super().tick(event_timeout)
+        # celery 5.6: Scheduler.tick(event_t=event_t, min=min, heappop=...,
+        # heappush=...) — все параметры это локальные замыкания heapq,
+        # позиционного event_timeout у родителя НЕТ. Прошлая передача
+        # event_timeout первым аргументом подменяла event_t на None →
+        # "'NoneType' object is not callable" на каждом due-тике beat
+        # (прод-инцидент 23.09). Проксируем аргументы прозрачно, без подмены.
+        return super().tick(*args, **kwargs)
 
 
 # Fallback-расписание из дефолтов реестра (без IO) — актуализируется

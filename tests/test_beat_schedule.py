@@ -97,3 +97,29 @@ class TestRuntimeSchedulerSync:
             "type": "interval",
             "seconds": 900,
         }
+
+
+class TestRuntimeSchedulerTick:
+    def test_tick_does_not_shadow_parent_event_t(self):
+        """Регрессия прод-инцидента 23.09: tick передавал event_timeout=None
+        ПЕРВЫМ позиционным аргументом родителю, у которого celery 5.6
+        первым параметром идёт event_t (локальное замыкание heapq) —
+        heappush(event_t(...)) падал "'NoneType' object is not callable"
+        на каждом due-тике beat."""
+        from celery.beat import Scheduler
+
+        scheduler, _ = RuntimeScheduler(app=MagicMock()), None
+        scheduler.should_sync = lambda: False  # type: ignore[method-assign]
+        captured: dict = {}
+
+        def fake_parent_tick(*args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return 0.5
+
+        with patch.object(Scheduler, "tick", fake_parent_tick):
+            assert scheduler.tick() == 0.5
+        # кроме неявного self — ничего: event_t/min/heappop/heappush
+        # родителя не подменены
+        assert captured["args"] == (scheduler,)
+        assert captured["kwargs"] == {}
