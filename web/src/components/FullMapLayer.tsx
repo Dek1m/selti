@@ -11,7 +11,6 @@ import { searchGranules, type SearchFilters } from "../api/selti";
 import { FullMapScene, type ScenePalette } from "../lib/fullmap/scene";
 import { packSnapshot, unpackNodeString } from "../lib/fullmap/pack";
 import { CONSTELLATION_LAYOUT, FULL_VOLUME } from "../lib/fullmap/layout";
-import { flyLog } from "../lib/fullmap/scene";
 import type { PackedMapSnapshot, RawMapSnapshot } from "../lib/fullmap/types";
 import { hslToRgb, namespaceColor, resolveCssColor } from "../lib/colors";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
@@ -114,9 +113,7 @@ export function FullMapLayer({ mode = "full", constellationSnapshot = null, quer
   };
 
   // ── snapshot load (worker) + scene lifetime ──
-  flyLog("render: snap " + (constellationSnapshot ? "nodes=" + constellationSnapshot.nodes.length + " id=" + (constellationSnapshot as unknown as { __id?: number }).__id : "null"));
   useEffect(() => {
-    flyLog("EFFECT RUN mode=" + mode);
     const container = containerRef.current;
     const labelLayer = labelLayerRef.current;
     if (!container || !labelLayer) return;
@@ -164,7 +161,6 @@ export function FullMapLayer({ mode = "full", constellationSnapshot = null, quer
     sceneRef.current = scene;
 
     if (isConstellation) {
-      flyLog("constellation branch: packing snapshot");
       // созвездие: данные уже собраны GraphScreen'ом — пакуем на main thread
       // (120 узлов — мгновенно) и грузим тем же движком в компактном объёме
       if (!constellationSnapshot) {

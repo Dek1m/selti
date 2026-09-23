@@ -70,15 +70,7 @@ function StarfieldLayer() {
  * (JSON здесь не участвует, снапшот живёт в памяти): движок подложит
  * под такие узлы детерминированный fallback.
  */
-let __snapIdCounter = 0;
-
 function modelToSnapshot(model: GraphModel): RawMapSnapshot {
-  const snapshot = modelToSnapshotInner(model);
-  (snapshot as unknown as { __id?: number }).__id = ++__snapIdCounter;
-  return snapshot;
-}
-
-function modelToSnapshotInner(model: GraphModel): RawMapSnapshot {
   const namespaces: string[] = [];
   const nsIndex = new Map<string, number>();
   const nsIdxOf = (uid: string | null): number => {
@@ -237,11 +229,6 @@ export function GraphScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [model, strangers, strangersStamp]);
 
-  // созвездие → снапшот для общего 3D-движка (seed стабилен — детерминизм)
-  const constellationSnapshot = useMemo(() => {
-    if (!enrichedModel || enrichedModel.nodes.length === 0) return null;
-    return modelToSnapshot(enrichedModel);
-  }, [enrichedModel]);
 
   // Region map: namespaces present in the current constellation + counts
   const regions = useMemo(() => {
@@ -269,16 +256,38 @@ export function GraphScreen() {
   // модели (простота: скрытые слои просто не отдаются в снапшот).
   // Индексы рёбер перемапливаются — filter сжимает массив узлов, старые
   // индексы указывали бы на чужие узлы (рендерный баг скрытых слоёв).
-  const constellationForEngine = useMemo(() => {
-    if (!constellationSnapshot) return null;
-    if (hiddenLayers.size === 0) return constellationSnapshot;
-    const keepIds = new Set(
-      enrichedModel
-        ? enrichedModel.nodes.filter((node) => !hiddenLayers.has(node.namespace ?? "default")).map((node) => node.id)
-        : [],
-    );
-    return filterSnapshotLayers(constellationSnapshot, keepIds);
-  }, [constellationSnapshot, hiddenLayers, enrichedModel]);
+  // Сигнатурная мемоизация (фидбек Мастера 23.09: «созвездие перезагружается
+  // при клике»): enrichedModel дрейфует между рендерами (react-query-строки),
+  // и перемонтирование сцены на каждый рендер сбрасывало камеру и убивало
+  // полёт к звезде. Сцена трогается ТОЛЬКО при реальном изменении набора
+  // узлов/слоёв (сигнатура), а не при каждом рендере.
+  const constellationBuildRef = useRef<{ sig: string; snapshot: RawMapSnapshot | null }>({
+    sig: "",
+    snapshot: null,
+  });
+  const constellationSignature = JSON.stringify([
+    enrichedModel?.nodes.map((n) => [n.id, n.namespace ?? ""]) ?? [],
+    [...hiddenLayers].sort(),
+  ]);
+  if (constellationBuildRef.current.sig !== constellationSignature) {
+    let built: RawMapSnapshot | null = null;
+    if (enrichedModel && enrichedModel.nodes.length > 0) {
+      const base = modelToSnapshot(enrichedModel);
+      built =
+        hiddenLayers.size === 0
+          ? base
+          : filterSnapshotLayers(
+              base,
+              new Set(
+                enrichedModel.nodes
+                  .filter((node) => !hiddenLayers.has(node.namespace ?? "default"))
+                  .map((node) => node.id),
+              ),
+            );
+    }
+    constellationBuildRef.current = { sig: constellationSignature, snapshot: built };
+  }
+  const constellationForEngine = constellationBuildRef.current.snapshot;
 
   const reset = () => {
     setInput("");
