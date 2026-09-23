@@ -835,7 +835,12 @@ export class FullMapScene {
     const rect = this.renderer.domElement.getBoundingClientRect();
     const a = new THREE.Vector3();
     let best = -1;
-    let bestScore = PICK_RADIUS_PX;
+    // nearest-with-threshold: порог индивидуален — не меньше PICK_RADIUS_PX,
+    // но и не меньше всей площади звезды + 8px. Фиксированные 12px ловили
+    // только близкие/крупные звёзды: в созвездии клик мимо мелкой звезды
+    // считался «кликом в пустоту» и откатывал камеру на прежнюю рамку
+    // (фидбек Мастера 23.09: «созвездие перезагружается, не наезжает»).
+    let bestScore = Number.POSITIVE_INFINITY;
 
     // только отрисованные звёзды: тултип на куллнутом узле — ложный шанс
     for (let k = 0; k < this.nodeVisibleCount; k++) {
@@ -847,7 +852,8 @@ export class FullMapScene {
       const sx = ((a.x + 1) / 2) * rect.width;
       const sy = ((1 - a.y) / 2) * rect.height;
       const distPx = Math.hypot(sx - this.pointerScreen.x, sy - this.pointerScreen.y);
-      if (distPx < bestScore) {
+      const threshold = Math.max(PICK_RADIUS_PX, this.starScreenRadiusPx(i) + 8);
+      if (distPx <= threshold && distPx < bestScore) {
         bestScore = distPx;
         best = i;
       }
