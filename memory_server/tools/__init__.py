@@ -13,4 +13,6 @@ TOOL_MODULES: tuple[str, ...] = (
     "memory_server.tools.context_tools",
     # TODO(Фаза 0/3): реестр проектов — CRUD, семантический поиск по Qdrant-коллекции
     "memory_server.tools.project_tools",
+    # System One: рефлекс-слой Open-Jev-2B (прямой HTTP, без Celery — stateless)
+    "memory_server.tools.jev_tools",
 )

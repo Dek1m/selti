@@ -58,3 +58,15 @@ class VectorStoreError(MemoryError):
 
     def __init__(self, message: str):
         super().__init__(message)
+
+
+class JevServiceError(MemoryError):
+    """Decision-сервис Open-Jev-2B (System One) недоступен или ответил ошибкой.
+
+    Слой рефлексов (приказ Мастера 23.09): тулы jev_* обязаны падать
+    этой ошибкой наружу — молчаливый дефолт решений запрещён, агент
+    должен видеть, что рефлекс-слой отказал, и решать сам.
+    """
+
+    def __init__(self, message: str):
+        super().__init__(message)

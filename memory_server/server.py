@@ -51,6 +51,11 @@ async def lifespan(server: FastMCP):
     try:
         yield
     finally:
+        # httpx-клиент jev_* тулов (System One) — закрыть до смерти loop.
+        # Late import: jev_tools импортирует mcp отсюда — в шапке был бы цикл.
+        from memory_server.tools.jev_tools import close_jev_client
+
+        await close_jev_client()
         if multiprocessing.current_process().name == "MainProcess":
             logger.info("Memory server shutdown complete")
 

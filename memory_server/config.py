@@ -202,6 +202,13 @@ class Settings(BaseSettings):
 
     api_key: str = ""
 
+    # ── System One (Open-Jev-2B): слой рефлексов, приказ Мастера 23.09 ──
+    # Фундамент (env-only, вне реестра app_settings — адрес и секрет):
+    # docker-контейнер decision-сервиса, 7860 внутри → 8100 хоста.
+    # Пустой access_key = запрос без Authorization (локальный инстанс).
+    jev_base_url: str = "http://host.docker.internal:8100"
+    jev_access_key: str = ""
+
     # ── Полная карта 3D (PLAN_FULL_MAP_3D, M1/M2) ──
     # Серверная раскладка: igraph DrL dim=3 → нормировка в куб →
     # min-distance-релаксация. Координаты целые в [-bbox, bbox]³.
