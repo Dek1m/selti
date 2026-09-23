@@ -107,6 +107,16 @@ async def lifespan(app: FastAPI):
         )
         app.state.pool = None
 
+    # Прогрев runtime-снапшота (Ф2): env > БД > дефолт + LISTEN settings_changed.
+    # БД недоступна → дефолты + WARN внутри get_runtime_config, процесс живёт
+    try:
+        await state.get_runtime_config()
+    except Exception as exc:
+        logger.warning(
+            "lifespan: runtime config warmup failed (defaults in effect)",
+            extra={"error": str(exc), "error_type": type(exc).__name__},
+        )
+
     async with mcp_http_app.lifespan(app):
         try:
             yield
@@ -131,6 +141,10 @@ app.include_router(projects_router)
 # ---- REST API: веб-морда (Фаза 5.1) — все операции через celery_call-мост ----
 from memory_server.api.web import is_api_authorized, router as web_router
 app.include_router(web_router)
+
+# ---- REST API: конфигурация (Ф2) — app_settings + профили ----
+from memory_server.api.settings import router as settings_router
+app.include_router(settings_router)
 
 
 # ---- Middleware: аутентификация ----

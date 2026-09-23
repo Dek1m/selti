@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 
 from memory_server.config import Settings
+from memory_server.runtime_config import RuntimeConfig
 from memory_server.db import queries as ms_q
 from memory_server.memory import galactic_layout as gl
 from memory_server.memory import map_service as ms
@@ -486,7 +487,7 @@ def make_galaxy_service(pool, redis):
         pool=pool,
         redis_provider=redis_provider,
         project_repository=MagicMock(),
-        config=Settings(),
+        runtime=RuntimeConfig(db_values={}),
     )
 
 

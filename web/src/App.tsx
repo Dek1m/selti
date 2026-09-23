@@ -3,6 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes, useParams } from "react-router"
 import { Topbar } from "./components/Topbar";
 import { SearchScreen } from "./screens/SearchScreen";
 import { ProjectsScreen } from "./screens/ProjectsScreen";
+import { SettingsScreen } from "./screens/SettingsScreen";
 import { StatsScreen } from "./screens/StatsScreen";
 
 // sigma + graphology weigh ~100KB gz — the constellation loads on demand
@@ -47,6 +48,7 @@ export default function App() {
         />
         <Route path="/projects" element={<ProjectsScreen />} />
         <Route path="/stats" element={<StatsScreen />} />
+        <Route path="/settings" element={<SettingsScreen />} />
         <Route path="*" element={<Navigate to="/search" replace />} />
       </Routes>
     </BrowserRouter>

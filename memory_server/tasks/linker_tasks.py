@@ -21,7 +21,6 @@ from typing import Any
 
 from celery import shared_task
 
-from memory_server.config import settings
 from memory_server.logger import get_logger
 from memory_server.state import get_state
 from memory_server.tasks.async_bridge import run_async
@@ -45,7 +44,7 @@ def _warn_l2_no_llm_once() -> None:
     if _l2_mode_warned:
         return
     _l2_mode_warned = True
-    if settings.linker_l2_manual:
+    if get_state().get_runtime_config_sync().get("linker_l2_manual"):
         logger.warning(
             "linker: L2 in MANUAL mode (linker_llm_base_url is empty) — "
             "queue fills for memory_linker_review/memory_linker_verdict "
@@ -66,9 +65,10 @@ def enqueue_link(granule_id: str) -> None:
     (route по имени задачи есть в celery_app.task_routes, но exec-options
     надёжнее — паттерн документирован в celery_app.py).
     """
-    if not settings.linker_enabled:
+    runtime = get_state().get_runtime_config_sync()
+    if not runtime.get("linker_enabled"):
         return
-    if not settings.linker_llm_base_url:
+    if not runtime.get("linker_llm_base_url"):
         _warn_l2_no_llm_once()
     try:
         from memory_server.celery_app import app

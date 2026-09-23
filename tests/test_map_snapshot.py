@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from memory_server.config import Settings
+from memory_server.runtime_config import RuntimeConfig
 from memory_server.db import queries as q
 from memory_server.memory import map_service as ms
 from memory_server.memory.map_service import MapService, build_snapshot, truncate_preview
@@ -173,7 +174,7 @@ def make_service(pool, redis, **config_overrides):
         pool=pool,
         redis_provider=redis_provider,
         project_repository=project_repo,
-        config=Settings(**config_overrides),
+        runtime=RuntimeConfig(db_values=config_overrides),
     )
 
 

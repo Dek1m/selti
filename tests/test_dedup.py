@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from memory_server.config import Settings
+from memory_server.runtime_config import RuntimeConfig
 from memory_server.memory.dedup import DedupAction, DedupEngine
 from memory_server.memory.repository import MemoryRepository
 from memory_server.models import MemoryRecord, SearchResult
@@ -169,7 +170,7 @@ class TestSemanticDedup:
         engine = DedupEngine(
             repository=MagicMock(spec=MemoryRepository),
             embedding_client=MagicMock(),
-            config=Settings(dedup_enabled=False),
+            runtime=RuntimeConfig(db_values={"dedup_enabled": False}),
         )
         # Делаем все методы AsyncMock, но они не должны вызываться
         engine.repository.find_by_content_hash = AsyncMock()
@@ -487,7 +488,7 @@ class TestBatchDedup:
         engine = DedupEngine(
             repository=MagicMock(spec=MemoryRepository),
             embedding_client=MagicMock(),
-            config=Settings(dedup_enabled=False),
+            runtime=RuntimeConfig(db_values={"dedup_enabled": False}),
         )
         engine.repository.find_by_content_hashes = AsyncMock()
         engine.embedding.embed_many = AsyncMock()

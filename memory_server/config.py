@@ -7,6 +7,9 @@ class Settings(BaseSettings):
     database_url: str = os.getenv("DATABASE_URL", "postgresql+asyncpg://svc_athene_ai:changeme@localhost:5432/memory")
     db_min_connections: int = 2
     db_max_connections: int = 10
+    # Таймаут SQL-запроса на каждое соединение пула (фундамент, §5 реестра:
+    # транспортный предохранитель, связан с TOOL_TIMEOUT 60s — не крустится из UI)
+    db_statement_timeout: str = "45s"
 
     embedding_api_url: str = "http://10.0.0.21:8080/v1"
     embedding_api_key: str = ""
@@ -22,8 +25,11 @@ class Settings(BaseSettings):
     mcp_server_name: str = os.getenv("SERVICE_NAME", "selti")
     mcp_host: str = "0.0.0.0"
     mcp_port: int = 8000
-    search_default_limit: int = 10
     search_default_threshold: float = 0.7
+    # REST-капы (§2.11 реестра): max_search_limit — потолок limit поиска,
+    # max_graph_depth — потолок глубины обхода графа
+    max_search_limit: int = 100
+    max_graph_depth: int = 10
 
     # ── Фаза 1: hybrid search + ранжирование (D4/D5) ──
     # Фича-флаг отката (не legacy): False = плотный Qdrant-путь Фазы 0.
@@ -242,10 +248,24 @@ class Settings(BaseSettings):
     celery_worker_prefetch_multiplier: int = 1
     celery_worker_max_tasks_per_child: int = 1000
     celery_worker_max_memory_per_child: int = 200000  # 200MB
+    # Лимиты задач (реестр §2.9,requires_restart — применяются при старте воркера)
+    task_soft_time_limit: int = 240   # soft timeout (raises SoftTimeLimitExceeded)
+    task_time_limit: int = 300        # hard timeout (kills worker)
+    task_default_retry_delay: int = 30  # seconds
+    task_max_retries: int = 5
+    result_expires: int = 3600  # 1 hour — результаты автоматически чистятся
 
     log_level: str = "INFO"
 
     uvicorn_workers: int = 1
+
+    # ── Ф2: bootstrap-поля (фундамент, §3 реестра) ──
+    # Таймаут транспортного моста REST→celery (бывший литерал task_bridge.py):
+    # ошибка в нём ломает весь REST-слой — меняется только с деплоем
+    task_result_timeout: int = 300
+    # csv runtime-ключей, принудительно читаемых из env (KEY.TO.UPPER()),
+    # для ключей без поля Settings; неизвестный ключ → WARN + игнор
+    runtime_env_overrides: str = ""
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 

@@ -39,6 +39,7 @@ import pytest
 from datetime import datetime, timezone
 
 from memory_server.config import Settings
+from memory_server.runtime_config import RuntimeConfig
 from memory_server.memory.namespace_repository import NamespaceRepository
 from memory_server.memory.repository import MemoryRepository
 from memory_server.memory.pg_repository import PostgreSQLRepository
@@ -221,7 +222,7 @@ def mock_service(mock_repository, mock_embedding_provider, mock_namespace_reposi
         repository=mock_repository,
         embedding_provider=mock_embedding_provider,
         namespace_repository=mock_namespace_repository,
-        config=Settings(dedup_enabled=False, hybrid_search_enabled=False),
+        runtime=RuntimeConfig(db_values={"dedup_enabled": False, "hybrid_search_enabled": False}),
         project_repository=mock_project_repository,
     )
     return service
@@ -235,5 +236,5 @@ def dedup_engine(mock_repository, mock_embedding_provider):
     return DedupEngine(
         repository=mock_repository,
         embedding_client=mock_embedding_provider,
-        config=Settings(),
+        runtime=RuntimeConfig(db_values={}),
     )

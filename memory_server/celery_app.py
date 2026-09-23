@@ -13,6 +13,7 @@
 """
 
 import logging
+from time import monotonic
 
 from celery import Celery
 from kombu import Exchange, Queue
@@ -95,95 +96,172 @@ app.conf.worker_max_memory_per_child = settings.celery_worker_max_memory_per_chi
 # worker_soft_shutdown_timeout: graceful shutdown — завершаем текущие задачи
 app.conf.worker_soft_shutdown_timeout = 60
 
-# ── Time Limits (per task type) ──
-# Определяются в @shared_task decorator, но дефолты здесь
-app.conf.task_soft_time_limit = 240  # soft timeout (raises SoftTimeLimitExceeded)
-app.conf.task_time_limit = 300  # hard timeout (kills worker)
+# ── Time Limits / Retry / Result (§2.9: дефолты в config.py, единый
+# источник с сидингом 027; актуальные значения применяет celeryd_init) ──
+app.conf.task_soft_time_limit = settings.task_soft_time_limit
+app.conf.task_time_limit = settings.task_time_limit
+app.conf.task_default_retry_delay = settings.task_default_retry_delay
+app.conf.task_max_retries = settings.task_max_retries
+app.conf.result_expires = settings.result_expires
 
-# ── Retry Defaults ──
-# Базовые настройки retry — переопределяются в @shared_task
-app.conf.task_default_retry_delay = 30  # seconds
-app.conf.task_max_retries = 5
-
-# ── Result Settings ──
-app.conf.result_expires = 3600  # 1 hour — результаты автоматически чистятся
-
-# ── Beat Schedule: periodic worker stats + business metrics + memory lifecycle ──
-# Жизненный цикл гранул (Фаза 2.2/2.3): кластеры → decay → stale ежедневно;
-# GC и чистка сирот — еженедельно в воскресенье (низкая нагрузка, UTC).
+# ── Beat Schedule (Ф2): расписание — runtime-ключи schedule.* (реестр §2.10) ──
+# Модульный уровень строит расписание ИЗ ДЕФОЛТОВ реестра (ноль IO, бит-в-бит
+# прежние литералы) — fallback, работающий без БД и без кастомного Scheduler.
+# Актуальные значения (env > БД > дефолт) применяет RuntimeScheduler: при
+# старте beat и перечитыванием каждые 30 с на тике — расписание меняется
+# налету, без рестарта контейнера (паттерн django-celery-beat, приказ Ф2).
+from celery.beat import Scheduler
 from celery.schedules import crontab
 
-app.conf.beat_schedule = {
-    "update-worker-stats": {
-        "task": "worker_stats.update",
-        "schedule": 30.0,  # каждые 30 секунд
-    },
-    "update-business-metrics": {
-        "task": "business_metrics.update",
-        "schedule": 3600.0,  # раз в час
-    },
-    # Облачко знаний (Фаза 6.1): пересборка грязных снапшотов. Период = TTL
-    # кеша ctx:{slug} (context_cache_ttl) — флаг живёт не дольше пересборки.
-    "rebuild-contexts": {
-        "task": "memory_server.tasks.lifecycle_tasks.rebuild_contexts",
-        "schedule": 3600.0,  # раз в час
-    },
-    "refresh-clusters": {
-        "task": "memory_server.tasks.lifecycle_tasks.refresh_clusters",
-        "schedule": crontab(hour=2, minute=0),  # ежедневно 02:00 UTC
-    },
-    # Полная карта 3D (GALACTIC_LAYOUT v2, §7): galactic_layout занимает
-    # beat-слот layout_map — инкремент новых гранул после refresh_clusters
-    # (02:00); размещённые строки не пересчитываются. Force-пересев — только
-    # ручной запуск по команде Мастера (celery call, см. докстринг таски).
-    # DrL-путь layout_map остаётся до приёмки v2 (удаляется с изоляцией-щитом).
-    "layout-map": {
-        "task": "memory_server.tasks.map_tasks.galactic_layout",
-        "schedule": crontab(hour=2, minute=30),  # ежедневно 02:30 UTC
-    },
-    "confidence-decay": {
-        "task": "memory_server.tasks.lifecycle_tasks.confidence_decay",
-        "schedule": crontab(hour=3, minute=0),  # ежедневно 03:00 UTC
-    },
-    # Жизнь рёбер (V3.5): после confidence-decay, до mark-stale; кластеры
-    # (02:00) уже пересчитаны — мостовые иммунитеты видят свежую разметку.
-    # dry_run берётся из конфига (edge_prune_dry_run=True до ручного боя).
-    "edge-prune": {
-        "task": "memory_server.tasks.lifecycle_tasks.edge_prune",
-        "schedule": crontab(hour=3, minute=30),  # ежедневно 03:30 UTC
-    },
-    "mark-stale": {
-        "task": "memory_server.tasks.lifecycle_tasks.mark_stale",
-        "schedule": crontab(hour=4, minute=0),  # ежедневно 04:00 UTC
-    },
-    "gc-superseded": {
-        "task": "memory_server.tasks.lifecycle_tasks.gc_superseded",
-        "schedule": crontab(day_of_week="sun", hour=5, minute=0),  # воскр. 05:00 UTC
-    },
-    "orphans-cleanup": {
-        "task": "memory_server.tasks.lifecycle_tasks.orphans_cleanup",
-        "schedule": crontab(day_of_week="sun", hour=5, minute=30),  # воскр. 05:30 UTC
-    },
-    # Линкер V3 (ADR-019 C, V3.2/V3.3): резолв имён и co-occurrence — раз в
-    # час (не чаще, ADR C L3); воркер L2-вердиктов — чаще, очередь маленькая.
-    # name_reconciler без аргументов: dry_run берётся из конфига
-    # (linker_reconciler_dry_run=True до ручной первой кампании).
-    "linker-name-reconciler": {
-        "task": "memory_server.tasks.linker_tasks.name_reconciler",
-        "schedule": 3600.0,  # раз в час
-    },
-    "linker-co-occurrence": {
-        "task": "memory_server.tasks.linker_tasks.co_occurrence",
-        "schedule": 3600.0,  # раз в час
-    },
-    "linker-l2-verdicts": {
-        "task": "memory_server.tasks.linker_tasks.l2_verdicts",
-        "schedule": 300.0,  # каждые 5 минут
-    },
+from memory_server.runtime_config import load_effective_values_sync
+from memory_server.settings_store import SCHEDULE_KEYS, get_default
+
+# schedule.* ключ → (имя beat-записи, задача); порядок = порядок реестра §2.10
+SCHEDULE_TASKS: dict[str, tuple[str, str]] = {
+    "schedule.update_worker_stats": ("update-worker-stats", "worker_stats.update"),
+    "schedule.update_business_metrics": ("update-business-metrics", "business_metrics.update"),
+    "schedule.rebuild_contexts": ("rebuild-contexts", "memory_server.tasks.lifecycle_tasks.rebuild_contexts"),
+    "schedule.refresh_clusters": ("refresh-clusters", "memory_server.tasks.lifecycle_tasks.refresh_clusters"),
+    "schedule.layout_map": ("layout-map", "memory_server.tasks.map_tasks.galactic_layout"),
+    "schedule.confidence_decay": ("confidence-decay", "memory_server.tasks.lifecycle_tasks.confidence_decay"),
+    "schedule.edge_prune": ("edge-prune", "memory_server.tasks.lifecycle_tasks.edge_prune"),
+    "schedule.mark_stale": ("mark-stale", "memory_server.tasks.lifecycle_tasks.mark_stale"),
+    "schedule.gc_superseded": ("gc-superseded", "memory_server.tasks.lifecycle_tasks.gc_superseded"),
+    "schedule.orphans_cleanup": ("orphans-cleanup", "memory_server.tasks.lifecycle_tasks.orphans_cleanup"),
+    "schedule.linker_name_reconciler": ("linker-name-reconciler", "memory_server.tasks.linker_tasks.name_reconciler"),
+    "schedule.linker_co_occurrence": ("linker-co-occurrence", "memory_server.tasks.linker_tasks.co_occurrence"),
+    "schedule.linker_l2_verdicts": ("linker-l2-verdicts", "memory_server.tasks.linker_tasks.l2_verdicts"),
 }
 
+
+def _to_celery_schedule(key: str, raw: dict) -> float | crontab:
+    """JSON §2.10 → объект расписания celery. Битое значение → дефолт + WARN."""
+    try:
+        if raw.get("type") == "interval":
+            return float(raw["seconds"])
+        return crontab(
+            minute=raw.get("minute", "*"),
+            hour=raw.get("hour", "*"),
+            day_of_week=raw.get("day_of_week") or "*",
+            day_of_month=raw.get("day_of_month") or "*",
+            month_of_year=raw.get("month_of_year") or "*",
+        )
+    except Exception as exc:
+        logger.warning("beat: invalid schedule value, using default", extra={"key": key, "error": str(exc)[:200]})
+        return _to_celery_schedule(key, get_default(key))
+
+
+def build_beat_schedule(values: dict) -> dict[str, dict]:
+    """schedule.* значения → формат beat_schedule celery."""
+    schedule: dict[str, dict] = {}
+    for key, (entry_name, task) in SCHEDULE_TASKS.items():
+        raw = values.get(key, get_default(key))
+        schedule[entry_name] = {"task": task, "schedule": _to_celery_schedule(key, raw)}
+    return schedule
+
+
+def read_schedule_values() -> dict:
+    """Текущие effective-значения schedule-ключей (sync, короткий timeout)."""
+    return load_effective_values_sync(set(SCHEDULE_KEYS))
+
+
+class RuntimeScheduler(Scheduler):
+    """Beat-планировщик с перечитыванием расписания из RuntimeConfig.
+
+    Каждые sync_every секунд (в тике) — read_schedule_values(); при
+    изменении полная пересборка entries: новые записи стартуют с now
+    (due через свой период), удалённые исчезают. БД недоступна →
+    последние значения сохраняются (sync-путь не бросает).
+    """
+
+    sync_every = 30.0
+    _current_raw: dict | None = None
+
+    def setup_schedule(self) -> None:
+        self._current_raw = None
+        self.sync()
+
+    def sync(self) -> None:
+        raw = read_schedule_values()
+        if raw == self._current_raw:
+            return
+        schedule = build_beat_schedule(raw)
+        # Полная замена: app.conf + пересборка entries (merge только добавляет)
+        self.app.conf.beat_schedule = schedule
+        self.data = {}
+        self.merge_inplace(schedule)
+        self._current_raw = raw
+        logger.info(
+            "beat: schedule (re)loaded from runtime config",
+            extra={"entries": len(schedule), "changed": True},
+        )
+
+    def tick(self, event_timeout=None):
+        if self.should_sync():
+            self.sync()
+            self.last_sync = monotonic()
+        return super().tick(event_timeout)
+
+
+# Fallback-расписание из дефолтов реестра (без IO) — актуализируется
+# RuntimeScheduler'ом при старте beat
+app.conf.beat_schedule = build_beat_schedule({key: get_default(key) for key in SCHEDULE_TASKS})
+app.conf.beat_scheduler = "memory_server.celery_app.RuntimeScheduler"
+
 # ── Worker Concurrency ──
+# Стартовое значение; актуальное применяется celeryd_init из runtime-слоя
+# (env > БД > дефолт), налету — pool_grow/pool_shrink из PUT /api/settings
 app.conf.worker_concurrency = settings.celery_worker_concurrency
+
+# ── Ф2: стартовый bootstrap группы celery из БД (requires_restart-ключи) ──
+# celeryd_init стреляет в MAIN-процессе до создания пула — conf успевает
+# примениться. Sync-путь без event loop (отдельное соединение, не пул
+# SeltiState: пул привязан к loop воркера). БД недоступна → env/дефолты.
+_CELERY_CONF_KEYS = (
+    "celery_worker_concurrency",
+    "celery_worker_prefetch_multiplier",
+    "celery_worker_max_tasks_per_child",
+    "celery_worker_max_memory_per_child",
+    "task_soft_time_limit",
+    "task_time_limit",
+    "task_default_retry_delay",
+    "task_max_retries",
+    "result_expires",
+)
+_CELERY_CONF_ATTRS = {
+    "celery_worker_concurrency": "worker_concurrency",
+    "celery_worker_prefetch_multiplier": "worker_prefetch_multiplier",
+    "celery_worker_max_tasks_per_child": "worker_max_tasks_per_child",
+    "celery_worker_max_memory_per_child": "worker_max_memory_per_child",
+    "task_soft_time_limit": "task_soft_time_limit",
+    "task_time_limit": "task_time_limit",
+    "task_default_retry_delay": "task_default_retry_delay",
+    "task_max_retries": "task_max_retries",
+    "result_expires": "result_expires",
+}
+
+
+def _bootstrap_worker_config() -> None:
+    """Применить runtime-значения группы celery к app.conf при старте воркера."""
+    values = load_effective_values_sync(set(_CELERY_CONF_KEYS))
+    for key, attr in _CELERY_CONF_ATTRS.items():
+        setattr(app.conf, attr, values[key])
+    logger.info(
+        "celeryd_init: worker config from runtime layer",
+        extra={"concurrency": app.conf.worker_concurrency},
+    )
+
+
+try:
+    from celery.signals import celeryd_init
+
+    @celeryd_init.connect(weak=False)
+    def on_celeryd_init(**kwargs):
+        _bootstrap_worker_config()
+
+    logger.info("celeryd_init bootstrap connected (runtime config)")
+except ImportError:
+    logger.warning("celeryd_init signal not available")
 
 # ── Worker Logging ──
 # Отключаем дефолтный root logger Celery, чтобы setup_worker_logging()

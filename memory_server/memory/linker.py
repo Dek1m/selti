@@ -30,7 +30,6 @@ from typing import Any
 import asyncpg
 import numpy as np
 
-from memory_server.config import Settings
 from memory_server.db import queries as q
 from memory_server.exceptions import NotFoundError
 from memory_server.llm_client import (
@@ -42,6 +41,7 @@ from memory_server.llm_client import (
 )
 from memory_server.logger import get_logger
 from memory_server.memory.qdrant_store import QdrantStore
+from memory_server.runtime_config import RuntimeConfig
 from memory_server.metrics import (
     LINKER_L1C_GATE_FAILURES_TOTAL,
     LINKER_L2_QUEUE_SIZE,
@@ -124,21 +124,21 @@ class Linker:
         pool: asyncpg.Pool,
         qdrant: QdrantStore | None,
         redis_provider: Callable[[], Awaitable[Any]] | None,
-        config: Settings | None = None,
+        runtime: RuntimeConfig | None = None,
         llm: LinkerLLMClient | None = None,
     ) -> None:
         self.pool = pool
         self.qdrant = qdrant
         self.redis_provider = redis_provider
-        self.config = config or Settings()
+        self.runtime = runtime or RuntimeConfig()
         self.llm = llm
-        if self.config.linker_verdict_threshold <= self.config.linker_synonym_threshold:
+        if self.runtime.get("linker_verdict_threshold") <= self.runtime.get("linker_synonym_threshold"):
             logger.warning(
                 "linker: zone thresholds misconfigured (verdict <= synonym), "
                 "L1a auto zone is empty (only L2 verdict zone would remain)",
                 extra={
-                    "synonym": self.config.linker_synonym_threshold,
-                    "verdict": self.config.linker_verdict_threshold,
+                    "synonym": self.runtime.get("linker_synonym_threshold"),
+                    "verdict": self.runtime.get("linker_verdict_threshold"),
                 },
             )
 
@@ -152,7 +152,7 @@ class Linker:
         """Режим L2: "llm" (воркер beat), "manual" (разбор Тишью), "off"."""
         if self.llm is not None:
             return "llm"
-        return "manual" if self.config.linker_l2_manual else "off"
+        return "manual" if self.runtime.get("linker_l2_manual") else "off"
 
     def _upper_bound(self, namespace: str) -> float:
         """Верхняя граница зоны линкера = порог дедупа namespace.
@@ -160,7 +160,7 @@ class Linker:
         Выше — территория DedupEngine: слои не пересекаются ни в одном ns
         (dialogue_insights дедупит с 0.85 — там серая зона L2 пуста by design).
         """
-        return self.config.dedup_thresholds.get(namespace, self.config.dedup_threshold)
+        return self.runtime.get("dedup_thresholds").get(namespace, self.runtime.get("dedup_threshold"))
 
     async def _get_redis(self) -> Any | None:
         """Redis-клиент или None (деградация: без кеша, без очереди)."""
@@ -240,7 +240,7 @@ class Linker:
 
             await self._link_cooccurrence(conn, report, granule_id, row)
 
-            if not (self.config.linker_l1a_enabled and self.qdrant is not None):
+            if not (self.runtime.get("linker_l1a_enabled") and self.qdrant is not None):
                 return report
             vectors = self.qdrant.retrieve_vectors([granule_id])
             vector = vectors.get(granule_id)
@@ -252,19 +252,19 @@ class Linker:
             upper = self._upper_bound(row["ns_uid"])
             hits = self.qdrant.search_batch(
                 query_vectors=[vector],
-                limit=self.config.linker_ann_limit + 1,  # +1: HNSW вернёт саму точку
-                score_threshold=self.config.linker_synonym_threshold,
+                limit=self.runtime.get("linker_ann_limit") + 1,  # +1: HNSW вернёт саму точку
+                score_threshold=self.runtime.get("linker_synonym_threshold"),
                 query_filter=QdrantStore.build_filter(namespace_id=row["ns_id"], active_only=True),
             )
             l2_candidates: list[dict[str, Any]] = []
             for hit in hits[0] if hits else []:
                 cand_id = str(hit["id"])
                 score = float(hit["score"])
-                if cand_id == granule_id or score < self.config.linker_synonym_threshold:
+                if cand_id == granule_id or score < self.runtime.get("linker_synonym_threshold"):
                     continue
                 if score >= upper:
                     continue  # dedup-зона: территория DedupEngine, не наша
-                if score < self.config.linker_verdict_threshold:
+                if score < self.runtime.get("linker_verdict_threshold"):
                     created = await self._insert_link(
                         conn,
                         granule_id,
@@ -276,13 +276,13 @@ class Linker:
                     if created:
                         report["l1a_created"] += 1
                         LINKER_LINKS_CREATED_TOTAL.labels(layer="l1a").inc()
-                elif len(l2_candidates) < self.config.linker_top_k:
+                elif len(l2_candidates) < self.runtime.get("linker_top_k"):
                     l2_candidates.append({"id": cand_id, "score": round(score, 6)})
 
             # Очередь L2 наполняется при живом LLM ИЛИ в manual mode
             # (приказ Мастера 20.09: без продового ключа очередь копится
             # для разбора memory_linker_review/memory_linker_verdict)
-            if l2_candidates and (self.l2_enabled() or self.config.linker_l2_manual):
+            if l2_candidates and (self.l2_enabled() or self.runtime.get("linker_l2_manual")):
                 redis = await self._get_redis()
                 if redis is not None:
                     try:
@@ -305,7 +305,7 @@ class Linker:
     ) -> None:
         """L1c: соседи той же сессии → related_to 0.5 сквозь косинус-гейт
         (Фаза 3) + mutual-reinforce существующих пар + маркер l1c_done."""
-        if not self.config.linker_l1c_enabled or not row["sid"]:
+        if not self.runtime.get("linker_l1c_enabled") or not row["sid"]:
             return
         outcome = await self._process_cooccurrence(
             conn, granule_id, row["project_id"], row["ns_id"], row["sid"]
@@ -325,7 +325,7 @@ class Linker:
         пара неоценима, отсеивается точечно (это не отказ). Гейт 0.0 —
         выключен: проходят все, Qdrant не дёргается.
         """
-        gate = self.config.linker_l1c_gate_min
+        gate = self.runtime.get("linker_l1c_gate_min")
         if gate <= 0.0:
             return neighbor_ids
         if self.qdrant is None:
@@ -386,7 +386,7 @@ class Linker:
             project_id,
             namespace_id,
             session_id,
-            self.config.linker_cooccurrence_cap,
+            self.runtime.get("linker_cooccurrence_cap"),
         )
         if not neighbors:
             # без соседей гранула выпадает из beat-выборки сама (EXISTS-гард)
@@ -400,7 +400,7 @@ class Linker:
                 q.INSERT_COOCCURRENCE_LINKS,
                 granule_id,
                 gated,
-                self.config.edge_reinforce_alpha,
+                self.runtime.get("edge_reinforce_alpha"),
                 session_id,
             )
             created, reinforced = stats["created"], stats["reinforced"]
@@ -420,19 +420,19 @@ class Linker:
         пишет. Отчёт: сколько разрешено / осталось висячих.
         """
         if dry_run is None:
-            dry_run = self.config.linker_reconciler_dry_run
+            dry_run = self.runtime.get("linker_reconciler_dry_run")
         async with self.pool.acquire() as conn:
             pending_total = await conn.fetchval(q.COUNT_PENDING_TARGET_NAMES)
             if dry_run:
                 would_resolve = await conn.fetchval(
-                    q.RESOLVE_PENDING_TARGET_NAMES_DRY, self.config.linker_reconciler_batch
+                    q.RESOLVE_PENDING_TARGET_NAMES_DRY, self.runtime.get("linker_reconciler_batch")
                 )
                 report = {
                     "dry_run": True,
                     "resolved": 0,
                     "would_resolve": would_resolve or 0,
                     "pending": pending_total or 0,
-                    "batch": self.config.linker_reconciler_batch,
+                    "batch": self.runtime.get("linker_reconciler_batch"),
                 }
                 logger.info("name_reconciler: dry-run report", extra=report)
                 return report
@@ -440,7 +440,7 @@ class Linker:
             resolved_total = 0
             while True:
                 rows = await conn.fetch(
-                    q.RESOLVE_PENDING_TARGET_NAMES, self.config.linker_reconciler_batch
+                    q.RESOLVE_PENDING_TARGET_NAMES, self.runtime.get("linker_reconciler_batch")
                 )
                 if not rows:
                     break
@@ -450,7 +450,7 @@ class Linker:
                 "dry_run": False,
                 "resolved": resolved_total,
                 "pending": remaining or 0,
-                "batch": self.config.linker_reconciler_batch,
+                "batch": self.runtime.get("linker_reconciler_batch"),
             }
             if resolved_total:
                 LINKER_NAMES_RESOLVED_TOTAL.labels(path="reconciler").inc(resolved_total)
@@ -468,7 +468,7 @@ class Linker:
         вечно. Fail-closed гейта маркер НЕ пишет — гранула вернётся
         следующим прогоном (видна в отчёте как l1c_gate_failures).
         """
-        limit = batch or self.config.linker_reconciler_batch
+        limit = batch or self.runtime.get("linker_reconciler_batch")
         report: dict[str, Any] = {
             "candidates": 0,
             "links_created": 0,
@@ -517,8 +517,8 @@ class Linker:
         кластерам, топ примеров на отсечение.
         """
         dry = True if dry_run is None else dry_run
-        batch_size = batch or self.config.linker_l1c_prune_batch
-        gate = self.config.linker_l1c_gate_min
+        batch_size = batch or self.runtime.get("linker_l1c_prune_batch")
+        gate = self.runtime.get("linker_l1c_gate_min")
         if gate > 0.0 and self.qdrant is None:
             # fail-closed: без Qdrant ретроспективная оценка невозможна
             logger.warning("prune_cooccurrence_history: qdrant not configured")
@@ -630,7 +630,7 @@ class Linker:
         verdict_counts: dict[str, int] = {}
         requeued_items: list[str] = []
         dropped = 0
-        for _ in range(self.config.linker_l2_batch):
+        for _ in range(self.runtime.get("linker_l2_batch")):
             raw = None
             try:
                 raw = await redis.rpop(_L2_QUEUE_KEY)
@@ -645,7 +645,7 @@ class Linker:
             if outcome == "requeue":
                 # Возврат в очередь ПОСЛЕ цикла: сбойный элемент не съедает
                 # весь батч повторами в том же прогоне
-                if item["attempts"] < self.config.linker_l2_max_attempts:
+                if item["attempts"] < self.runtime.get("linker_l2_max_attempts"):
                     requeued_items.append(json.dumps(item))
                 else:
                     dropped += 1
@@ -748,7 +748,7 @@ class Linker:
                                 source.granule_id, cand.granule_id,
                                 source.content_hash, cand.content_hash,
                             ),
-                            self.config.linker_verdict_cache_ttl,
+                            self.runtime.get("linker_verdict_cache_ttl"),
                             json.dumps(verdict.to_json()),
                         )
                     except Exception:
@@ -923,7 +923,7 @@ class Linker:
                         source.granule_id, candidate.granule_id,
                         source.content_hash, candidate.content_hash,
                     ),
-                    self.config.linker_verdict_cache_ttl,
+                    self.runtime.get("linker_verdict_cache_ttl"),
                     json.dumps(manual.to_json()),
                 )
             except Exception:
@@ -1001,15 +1001,15 @@ class Linker:
             # manual — разбор очереди Тишью, off — серая зона игнорируется
             "l2_mode": self.l2_mode(),
             "zones": {
-                "l1a": [self.config.linker_synonym_threshold, self.config.linker_verdict_threshold],
+                "l1a": [self.runtime.get("linker_synonym_threshold"), self.runtime.get("linker_verdict_threshold")],
                 # Верхняя граница per-namespace = dedup_thresholds[ns]; для
                 # обзора показываем самый консервативный (минимальный) порог
                 # (баг приёмки М5: вместо строкового плейсхолдера — число).
                 "l2": [
-                    self.config.linker_verdict_threshold,
-                    min(self.config.dedup_thresholds.values())
-                    if self.config.dedup_thresholds
-                    else self.config.dedup_threshold,
+                    self.runtime.get("linker_verdict_threshold"),
+                    min(self.runtime.get("dedup_thresholds").values())
+                    if self.runtime.get("dedup_thresholds")
+                    else self.runtime.get("dedup_threshold"),
                 ],
             },
         }

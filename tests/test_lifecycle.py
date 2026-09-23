@@ -17,6 +17,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import asyncpg
 import pytest
 
+from memory_server.runtime_config import RuntimeConfig
+
 from memory_server.exceptions import (
     ConflictError,
     DatabaseError,
@@ -252,9 +254,9 @@ class TestServiceLifecycle:
 
         assert touched == {"default": 3, "user_facts": 1}
         kwargs = mock_service.repository.decay_confidence.await_args.kwargs
-        assert kwargs["default_rate"] == mock_service.config.recency_decay_rate
-        assert set(kwargs["ns_uids"]) == set(mock_service.config.recency_decay_rates.keys())
-        assert kwargs["floor"] == mock_service.config.confidence_decay_floor
+        assert kwargs["default_rate"] == mock_service.runtime.get("recency_decay_rate")
+        assert set(kwargs["ns_uids"]) == set(mock_service.runtime.get("recency_decay_rates").keys())
+        assert kwargs["floor"] == mock_service.runtime.get("confidence_decay_floor")
 
     @pytest.mark.asyncio
     async def test_mark_stale_counts_without_status_change(self, mock_service):
@@ -262,15 +264,15 @@ class TestServiceLifecycle:
 
         assert await mock_service.mark_stale() == 7
         mock_service.repository.count_stale.assert_awaited_once_with(
-            mock_service.config.stale_threshold, mock_service.config.stale_days
+            mock_service.runtime.get("stale_threshold"), mock_service.runtime.get("stale_days")
         )
 
     @pytest.mark.asyncio
     async def test_gc_disabled_by_default_never_deletes(self, mock_service):
         """V3.1 стоп-кран (F ADR-019, дыра 7): дефолт — purge выключен,
         только счётчик кандидатов; мина FK обезврежена."""
-        assert mock_service.config.gc_purge_enabled is False
-        assert mock_service.config.gc_mode == "disabled"
+        assert mock_service.runtime.get("gc_purge_enabled") is False
+        assert mock_service.runtime.get("gc_mode") == "disabled"
         mock_service.repository.select_gc_superseded = AsyncMock(return_value=[OLD_ID])
         mock_service.repository.purge_memories = AsyncMock()
 
@@ -285,8 +287,7 @@ class TestServiceLifecycle:
     async def test_gc_master_switch_blocks_even_hard_mode(self, mock_service):
         """gc_mode='hard', но gc_purge_enabled=False — мастер-кран выше
         режимов: удаление невозможно в принципе."""
-        mock_service.config.gc_mode = "hard"
-        mock_service.config.gc_purge_enabled = False
+        mock_service.runtime = RuntimeConfig(db_values={"gc_mode": "hard", "gc_purge_enabled": False})
         mock_service.repository.select_gc_superseded = AsyncMock(return_value=[OLD_ID])
         mock_service.repository.purge_memories = AsyncMock()
 
@@ -298,8 +299,7 @@ class TestServiceLifecycle:
     @pytest.mark.asyncio
     async def test_gc_hard_mode_with_enabled_purge_deletes(self, mock_service):
         """hard + gc_purge_enabled=True — как раньше: hard delete кандидатов."""
-        mock_service.config.gc_mode = "hard"
-        mock_service.config.gc_purge_enabled = True
+        mock_service.runtime = RuntimeConfig(db_values={"gc_mode": "hard", "gc_purge_enabled": True})
         mock_service.repository.select_gc_superseded = AsyncMock(
             return_value=[OLD_ID, NEW_ID]
         )
@@ -347,9 +347,9 @@ class TestServiceLifecycle:
 
         assert result == {"ok": True, "clusters": [cluster_row]}
         kwargs = mock_service.repository.refresh_clusters.await_args.kwargs
-        assert kwargs["threshold"] == mock_service.config.cluster_threshold
-        assert kwargs["top_k"] == mock_service.config.cluster_top_k
-        assert kwargs["min_members"] == mock_service.config.cluster_min_members
+        assert kwargs["threshold"] == mock_service.runtime.get("cluster_threshold")
+        assert kwargs["top_k"] == mock_service.runtime.get("cluster_top_k")
+        assert kwargs["min_members"] == mock_service.runtime.get("cluster_min_members")
 
     @pytest.mark.asyncio
     async def test_refresh_clusters_graceful_when_migration_pending(self, mock_service):

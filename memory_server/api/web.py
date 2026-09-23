@@ -22,13 +22,20 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from memory_server.config import settings
 from memory_server.tools.task_bridge import celery_call
 
 router = APIRouter(prefix="/api", tags=["web"])
 
 # localhost-клиенты: UI и проверки ходят с той же машины без токена
 _LOCAL_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+async def _runtime():
+    """RuntimeConfig web-процесса: Query-дефолты резолвятся в хендлере
+    (§6 реестра: Query(settings.X) замораживается при импорте модуля)."""
+    from memory_server.state import get_state
+
+    return await get_state().get_runtime_config()
 
 
 def is_api_authorized(client_host: str | None, auth_header: str, api_key: str) -> bool:
@@ -57,9 +64,8 @@ TASK_PROJECT_GET = "memory_server.tasks.project_tasks.get_project"
 TASK_PROJECT_CREATE = "memory_server.tasks.project_tasks.create_project"
 TASK_PROJECT_UPDATE = "memory_server.tasks.project_tasks.update_project"
 
-# Caps запросов UI (hard-cap узлов traverse — traverse_max_nodes, воркер)
-MAX_SEARCH_LIMIT = 100
-MAX_GRAPH_DEPTH = 10
+# Caps запросов UI — runtime-ключи §2.11 (max_search_limit, max_graph_depth):
+# проверяются в хендлерах, НЕ в Query-аннотации (значение конфигурируемо налету)
 
 GranuleStatus = Literal["asserted", "superseded", "retracted", "uncertain"]
 ProjectKind = Literal["code", "infra", "domain", "workspace", "org"]
@@ -120,9 +126,9 @@ async def _attach_positions(items: list[dict[str, Any]]) -> None:
 async def search(
     query: str,
     user_id: str | None = None,
-    limit: int = Query(10, ge=1, le=MAX_SEARCH_LIMIT),
+    limit: int = Query(10, ge=1),
     offset: int = Query(0, ge=0),
-    threshold: float = Query(settings.search_default_threshold, ge=0.0, le=1.0),
+    threshold: float | None = Query(None, ge=0.0, le=1.0),
     namespace: str | None = None,
     project_id: str | None = None,
     include_historical: bool = False,
@@ -135,6 +141,15 @@ async def search(
     namespace/project_id, окно created_at, точный статус. offset —
     пагинация /ui (Фаза 5.2): слайс детерминированного ранжирования.
     with_positions — координаты map_layout на хитах (граф «Созвездие»)."""
+    runtime = await _runtime()
+    max_limit = runtime.get("max_search_limit")
+    if limit > max_limit:
+        raise HTTPException(
+            status_code=400,
+            detail=f"limit {limit} exceeds max_search_limit {max_limit}",
+        )
+    if threshold is None:
+        threshold = runtime.get("search_default_threshold")
     results = await _call(
         TASK_SEARCH,
         query=query,
@@ -189,11 +204,20 @@ async def memory_relations(
 @router.get("/memories/{memory_id}/similar")
 async def memory_similar(
     memory_id: str,
-    limit: int = Query(5, ge=1, le=MAX_SEARCH_LIMIT),
-    threshold: float = Query(settings.search_default_threshold, ge=0.0, le=1.0),
+    limit: int = Query(5, ge=1),
+    threshold: float | None = Query(None, ge=0.0, le=1.0),
 ) -> list[dict[str, Any]]:
     """Похожие гранулы (контракт memory_find_similar): контент гранулы —
     seed запроса; сама гранула исключается из выдачи."""
+    runtime = await _runtime()
+    max_limit = runtime.get("max_search_limit")
+    if limit > max_limit:
+        raise HTTPException(
+            status_code=400,
+            detail=f"limit {limit} exceeds max_search_limit {max_limit}",
+        )
+    if threshold is None:
+        threshold = runtime.get("search_default_threshold")
     record = await _call(TASK_GET, memory_id=memory_id)
     similar = await _call(
         TASK_FIND_SIMILAR,
@@ -207,14 +231,28 @@ async def memory_similar(
 @router.get("/graph/{memory_id}")
 async def graph(
     memory_id: str,
-    depth: int = Query(3, ge=1, le=MAX_GRAPH_DEPTH),
+    depth: int = Query(3, ge=1),
     link_types: list[str] | None = Query(None),
-    limit: int | None = Query(None, ge=1, le=settings.traverse_max_nodes),
+    limit: int | None = Query(None, ge=1),
     offset: int = Query(0, ge=0),
     project_id: str | None = None,
 ) -> dict[str, Any]:
     """Обход графа от узла (контракт memory_traverse); hard-cap узлов —
     traverse_max_nodes на воркере, depth ограничен REST-слоем."""
+    runtime = await _runtime()
+    max_depth = runtime.get("max_graph_depth")
+    if depth > max_depth:
+        raise HTTPException(
+            status_code=400,
+            detail=f"depth {depth} exceeds max_graph_depth {max_depth}",
+        )
+    if limit is not None:
+        max_nodes = runtime.get("traverse_max_nodes")
+        if limit > max_nodes:
+            raise HTTPException(
+                status_code=400,
+                detail=f"limit {limit} exceeds traverse_max_nodes {max_nodes}",
+            )
     return await _call(
         TASK_TRAVERSE,
         start_id=memory_id,

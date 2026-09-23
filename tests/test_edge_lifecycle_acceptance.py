@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from memory_server.config import Settings
+from memory_server.runtime_config import RuntimeConfig
 from memory_server.db import queries as q
 from memory_server.memory.service import MemoryService, canonical_edge_pairs
 
@@ -71,7 +72,7 @@ def w_eff(weight: float, used_count: int, days: float,
     return weight * math.exp(-lambda_eff(used_count, lam, lam_min) * days)
 
 
-def accept_config(**overrides) -> Settings:
+def accept_config(**overrides) -> RuntimeConfig:
     """Конфиг приёмки: Ф1 включена, шумовые пути выключены."""
     base = {
         "dedup_enabled": False,
@@ -79,7 +80,7 @@ def accept_config(**overrides) -> Settings:
         "edge_lifecycle_enabled": True,
     }
     base.update(overrides)
-    return Settings(**base)
+    return RuntimeConfig(db_values=base)
 
 
 def service_stub(repo: MagicMock, **cfg) -> MemoryService:
@@ -88,7 +89,7 @@ def service_stub(repo: MagicMock, **cfg) -> MemoryService:
         repository=repo,
         embedding_provider=MagicMock(),
         namespace_repository=MagicMock(),
-        config=accept_config(**cfg),
+        runtime=accept_config(**cfg),
     )
 
 
@@ -559,9 +560,15 @@ class TestReinforceAcceptance:
         fake_app = MagicMock()
         fake_app.send_task = lambda *a, **k: sent.append(k)
         monkeypatch.setattr("memory_server.celery_app.app", fake_app)
-        # дефолт Settings: edge_lifecycle_enabled=False (прод до включения)
+        # дефолт: edge_lifecycle_enabled=False (прод до включения)
+        from types import SimpleNamespace
+
+        from memory_server.runtime_config import RuntimeConfig
+
+        _runtime = RuntimeConfig()
         monkeypatch.setattr(
-            "memory_server.config.settings", Settings()
+            "memory_server.state.get_state",
+            lambda: SimpleNamespace(get_runtime_config_sync=lambda: _runtime),
         )
         memory_tasks.enqueue_reinforce([(A, B)])
         assert sent == []  # мастер-выключатель: тишина
@@ -577,7 +584,7 @@ class TestReinforceAcceptance:
             repository=MagicMock(),
             embedding_provider=MagicMock(),
             namespace_repository=MagicMock(),
-            config=accept_config(),
+            runtime=accept_config(),
             edge_dispatch=broken_hook,
         )
         service._dispatch_reinforce([(A, B)])  # не поднимает исключение

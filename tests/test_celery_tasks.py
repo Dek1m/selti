@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from memory_server.runtime_config import RuntimeConfig
+
 from memory_server.tasks.errors import ValidationError
 
 
@@ -132,7 +134,7 @@ def mock_memory_service():
 
     # config
     svc.config = MagicMock()
-    svc.config.dedup_enabled = False
+    svc.runtime = RuntimeConfig(db_values={"dedup_enabled": False})
 
     # add_relation
     svc.add_relation = AsyncMock(return_value="rel-1")
@@ -502,7 +504,7 @@ class TestIngestBatch:
             DedupDecision(action=DedupAction.INSERT, content_hash=hashlib.sha256(b"B").hexdigest(), embedding=[0.3]),
             DedupDecision(action=DedupAction.INSERT, content_hash=hashlib.sha256(b"C").hexdigest(), embedding=[0.4]),
         ]
-        mock_memory_service.config.dedup_enabled = True
+        mock_memory_service.runtime = RuntimeConfig(db_values={"dedup_enabled": True})
         mock_memory_service.dedup.check_batch = AsyncMock(return_value=decisions)
         mock_memory_service.repository.insert_batch = AsyncMock(
             return_value=["id-dup", "id-a", "id-b", "id-c"]

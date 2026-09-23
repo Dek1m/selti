@@ -20,6 +20,7 @@ import numpy as np
 import pytest
 
 from memory_server.config import Settings
+from memory_server.runtime_config import RuntimeConfig
 from memory_server.db import queries as q
 from memory_server.memory.linker import Linker
 from memory_server.metrics import LINKER_L1C_GATE_FAILURES_TOTAL
@@ -48,7 +49,7 @@ _VEC_BOUND65 = [0.65, math.sqrt(1.0 - 0.65 ** 2)]
 _VEC_UNDER65 = [0.6499, math.sqrt(1.0 - 0.6499 ** 2)]
 
 
-def gate_config(**overrides) -> Settings:
+def gate_config(**overrides) -> RuntimeConfig:
     base = {
         "dedup_enabled": False,
         "hybrid_search_enabled": False,
@@ -56,12 +57,12 @@ def gate_config(**overrides) -> Settings:
         "linker_l1c_gate_min": 0.30,
     }
     base.update(overrides)
-    return Settings(**base)
+    return RuntimeConfig(db_values=base)
 
 
 def make_linker(mock_pool, qdrant=None, **cfg) -> Linker:
     return Linker(
-        pool=mock_pool, qdrant=qdrant, redis_provider=None, config=gate_config(**cfg)
+        pool=mock_pool, qdrant=qdrant, redis_provider=None, runtime=gate_config(**cfg)
     )
 
 
@@ -154,7 +155,7 @@ class TestGateAcceptance:
         )
 
         # Оракул: фактический float64-косинус BOUND65 не ниже порога
-        gate = linker.config.linker_l1c_gate_min
+        gate = linker.runtime.get("linker_l1c_gate_min")
         src_arr = np.asarray(_VEC_SRC, dtype=np.float64)
         arr = np.asarray(_VEC_BOUND65, dtype=np.float64)
         actual = float(src_arr @ arr) / (
@@ -334,7 +335,7 @@ class TestMutualReinforceAcceptance:
         args = conn.fetchrow.await_args_list[0].args
         assert args[0] == q.INSERT_COOCCURRENCE_LINKS
         assert args[2] == [NEAR]
-        assert args[3] == linker.config.edge_reinforce_alpha
+        assert args[3] == linker.runtime.get("edge_reinforce_alpha")
 
     def test_fresh_edge_metadata_contract(self):
         """Fresh-пара → обычная l1c-вставка: владение linker_v3/layer l1c,

@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from memory_server.config import Settings
+from memory_server.runtime_config import RuntimeConfig
 from memory_server.exceptions import NotFoundError
 from memory_server.memory.dedup import DedupAction, DedupDecision
 from memory_server.memory.namespace_repository import NamespaceRepository
@@ -19,7 +20,7 @@ def service(mock_repository, mock_embedding_provider, mock_namespace_repository)
         repository=mock_repository,
         embedding_provider=mock_embedding_provider,
         namespace_repository=mock_namespace_repository,
-        config=Settings(dedup_enabled=False, hybrid_search_enabled=False),
+        runtime=RuntimeConfig(db_values={"dedup_enabled": False, "hybrid_search_enabled": False}),
     )
 
 
@@ -123,7 +124,7 @@ class TestStore:
             embedding=[0.9, 0.9, 0.9],
         )
         confirmed = existing.model_copy(update={"confidence": 0.55})
-        service.config = Settings(dedup_enabled=True, hybrid_search_enabled=False)
+        service.runtime = RuntimeConfig(db_values={"dedup_enabled": True, "hybrid_search_enabled": False})
         service.dedup.check = AsyncMock(return_value=decision)
         service.repository.get_by_id = AsyncMock(return_value=existing)
         service.repository.update = AsyncMock(return_value=confirmed)
@@ -163,7 +164,7 @@ class TestStore:
             action=DedupAction.UPDATE, existing_id="mem-existing",
             content_hash="h",
         )
-        service.config = Settings(dedup_enabled=True, hybrid_search_enabled=False)
+        service.runtime = RuntimeConfig(db_values={"dedup_enabled": True, "hybrid_search_enabled": False})
         service.dedup.check = AsyncMock(return_value=decision)
         service.repository.get_by_id = AsyncMock(return_value=existing)
         service.repository.update = AsyncMock(
@@ -188,7 +189,7 @@ class TestStore:
         decision = DedupDecision(
             action=DedupAction.UPDATE, existing_id="mem-existing", content_hash="h",
         )
-        service.config = Settings(dedup_enabled=True, hybrid_search_enabled=False)
+        service.runtime = RuntimeConfig(db_values={"dedup_enabled": True, "hybrid_search_enabled": False})
         service.dedup.check = AsyncMock(return_value=decision)
         service.repository.get_by_id = AsyncMock(return_value=existing)
         service.repository.update = AsyncMock(return_value=existing)
@@ -223,7 +224,7 @@ class TestStore:
             existing_score=0.91,
         )
         confirmed = existing.model_copy(update={"confidence": 0.46})
-        service.config = Settings(dedup_enabled=True, hybrid_search_enabled=False)
+        service.runtime = RuntimeConfig(db_values={"dedup_enabled": True, "hybrid_search_enabled": False})
         service.dedup.check = AsyncMock(return_value=decision)
         service.repository.get_by_id = AsyncMock(return_value=existing)
         service.repository.update = AsyncMock(return_value=confirmed)
@@ -292,7 +293,7 @@ class TestStoreManualPosition:
             content_hash=hashlib.sha256(b"fact").hexdigest(),
             embedding=[0.9, 0.9, 0.9],
         )
-        service.config = Settings(dedup_enabled=True, hybrid_search_enabled=False)
+        service.runtime = RuntimeConfig(db_values={"dedup_enabled": True, "hybrid_search_enabled": False})
         service.dedup.check = AsyncMock(return_value=decision)
         service.repository.get_by_id = AsyncMock(return_value=existing)
         service.repository.update = AsyncMock(
@@ -321,7 +322,7 @@ class TestStoreManualPosition:
             content_hash=hashlib.sha256("иначе".encode()).hexdigest(),
             existing_score=0.93,
         )
-        service.config = Settings(dedup_enabled=True, hybrid_search_enabled=False)
+        service.runtime = RuntimeConfig(db_values={"dedup_enabled": True, "hybrid_search_enabled": False})
         service.dedup.check = AsyncMock(return_value=decision)
         service.repository.get_by_id = AsyncMock(return_value=existing)
         service.repository.update = AsyncMock(
@@ -689,7 +690,7 @@ def hybrid_service(mock_repository, mock_embedding_provider, mock_namespace_repo
         repository=mock_repository,
         embedding_provider=mock_embedding_provider,
         namespace_repository=mock_namespace_repository,
-        config=Settings(dedup_enabled=False, hybrid_search_enabled=True),
+        runtime=RuntimeConfig(db_values={"dedup_enabled": False, "hybrid_search_enabled": True}),
     )
 
 
@@ -823,7 +824,7 @@ def _traverse_raw(n: int) -> dict:
 class TestTraverseCaps:
     @pytest.fixture
     def capped_service(self, service):
-        service.config = Settings(traverse_max_nodes=5, hybrid_search_enabled=False)
+        service.runtime = RuntimeConfig(db_values={"traverse_max_nodes": 5, "hybrid_search_enabled": False})
         return service
 
     @pytest.mark.asyncio

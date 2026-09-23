@@ -1100,9 +1100,10 @@ def enqueue_reinforce(pairs: list[tuple[str, str]]) -> None:
     edge_lifecycle_enabled гасит всю Ф1, edge_reinforcement_enabled —
     только касания (SQL не выполняется вовсе).
     """
-    from memory_server.config import settings
+    from memory_server.state import get_state
 
-    if not settings.edge_lifecycle_enabled or not settings.edge_reinforcement_enabled:
+    runtime = get_state().get_runtime_config_sync()
+    if not runtime.get("edge_lifecycle_enabled") or not runtime.get("edge_reinforcement_enabled"):
         return
     if not pairs:
         return

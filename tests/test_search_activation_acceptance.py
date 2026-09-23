@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 
 from memory_server.config import Settings
+from memory_server.runtime_config import RuntimeConfig
 from memory_server.memory.service import MemoryService
 
 SEED_A = "aaaaaaaa-0000-0000-0000-000000000001"
@@ -106,7 +107,7 @@ def activation_service(
         "search_activation_enabled": True,
     }
     overrides.update(cfg)
-    config = Settings(**overrides)
+    config = RuntimeConfig(db_values=overrides)
     repo = MagicMock()
     moment = datetime.now(timezone.utc)
     if seeds is None:
@@ -124,7 +125,7 @@ def activation_service(
         repository=repo,
         embedding_provider=MagicMock(),
         namespace_repository=MagicMock(),
-        config=config,
+        runtime=config,
         project_repository=MagicMock(),
         edge_dispatch=dispatch,
     )
@@ -228,9 +229,10 @@ class TestHybridBitwiseSnapshot:
 
         payloads = search_memories(query="q", limit=10)
 
-        config = service.config
-        rrf_a = 1.0 / (config.rrf_k + 0)  # rank_dense=0
-        rrf_b = 1.0 / (config.rrf_k + 1)  # rank_dense=1
+        runtime = service.runtime
+        rrf_k = runtime.get("rrf_k")
+        rrf_a = 1.0 / (rrf_k + 0)  # rank_dense=0
+        rrf_b = 1.0 / (rrf_k + 1)  # rank_dense=1
         iso = _iso(moment)
         expected = [
             {

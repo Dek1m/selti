@@ -50,6 +50,9 @@ class SeltiState:
         self._namespace_repository: Optional["NamespaceRepository"] = None
         self._project_repository: Optional["ProjectRepository"] = None
         self._linker: Optional["Linker"] = None
+        self._settings_repository: Optional["SettingsRepository"] = None
+        self._runtime_config: Optional["RuntimeConfig"] = None
+        self._runtime_config_bound: bool = False
         # Отдельные lock'и: pool не захватывается под services_lock → дедлока нет
         self._pool_lock = asyncio.Lock()
         self._services_lock = asyncio.Lock()
@@ -212,6 +215,61 @@ class SeltiState:
                 self._project_repository = ProjectRepository(pool)
         return self._project_repository
 
+    async def get_settings_repository(self) -> "SettingsRepository":
+        """Репозиторий app_settings (миграция 027) + профили."""
+        if self._settings_repository is not None:
+            return self._settings_repository
+        pool = await self.get_pool()
+        async with self._services_lock:
+            if self._settings_repository is None:
+                from memory_server.settings_store import SettingsRepository, compute_env_overrides
+
+                self._settings_repository = SettingsRepository(
+                    pool, env_locked_keys=compute_env_overrides().keys()
+                )
+        return self._settings_repository
+
+    async def get_runtime_config(self) -> "RuntimeConfig":
+        """RuntimeConfig: снапшот env>БД>дефолт + LISTEN settings_changed.
+
+        Первый доступ: bind репозитория, прогрев снапшота, старт слушателя.
+        БД недоступна → дефолты + WARN, повторная привязка на следующем
+        вызове (процесс не падает).
+        """
+        if self._runtime_config is not None and self._runtime_config_bound:
+            return self._runtime_config
+        async with self._services_lock:
+            if self._runtime_config is None:
+                from memory_server.runtime_config import RuntimeConfig
+
+                self._runtime_config = RuntimeConfig()
+            if not self._runtime_config_bound:
+                try:
+                    self._runtime_config.bind(await self.get_settings_repository())
+                    await self._runtime_config.start()
+                    self._runtime_config_bound = True
+                except Exception as exc:
+                    # Недоступная БД не роняет процесс: сервисы работают на
+                    # дефолтах; LISTEN/прогрев поднимутся при следующем обращении
+                    logger.warning(
+                        "runtime_config: DB unavailable, defaults in effect",
+                        extra={"error": str(exc)[:300], "error_type": type(exc).__name__},
+                    )
+        return self._runtime_config
+
+    def get_runtime_config_sync(self) -> "RuntimeConfig":
+        """Sync-доступ для диспетчеров вне async-контекста (enqueue_link
+        итд): уже прогретый снапшот, либо дефолты+env без БД-слоя — тот же
+        инстанс дорезолвится асинхронным get_runtime_config() позже."""
+        if self._runtime_config is not None:
+            return self._runtime_config
+        with self._sync_lock:
+            if self._runtime_config is None:
+                from memory_server.runtime_config import RuntimeConfig
+
+                self._runtime_config = RuntimeConfig()
+        return self._runtime_config
+
     async def get_memory_service(self) -> "MemoryService":
         """MemoryService: PG + Qdrant (fallback SQL) + dedup + namespaces."""
         if self._memory_service is not None:
@@ -249,11 +307,12 @@ class SeltiState:
             from memory_server.tasks.linker_tasks import enqueue_link
             from memory_server.tasks.memory_tasks import enqueue_reinforce
 
+            runtime = await self.get_runtime_config()
             self._memory_service = MemoryService(
                 repository=repository,
                 embedding_provider=self.get_embedding_client(),
                 namespace_repository=self._namespace_repository,
-                config=settings,
+                runtime=runtime,
                 project_repository=self._project_repository,
                 redis_provider=self.get_redis,
                 linker_dispatch=enqueue_link,
@@ -279,7 +338,7 @@ class SeltiState:
                     pool=pool,
                     redis_provider=self.get_redis_bytes,
                     project_repository=self._project_repository,
-                    config=settings,
+                    runtime=await self.get_runtime_config(),
                 )
         return self._map_service
 
@@ -288,6 +347,8 @@ class SeltiState:
 
         LLM-клиент создаётся только при непустом linker_llm_base_url —
         пустой URL = L2 отключён (Linker.llm=None, WARN в задачах).
+        Параметры LLM — runtime-ключи requires_restart: читаются здесь,
+        при создании клиента (рестарт процесса применяет новое значение).
         """
         if self._linker is not None:
             return self._linker
@@ -299,20 +360,22 @@ class SeltiState:
             from memory_server.memory.linker import Linker
             from memory_server.memory.qdrant_store import QdrantStore
 
+            runtime = await self.get_runtime_config()
+            llm_base_url = runtime.get("linker_llm_base_url")
             qdrant_client = self.get_qdrant()
             llm = (
                 LinkerLLMClient(
-                    base_url=settings.linker_llm_base_url,
+                    base_url=llm_base_url,
                     api_key=settings.linker_llm_api_key,
-                    model=settings.linker_llm_model,
-                    timeout=settings.linker_llm_timeout,
-                    max_retries=settings.linker_llm_retries,
+                    model=runtime.get("linker_llm_model"),
+                    timeout=runtime.get("linker_llm_timeout"),
+                    max_retries=runtime.get("linker_llm_retries"),
                 )
-                if settings.linker_llm_base_url
+                if llm_base_url
                 else None
             )
             if llm is None:
-                if settings.linker_l2_manual:
+                if runtime.get("linker_l2_manual"):
                     logger.warning(
                         "linker: L2 in MANUAL mode (linker_llm_base_url is empty) — "
                         "queue fills for memory_linker_review/memory_linker_verdict "
@@ -332,7 +395,7 @@ class SeltiState:
                     else None
                 ),
                 redis_provider=self.get_redis,
-                config=settings,
+                runtime=runtime,
                 llm=llm,
             )
         return self._linker
@@ -342,9 +405,21 @@ class SeltiState:
     async def aclose(self) -> None:
         """Graceful shutdown: закрыть ресурсы в порядке, обратном зависимостям.
 
-        Embedding (httpx) → Qdrant → Redis → asyncpg pool. Ошибка закрытия
-        одного ресурса не мешает закрыть остальные.
+        RuntimeConfig (LISTEN) → Embedding (httpx) → Qdrant → Redis → asyncpg
+        pool. Ошибка закрытия одного ресурса не мешает закрыть остальные.
         """
+        if self._runtime_config is not None:
+            try:
+                await self._runtime_config.stop()
+            except Exception as exc:
+                logger.warning(
+                    "RuntimeConfig stop failed",
+                    extra={"error": str(exc), "error_type": type(exc).__name__},
+                )
+            self._runtime_config = None
+            self._runtime_config_bound = False
+        self._settings_repository = None
+
         if self._embedding is not None:
             try:
                 await self._embedding.aclose()

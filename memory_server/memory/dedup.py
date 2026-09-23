@@ -3,8 +3,8 @@ import hashlib
 from dataclasses import dataclass
 from enum import Enum
 
-from memory_server.config import Settings
 from memory_server.embedding.provider import EmbeddingProvider
+from memory_server.runtime_config import RuntimeConfig
 from memory_server.logger import get_logger
 from memory_server.memory.repository import MemoryRepository
 from memory_server.metrics import DEDUP_SKIPPED_TOTAL, DEDUP_INSERTED_TOTAL, DEDUP_RATIO
@@ -37,11 +37,11 @@ class DedupEngine:
         self,
         repository: MemoryRepository,
         embedding_client: EmbeddingProvider,
-        config: Settings,
+        runtime: RuntimeConfig,
     ):
         self.repository = repository
         self.embedding = embedding_client
-        self.config = config
+        self.runtime = runtime
 
     @staticmethod
     def _update_ratio(namespace: str, action: DedupAction) -> None:
@@ -85,7 +85,7 @@ class DedupEngine:
     ) -> DedupDecision:
         content_hash = hashlib.sha256(content.encode()).hexdigest()
 
-        if not self.config.dedup_enabled:
+        if not self.runtime.get("dedup_enabled"):
             logger.info("Dedup disabled — force INSERT", extra={
                 "namespace": namespace, "hash": content_hash[:16],
             })
@@ -108,7 +108,7 @@ class DedupEngine:
             )
 
         # Semantic dedup
-        threshold = self.config.dedup_thresholds.get(namespace, self.config.dedup_threshold)
+        threshold = self.runtime.get("dedup_thresholds").get(namespace, self.runtime.get("dedup_threshold"))
         vector = await self.embedding.embed(content)
         results = await self.repository.search(
             query_embedding=vector,
@@ -153,7 +153,7 @@ class DedupEngine:
         asyncio.gather вместо serial (Qdrant-клиент за CircuitBreaker —
         отказ одного поиска не роняет батч, INSERT-fallback).
         """
-        if not self.config.dedup_enabled:
+        if not self.runtime.get("dedup_enabled"):
             return [
                 DedupDecision(
                     action=DedupAction.INSERT,
@@ -229,7 +229,7 @@ class DedupEngine:
             ns = entry.get("namespace", "default")
             h = hashes[global_i]
             vector = embeddings[local_i]
-            threshold = self.config.dedup_thresholds.get(ns, self.config.dedup_threshold)
+            threshold = self.runtime.get("dedup_thresholds").get(ns, self.runtime.get("dedup_threshold"))
             results = await self.repository.search(
                 query_embedding=vector,
                 user_id=user_id,

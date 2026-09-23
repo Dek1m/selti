@@ -28,8 +28,8 @@ from memory_server.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Таймаут ожидания результата задачи (5 минут)
-TASK_RESULT_TIMEOUT = 300
+# Таймаут ожидания результата задачи (фундамент env TASK_RESULT_TIMEOUT)
+TASK_RESULT_TIMEOUT = settings.task_result_timeout
 
 # Ключ события завершения (общий с tasks/signals.py)
 NOTIFY_KEY_PREFIX = "selti:bridge:done:"

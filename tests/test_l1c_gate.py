@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from memory_server.config import Settings
+from memory_server.runtime_config import RuntimeConfig
 from memory_server.db import queries as q
 from memory_server.memory.linker import Linker, _cosine_similarity
 from memory_server.metrics import LINKER_L1C_GATE_FAILURES_TOTAL
@@ -39,7 +40,7 @@ _VEC_NEAR = [0.8, 0.0]
 _VEC_FAR = [0.0, 1.0]
 
 
-def gate_config(**overrides) -> Settings:
+def gate_config(**overrides) -> RuntimeConfig:
     base = {
         "dedup_enabled": False,
         "hybrid_search_enabled": False,
@@ -47,12 +48,12 @@ def gate_config(**overrides) -> Settings:
         "linker_l1c_gate_min": 0.30,
     }
     base.update(overrides)
-    return Settings(**base)
+    return RuntimeConfig(db_values=base)
 
 
 def make_linker(mock_pool, qdrant=None, **cfg) -> Linker:
     return Linker(
-        pool=mock_pool, qdrant=qdrant, redis_provider=None, config=gate_config(**cfg)
+        pool=mock_pool, qdrant=qdrant, redis_provider=None, runtime=gate_config(**cfg)
     )
 
 
@@ -288,7 +289,7 @@ class TestMutualReinforce:
 
         assert outcome == {"created": 1, "reinforced": 1, "fail_closed": False}
         insert_args = conn.fetchrow.await_args_list[0].args
-        assert insert_args[3] == linker.config.edge_reinforce_alpha
+        assert insert_args[3] == linker.runtime.get("edge_reinforce_alpha")
 
 
 # ══════════════════════════════════════════════════════════════════

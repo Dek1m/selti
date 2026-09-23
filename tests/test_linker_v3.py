@@ -19,6 +19,7 @@ import httpx
 import pytest
 
 from memory_server.config import Settings
+from memory_server.runtime_config import RuntimeConfig
 from memory_server.db import queries as q
 from memory_server.llm_client import (
     GranuleText,
@@ -38,7 +39,7 @@ CAND_A = "22222222-2222-2222-2222-222222222222"
 CAND_B = "33333333-3333-3333-3333-333333333333"
 
 
-def linker_config(**overrides) -> Settings:
+def linker_config(**overrides) -> RuntimeConfig:
     """Конфиг линкера для юнитов: L2 включён (зоны видны), дефолты ADR."""
     base = {
         "dedup_enabled": False,
@@ -46,7 +47,7 @@ def linker_config(**overrides) -> Settings:
         "linker_l1c_enabled": False,
     }
     base.update(overrides)
-    return Settings(**base)
+    return RuntimeConfig(db_values=base)
 
 
 def make_linker(mock_pool, qdrant=None, redis_provider=None, llm=None, **cfg) -> Linker:
@@ -54,7 +55,7 @@ def make_linker(mock_pool, qdrant=None, redis_provider=None, llm=None, **cfg) ->
         pool=mock_pool,
         qdrant=qdrant,
         redis_provider=redis_provider,
-        config=linker_config(**cfg),
+        runtime=linker_config(**cfg),
         llm=llm,
     )
 
@@ -251,7 +252,7 @@ class TestNameReconciler:
             "resolved": 0,
             "would_resolve": 2666,
             "pending": 11782,
-            "batch": linker.config.linker_reconciler_batch,
+            "batch": linker.runtime.get("linker_reconciler_batch"),
         }
         conn.fetch.assert_not_awaited()  # ни одного UPDATE — только count
 
@@ -271,7 +272,7 @@ class TestNameReconciler:
         assert report["dry_run"] is False
         assert conn.fetch.await_count == 2
         batch_arg = conn.fetch.await_args_list[0].args[1]
-        assert batch_arg == linker.config.linker_reconciler_batch == 500
+        assert batch_arg == linker.runtime.get("linker_reconciler_batch") == 500
 
     @pytest.mark.asyncio
     async def test_dry_run_default_from_config(self, mock_pool):
@@ -350,7 +351,7 @@ class TestCoOccurrence:
             "l1c_gate_failures": 0,
         }
         cap = conn.fetch.await_args_list[1].args[-1]
-        assert cap == linker.config.linker_cooccurrence_cap == 10
+        assert cap == linker.runtime.get("linker_cooccurrence_cap") == 10
         assert conn.execute.await_count == 1  # l1c_done только грануле с соседями
 
     @pytest.mark.asyncio
@@ -881,7 +882,7 @@ class TestStoreDispatch:
             repository=mock_repository,
             embedding_provider=mock_embedding_provider,
             namespace_repository=mock_namespace_repository,
-            config=Settings(dedup_enabled=False, hybrid_search_enabled=False),
+            runtime=RuntimeConfig(db_values={"dedup_enabled": False, "hybrid_search_enabled": False}),
         )
 
     @pytest.mark.asyncio
@@ -935,11 +936,22 @@ class TestStoreDispatch:
         record, action = await service.store(content="x", user_id="u1")
         assert record.id == "new-id"
 
+    @staticmethod
+    def _patch_linker_runtime(monkeypatch, values: dict) -> None:
+        """enqueue_link читает флаги из runtime-снапшота state (Ф2)."""
+        from types import SimpleNamespace
+
+        runtime = RuntimeConfig(db_values=values)
+        monkeypatch.setattr(
+            "memory_server.tasks.linker_tasks.get_state",
+            lambda: SimpleNamespace(get_runtime_config_sync=lambda: runtime),
+        )
+
     def test_enqueue_link_respects_master_flag(self, monkeypatch):
         """linker_enabled=False → send_task не зовётся вовсе."""
         from memory_server.tasks import linker_tasks
 
-        monkeypatch.setattr(linker_tasks.settings, "linker_enabled", False, raising=False)
+        self._patch_linker_runtime(monkeypatch, {"linker_enabled": False})
         send_task = MagicMock()
         monkeypatch.setattr(
             "memory_server.celery_app.app.send_task", send_task, raising=True
@@ -950,7 +962,7 @@ class TestStoreDispatch:
     def test_enqueue_link_sends_memory_task(self, monkeypatch):
         from memory_server.tasks import linker_tasks
 
-        monkeypatch.setattr(linker_tasks.settings, "linker_enabled", True, raising=False)
+        self._patch_linker_runtime(monkeypatch, {"linker_enabled": True})
         send_task = MagicMock()
         monkeypatch.setattr(
             "memory_server.celery_app.app.send_task", send_task, raising=True

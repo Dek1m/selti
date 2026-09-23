@@ -21,6 +21,7 @@ export function Topbar() {
         <NavLink to="/graph">Граф</NavLink>
         <NavLink to="/projects">Проекты</NavLink>
         <NavLink to="/stats">Статистика</NavLink>
+        <NavLink to="/settings">Конфигурация</NavLink>
       </nav>
       <div className={`health${isErr ? " err" : ""}`} role="status" aria-live="polite">
         {isErr ? (

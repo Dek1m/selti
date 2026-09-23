@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from memory_server.config import Settings
+from memory_server.runtime_config import RuntimeConfig
 from memory_server.db import queries as ms_q
 from memory_server.memory import map_layout, map_service as ms
 from memory_server.memory.map_layout import (
@@ -261,7 +262,7 @@ def make_layout_service(pool, redis):
         pool=pool,
         redis_provider=redis_provider,
         project_repository=MagicMock(),
-        config=Settings(),
+        runtime=RuntimeConfig(db_values={}),
     )
 
 

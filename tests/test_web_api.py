@@ -103,8 +103,11 @@ class TestSearchEndpoint:
         assert api_client.get("/api/search").status_code == 422
 
     def test_limit_capped_at_100(self, api_client):
+        """Кап теперь runtime (max_search_limit): 422 от Query ушло, хендлер
+        отдаёт 400 с человекочитаемой причиной (§6 реестра)."""
         response = api_client.get("/api/search", params={"query": "x", "limit": 200})
-        assert response.status_code == 422
+        assert response.status_code == 400
+        assert "max_search_limit" in response.json()["detail"]
 
     def test_unknown_status_rejected(self, api_client):
         response = api_client.get("/api/search", params={"query": "x", "status": "bogus"})
@@ -208,8 +211,10 @@ class TestGraphEndpoint:
         assert kwargs["offset"] == 5
 
     def test_depth_capped_at_10(self, api_client):
+        """Кап глубины — runtime max_graph_depth: 400 из хендлера."""
         response = api_client.get("/api/graph/mem-1", params={"depth": 11})
-        assert response.status_code == 422
+        assert response.status_code == 400
+        assert "max_graph_depth" in response.json()["detail"]
 
 
 class TestStatsEndpoint:

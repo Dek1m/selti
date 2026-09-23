@@ -22,6 +22,8 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: ["src/**/*.test.ts"],
+    // jsdom включается per-file прагмой «// @vitest-environment jsdom»
+    // в компонентных тестах — node-тесты остаются быстрыми
+    include: ["src/**/*.test.{ts,tsx}"],
   },
 });

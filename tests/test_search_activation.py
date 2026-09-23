@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from memory_server.config import Settings
+from memory_server.runtime_config import RuntimeConfig
 from memory_server.memory.service import MemoryService
 
 SEED_A = "aaaaaaaa-0000-0000-0000-000000000001"
@@ -68,7 +69,7 @@ def activation_service(**cfg) -> tuple[MemoryService, MagicMock]:
         "search_activation_enabled": True,
     }
     overrides.update(cfg)
-    config = Settings(**overrides)
+    config = RuntimeConfig(db_values=overrides)
     repo = MagicMock()
     repo.search_hybrid = AsyncMock(return_value=[_candidate(SEED_A, rank_dense=0), _candidate(SEED_B, rank_dense=1)])
     repo.fetch_activation_edges = AsyncMock(return_value=list(GRAPH))
@@ -78,7 +79,7 @@ def activation_service(**cfg) -> tuple[MemoryService, MagicMock]:
         repository=repo,
         embedding_provider=MagicMock(),
         namespace_repository=MagicMock(),
-        config=config,
+        runtime=config,
         project_repository=MagicMock(),
     )
     service.embedding.embed = AsyncMock(return_value=[0.1, 0.2, 0.3])

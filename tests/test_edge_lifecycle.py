@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from memory_server.config import Settings
+from memory_server.runtime_config import RuntimeConfig
 from memory_server.db import queries as q
 from memory_server.memory.service import MemoryService, canonical_edge_pairs
 
@@ -25,7 +26,21 @@ LAMBDA = 0.02
 LAMBDA_MIN = 0.002
 
 
-def edge_config(**overrides) -> Settings:
+
+def _patch_reinforce_runtime(monkeypatch, values: dict) -> None:
+    """enqueue_reinforce читает флаги Ф1 из runtime-снапшота state."""
+    from types import SimpleNamespace
+
+    from memory_server.runtime_config import RuntimeConfig
+
+    runtime = RuntimeConfig(db_values=values)
+    monkeypatch.setattr(
+        "memory_server.state.get_state",
+        lambda: SimpleNamespace(get_runtime_config_sync=lambda: runtime),
+    )
+
+
+def edge_config(**overrides) -> RuntimeConfig:
     """Конфиг жизни рёбер: Ф1 включена (боевой контур виден)."""
     base = {
         "dedup_enabled": False,
@@ -33,7 +48,7 @@ def edge_config(**overrides) -> Settings:
         "edge_lifecycle_enabled": True,
     }
     base.update(overrides)
-    return Settings(**base)
+    return RuntimeConfig(db_values=base)
 
 
 def make_service(mock_repository, mock_embedding_provider, mock_namespace_repository,
@@ -42,7 +57,7 @@ def make_service(mock_repository, mock_embedding_provider, mock_namespace_reposi
         repository=mock_repository,
         embedding_provider=mock_embedding_provider,
         namespace_repository=mock_namespace_repository,
-        config=edge_config(**cfg),
+        runtime=edge_config(**cfg),
         project_repository=mock_project_repository,
     )
 
@@ -346,20 +361,15 @@ class TestReinforceDispatch:
     def test_flags_gate_in_hook(self, monkeypatch):
         sent: list = []
         hook = self._hook(monkeypatch, sent)
-        monkeypatch.setattr(
-            "memory_server.config.settings", Settings(edge_lifecycle_enabled=True)
-        )
+        _patch_reinforce_runtime(monkeypatch, {"edge_lifecycle_enabled": True})
         hook([(A, B)])
         assert len(sent) == 1
         # мастер-выключатель: молчит
-        monkeypatch.setattr(
-            "memory_server.config.settings", Settings(edge_lifecycle_enabled=False)
-        )
+        _patch_reinforce_runtime(monkeypatch, {"edge_lifecycle_enabled": False})
         hook([(A, B)])
         # точечный флаг: молчит
-        monkeypatch.setattr(
-            "memory_server.config.settings",
-            Settings(edge_lifecycle_enabled=True, edge_reinforcement_enabled=False),
+        _patch_reinforce_runtime(
+            monkeypatch, {"edge_lifecycle_enabled": True, "edge_reinforcement_enabled": False}
         )
         hook([(A, B)])
         assert len(sent) == 1  # оба гейта отработали тихо
@@ -367,9 +377,7 @@ class TestReinforceDispatch:
     def test_dispatch_failure_non_fatal(self, monkeypatch):
         from memory_server.tasks import memory_tasks
 
-        monkeypatch.setattr(
-            "memory_server.config.settings", Settings(edge_lifecycle_enabled=True)
-        )
+        _patch_reinforce_runtime(monkeypatch, {"edge_lifecycle_enabled": True})
 
         def broken_send(*args, **kwargs):
             raise RuntimeError("broker down")
@@ -398,7 +406,7 @@ class TestReinforceDispatch:
             repository=_repo_stub(search_rows=rows),
             embedding_provider=mock_embedding_provider,
             namespace_repository=mock_namespace_repository,
-            config=edge_config(hybrid_search_enabled=False),
+            runtime=edge_config(hybrid_search_enabled=False),
             project_repository=mock_project_repository,
             edge_dispatch=dispatch,
         )
@@ -439,7 +447,7 @@ def make_service_from_pool(mock_pool, **cfg) -> MemoryService:
         repository=repo,
         embedding_provider=MagicMock(),
         namespace_repository=ns,
-        config=edge_config(**cfg),
+        runtime=edge_config(**cfg),
     )
 
 

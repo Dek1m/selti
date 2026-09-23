@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 
 from memory_server.config import Settings
+from memory_server.runtime_config import RuntimeConfig
 from memory_server.db import queries as q
 from memory_server.memory.activation import ActivationSpreader
 from memory_server.memory.service import MemoryService
@@ -38,14 +39,14 @@ TOLERANCE = 0.02  # 15 итераций: остаток затухания 0.85^
 DAMPING = 0.85
 
 
-def activation_config(**overrides) -> Settings:
+def activation_config(**overrides) -> RuntimeConfig:
     base = {
         "dedup_enabled": False,
         "hybrid_search_enabled": False,
         "traverse_activation_enabled": True,
     }
     base.update(overrides)
-    return Settings(**base)
+    return RuntimeConfig(db_values=base)
 
 
 def ppr_reference(edges, seed, damping, iterations):
@@ -83,7 +84,7 @@ def service_stub(repo: MagicMock, dispatch=None, **cfg) -> MemoryService:
         repository=repo,
         embedding_provider=MagicMock(),
         namespace_repository=MagicMock(),
-        config=activation_config(**cfg),
+        runtime=activation_config(**cfg),
         edge_dispatch=dispatch,
     )
 

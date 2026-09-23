@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from memory_server.config import Settings
+from memory_server.runtime_config import RuntimeConfig
 from memory_server.db import queries as q
 from memory_server.memory.map_service import MapService
 
@@ -46,7 +47,7 @@ def _service_with_rows(rows, captured=None):
         pool=pool,
         redis_provider=AsyncMock(),
         project_repository=AsyncMock(),
-        config=Settings(),
+        runtime=RuntimeConfig(db_values={}),
     )
 
 
@@ -91,7 +92,7 @@ class TestMapServicePositions:
             pool=pool,
             redis_provider=AsyncMock(),
             project_repository=AsyncMock(),
-            config=Settings(),
+            runtime=RuntimeConfig(db_values={}),
         )
         assert await service.positions(["c" * 8 + "-0000-0000-0000-000000000000"]) == {}
 

@@ -158,3 +158,81 @@ export interface HealthPayload {
     celery?: string;
   };
 }
+
+/* ── Settings (Ф3 «Конфигурация», контракт Соны, реестр SETTINGS_REGISTRY.md) ── */
+
+export type SettingValueType = "int" | "float" | "bool" | "str" | "json";
+
+/** Where the effective value comes from: env beats DB, DB beats default. */
+export type EffectiveSource = "env" | "db" | "default";
+
+/** Виджет из реестра (сидинг 027); фронт мапит на контролы,
+ * неизвестные значения фолбэкасят по value_type. */
+export type SettingWidget =
+  | "switch"
+  | "slider_number"
+  | "number"
+  | "combobox"
+  | "checkboxes"
+  | "kv_table"
+  | "text";
+
+/** GET /api/settings item — SettingMeta model */
+export interface SettingMeta {
+  key: string;
+  /** Эффективное значение (env > db > default) */
+  value: unknown;
+  /** Сырое значение из БД app_settings; null — в БД не записано */
+  db_value: unknown;
+  value_type: SettingValueType;
+  /** group_key из миграции 027 (search, dedup, …, api_caps) */
+  group: string;
+  title_ru: string;
+  description_ru: string;
+  default_value: unknown;
+  min_value?: number;
+  max_value?: number;
+  /** Варианты для combobox / checkboxes */
+  enum_values?: string[];
+  is_dangerous: boolean;
+  requires_restart: boolean;
+  /** Жёсткая блокировка поля UI: ключ задан в env/compose */
+  is_env_locked: boolean;
+  effective_source: EffectiveSource;
+  differs_from_default: boolean;
+  /** Желаемый виджет из реестра */
+  widget: SettingWidget;
+  updated_at: string | null;
+  updated_by: string | null;
+}
+
+/** GET /api/settings — payload: каталог + русские заголовки групп из сидинга */
+export interface SettingsGroupInfo {
+  key: string;
+  title_ru: string;
+}
+
+export interface SettingsPayload {
+  settings: SettingMeta[];
+  groups: SettingsGroupInfo[];
+}
+
+/** GET /api/settings/profiles item */
+export interface SettingsProfile {
+  id: string;
+  name: string;
+  description?: string | null;
+  is_builtin: boolean;
+  created_at: string;
+}
+
+/** GET /api/settings/profiles — payload */
+export interface ProfilesPayload {
+  profiles: SettingsProfile[];
+}
+
+/** POST /api/settings/profiles/{id}/apply — env-ключи внутри профиля пропускаются */
+export interface ApplyProfileResult {
+  applied: string[];
+  skipped_env: string[];
+}

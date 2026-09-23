@@ -29,7 +29,7 @@ from typing import Any, Callable, Iterable
 import asyncpg
 import numpy as np
 
-from memory_server.config import Settings
+from memory_server.runtime_config import RuntimeConfig
 from memory_server.db import queries as q
 from memory_server.logger import get_logger
 from memory_server.memory import galactic_layout as galaxy
@@ -194,12 +194,12 @@ class MapService:
         pool: Any,
         redis_provider: Callable[[], Any],
         project_repository: ProjectRepository,
-        config: Settings,
+        runtime: RuntimeConfig,
     ) -> None:
         self._pool = pool
         self._redis_provider = redis_provider
         self._project_repo = project_repository
-        self._config = config
+        self._runtime = runtime
 
     async def _redis(self) -> Any:
         return await self._redis_provider()
@@ -217,7 +217,7 @@ class MapService:
             logger.warning("map: meta cache read failed", extra={"error": str(exc)[:200]})
         computed = await self._compute_meta()
         try:
-            await redis.set(META_KEY, _json_bytes(computed), ex=self._config.map_meta_ttl)
+            await redis.set(META_KEY, _json_bytes(computed), ex=self._runtime.get("map_meta_ttl"))
         except Exception as exc:
             logger.warning("map: meta cache write failed", extra={"error": str(exc)[:200]})
         return computed
@@ -301,7 +301,7 @@ class MapService:
             gz = await self._build_snapshot_gz(
                 meta["version"], with_preview, project_uuid, namespace
             )
-            await redis.set(key, gz, ex=self._config.map_snapshot_ttl)
+            await redis.set(key, gz, ex=self._runtime.get("map_snapshot_ttl"))
             await self._expire_stale_snapshots(redis, meta["version"])
         finally:
             await redis.delete(lock_key)
@@ -315,7 +315,7 @@ class MapService:
         return {"cached": False, "key": key, "bytes": len(gz), **meta}
 
     async def _await_snapshot(self, redis: Any, key: str) -> bytes | None:
-        deadline = time.monotonic() + self._config.map_build_wait_seconds
+        deadline = time.monotonic() + self._runtime.get("map_build_wait_seconds")
         while time.monotonic() < deadline:
             gz = await redis.get(key)
             if gz is not None:
@@ -338,8 +338,8 @@ class MapService:
             cluster_rows = await conn.fetch(q.MAP_CLUSTERS_SQL, namespace)
         snapshot = build_snapshot(
             version, node_rows, edge_rows, cluster_rows, with_preview,
-            self._config.map_preview_chars, self._config.map_name_chars,
-            self._config.map_layout_bbox,
+            self._runtime.get("map_preview_chars"), self._runtime.get("map_name_chars"),
+            self._runtime.get("map_layout_bbox"),
         )
         return gzip.compress(_json_bytes(snapshot), compresslevel=6)
 
@@ -349,7 +349,7 @@ class MapService:
         async for key in redis.scan_iter(match=f"{SNAP_KEY_PREFIX}*"):
             parts = key.split(b":")
             if len(parts) >= 3 and parts[2] != current:
-                await redis.expire(key, self._config.map_stale_ttl)
+                await redis.expire(key, self._runtime.get("map_stale_ttl"))
     async def _resolve_project(self, project_id: str | None) -> str | None:
         if project_id is None:
             return None
@@ -391,7 +391,7 @@ class MapService:
         edge_indices = np.array(edge_list, dtype=np.int64).reshape(-1, 2)
         weight_array = np.array(weights, dtype=np.float64)
 
-        bbox = self._config.map_layout_bbox
+        bbox = self._runtime.get("map_layout_bbox")
         old_coords = np.full((len(node_rows), 3), np.nan)
         for row in old_rows:
             pos = index.get(row["node_id"])
@@ -401,7 +401,7 @@ class MapService:
         seed = map_layout.seed_positions(len(node_rows), edge_indices, old_coords, bbox)
         coords, drl_status = map_layout.drl_layout(
             len(node_rows), edge_indices, weight_array, seed,
-            timeout=self._config.map_drl_timeout,
+            timeout=self._runtime.get("map_drl_timeout"),
         )
         method = drl_status
         if coords is None:
@@ -416,7 +416,7 @@ class MapService:
         else:
             coords = map_layout.normalize_bbox(coords, bbox)
             coords = map_layout.relax_min_distance(
-                coords, self._config.map_min_dist, self._config.map_relax_iterations
+                coords, self._runtime.get("map_min_dist"), self._runtime.get("map_relax_iterations")
             )
             coords = np.clip(coords, -bbox, bbox)
 
@@ -479,9 +479,9 @@ class MapService:
             scale = await conn.fetchrow(q.GALACTIC_SCALE_SQL)
         counts = tuple(int(scale[name]) for name in ("node_count", "edge_count", "cluster_count"))
         limits = (
-            self._config.galactic_max_nodes,
-            self._config.galactic_max_edges,
-            self._config.galactic_max_clusters,
+            self._runtime.get("galactic_max_nodes"),
+            self._runtime.get("galactic_max_edges"),
+            self._runtime.get("galactic_max_clusters"),
         )
         if any(c > lim for c, lim in zip(counts, limits)):
             logger.warning(

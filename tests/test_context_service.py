@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from memory_server.config import Settings
+from memory_server.runtime_config import RuntimeConfig
 from memory_server.exceptions import NotFoundError
 from memory_server.memory.project_repository import ProjectRecord
 from memory_server.memory.service import MemoryService
@@ -160,7 +161,7 @@ def context_service(repository, project_repo, fake_redis):
             get_or_create=AsyncMock(return_value=MagicMock(id="ns-id")),
             get_by_uid=AsyncMock(side_effect=lambda uid: MagicMock(id=f"ns-{uid}")),
         ),
-        config=Settings(dedup_enabled=False, context_cache_ttl=3600),
+        runtime=RuntimeConfig(db_values={"dedup_enabled": False, "context_cache_ttl": 3600}),
         project_repository=project_repo,
         redis_provider=provider,
     )

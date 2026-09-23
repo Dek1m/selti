@@ -22,8 +22,12 @@ class TestSettingsDefaults:
         assert s.embedding_model == "qwen3-embedding-8b"
         assert s.embedding_dimension == 4096
         assert s.mcp_server_name == os.getenv("SERVICE_NAME", "selti")
-        assert s.search_default_limit == 10
         assert s.search_default_threshold == 0.7
+        assert s.max_search_limit == 100
+        assert s.max_graph_depth == 10
+        assert s.db_statement_timeout == "45s"
+        assert s.task_result_timeout == 300
+        assert s.runtime_env_overrides == ""
         assert s.log_level == "INFO"
 
 
@@ -39,8 +43,9 @@ class TestSettingsFromEnv:
         "EMBEDDING_MODEL": "text-embedding-3-small",
         "EMBEDDING_DIMENSION": "1536",
         "MCP_SERVER_NAME": "my-memory",
-        "SEARCH_DEFAULT_LIMIT": "25",
         "SEARCH_DEFAULT_THRESHOLD": "0.5",
+        "DB_STATEMENT_TIMEOUT": "30s",
+        "TASK_RESULT_TIMEOUT": "120",
         "LOG_LEVEL": "DEBUG",
     }
 
@@ -55,8 +60,9 @@ class TestSettingsFromEnv:
         assert s.embedding_model == "text-embedding-3-small"
         assert s.embedding_dimension == 1536
         assert s.mcp_server_name == "my-memory"
-        assert s.search_default_limit == 25
         assert s.search_default_threshold == 0.5
+        assert s.db_statement_timeout == "30s"
+        assert s.task_result_timeout == 120
         assert s.log_level == "DEBUG"
 
     def test_partial_override(self):

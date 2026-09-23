@@ -9,8 +9,8 @@ from itertools import combinations
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from memory_server.config import Settings
 from memory_server.embedding.provider import EmbeddingProvider
+from memory_server.runtime_config import RuntimeConfig
 from memory_server.exceptions import (
     ConflictError,
     NotFoundError,
@@ -149,7 +149,7 @@ class MemoryService:
         repository: MemoryRepository,
         embedding_provider: EmbeddingProvider,
         namespace_repository: NamespaceRepository,
-        config: Settings | None = None,
+        runtime: RuntimeConfig | None = None,
         project_repository: ProjectRepository | None = None,
         redis_provider: Callable[[], Awaitable["Redis"]] | None = None,
         linker_dispatch: Callable[[str], None] | None = None,
@@ -159,8 +159,10 @@ class MemoryService:
         self.embedding = embedding_provider
         self.ns_repo = namespace_repository
         self.project_repo = project_repository
-        self.config = config or Settings()
-        self.dedup = DedupEngine(repository, embedding_provider, self.config)
+        # Runtime-конфигурация (Ф2): env > БД > дефолт, снапшот без IO.
+        # None — дефолты+env (юнит-тесты без БД-слоя)
+        self.runtime = runtime or RuntimeConfig()
+        self.dedup = DedupEngine(repository, embedding_provider, self.runtime)
         # Ленивая фабрика Redis-клиента (SeltiState.get_redis): кеш облачка
         # не обязателен для корректности — None = деградация в таблицу
         self.redis_provider = redis_provider
@@ -260,7 +262,7 @@ class MemoryService:
             content_hash: str | None = None
             embedding: list[float] | None = None
 
-            if self.config.dedup_enabled:
+            if self.runtime.get("dedup_enabled"):
                 decision = await self.dedup.check(content, user_id, namespace, metadata=metadata)
                 content_hash = decision.content_hash
                 embedding = decision.embedding
@@ -360,7 +362,7 @@ class MemoryService:
                 )
             if strategy == "activation":
                 # До приёмки выключен: внятная ошибка, НЕ тихий hybrid (Ф3-ERR-01)
-                if not self.config.search_activation_enabled:
+                if not self.runtime.get("search_activation_enabled"):
                     raise ValueError(
                         "search strategy 'activation' is disabled "
                         "(search_activation_enabled=False)"
@@ -380,7 +382,7 @@ class MemoryService:
                 )
             resolved_project = await self.resolve_project(project_id)
             query_embedding = await self.embedding.embed(query)
-            if not self.config.hybrid_search_enabled:
+            if not self.runtime.get("hybrid_search_enabled"):
                 # Фича-флаг отката (не legacy): выключенный hybrid = плотный
                 # Qdrant-путь Фазы 0, документирован в конфиге.
                 results = await self.repository.search(
@@ -449,7 +451,7 @@ class MemoryService:
             query=query,
             query_embedding=query_embedding,
             user_id=user_id,
-            limit=min(self.config.search_activation_seed_limit, limit),
+            limit=min(self.runtime.get("search_activation_seed_limit"), limit),
             threshold=threshold,
             namespace=namespace,
             project_id=await self.resolve_project(project_id),
@@ -464,17 +466,17 @@ class MemoryService:
         need = limit - len(results)
         if need > 0:
             edges = await self.repository.fetch_activation_edges(
-                self.config.edge_decay_lambda,
-                self.config.edge_decay_lambda_min,
+                self.runtime.get("edge_decay_lambda"),
+                self.runtime.get("edge_decay_lambda_min"),
                 None,
-                self.config.traverse_symmetric_link_types,
+                self.runtime.get("traverse_symmetric_link_types"),
             )
-            spreader = ActivationSpreader(edges, damping=self.config.ppr_damping)
+            spreader = ActivationSpreader(edges, damping=self.runtime.get("ppr_damping"))
             # +len(seed_ids) — запас: seed'ы почти наверняка в топе ранга,
             # расширениям нужен остаток сверх них
             ranked = spreader.spread(
                 seed_ids,
-                iterations=self.config.traverse_activation_iterations,
+                iterations=self.runtime.get("traverse_activation_iterations"),
                 top_k=limit + len(seed_ids),
             )
             activated = [
@@ -547,7 +549,7 @@ class MemoryService:
             namespace=namespace,
             project_id=project_id,
             threshold=threshold,
-            prefetch=max(self.config.hybrid_prefetch, offset + limit),
+            prefetch=max(self.runtime.get("hybrid_prefetch"), offset + limit),
             include_historical=include_historical,
             created_after=created_after,
             created_before=created_before,
@@ -560,10 +562,10 @@ class MemoryService:
             [c.id for c in candidates if c.rank_dense is not None],
             [c.id for c in candidates if c.rank_fts is not None],
         ]
-        rrf_scores = rrf_fuse(rankings, k=self.config.rrf_k)
+        rrf_scores = rrf_fuse(rankings, k=self.runtime.get("rrf_k"))
         vectors = {c.id: c.vector for c in candidates if c.vector}
         ordered = mmr_rerank(
-            rrf_scores, vectors, top_k=offset + limit, lambda_=self.config.mmr_lambda
+            rrf_scores, vectors, top_k=offset + limit, lambda_=self.runtime.get("mmr_lambda")
         )[offset:]
 
         now = datetime.now(timezone.utc)
@@ -577,14 +579,14 @@ class MemoryService:
                 if cand.frozen
                 else recency_decay(
                     _days_since(cand.last_accessed_at or cand.created_at, now),
-                    self.config.recency_decay_rates.get(
-                        cand.namespace, self.config.recency_decay_rate
+                    self.runtime.get("recency_decay_rates").get(
+                        cand.namespace, self.runtime.get("recency_decay_rate")
                     ),
                 )
             )
             weight = importance_weight(
                 cand.importance,
-                self.config.importance_multipliers.get(cand.namespace, 1.0),
+                self.runtime.get("importance_multipliers").get(cand.namespace, 1.0),
             )
             results.append(
                 SearchResult(
@@ -717,7 +719,7 @@ class MemoryService:
                     twin.id, "content is already active in this namespace (exact-dedup)"
                 )
             confidence = min(
-                max(old.confidence * self.config.supersession_confidence_factor, 0.0),
+                max(old.confidence * self.runtime.get("supersession_confidence_factor"), 0.0),
                 1.0,
             )
             embedding = await self.embedding.embed(new_content)
@@ -865,15 +867,15 @@ class MemoryService:
     async def decay_confidence(self) -> dict[str, int]:
         """Ежедневное затухание уверенности: батч-SQL, per-namespace rate.
 
-        rates берутся из config.recency_decay_rates (единый источник
+        rates берутся из runtime recency_decay_rates (единый источник
         скоростей затухания с ранжированием D4); метрика — счёт по namespace.
         """
-        rates = self.config.recency_decay_rates
+        rates = self.runtime.get("recency_decay_rates")
         touched = await self.repository.decay_confidence(
             ns_uids=list(rates.keys()),
             rates=list(rates.values()),
-            default_rate=self.config.recency_decay_rate,
-            floor=self.config.confidence_decay_floor,
+            default_rate=self.runtime.get("recency_decay_rate"),
+            floor=self.runtime.get("confidence_decay_floor"),
         )
         logger.info("decay_confidence: done", extra={"touched_total": sum(touched.values())})
         return touched
@@ -885,7 +887,7 @@ class MemoryService:
         дольше stale_days. Warning-лог — сигнал для memory_stale_list.
         """
         count = await self.repository.count_stale(
-            self.config.stale_threshold, self.config.stale_days
+            self.runtime.get("stale_threshold"), self.runtime.get("stale_days")
         )
         if count:
             logger.warning("mark_stale: candidates for revision", extra={"count": count})
@@ -902,8 +904,8 @@ class MemoryService:
         namespace_id = await self._ns_id_or_none(namespace)
         resolved_project = await self.resolve_project(project_id)
         return await self.repository.list_stale(
-            threshold=self.config.stale_threshold,
-            stale_days=self.config.stale_days,
+            threshold=self.runtime.get("stale_threshold"),
+            stale_days=self.runtime.get("stale_days"),
             user_id=user_id,
             namespace_id=namespace_id,
             project_id=resolved_project,
@@ -921,11 +923,11 @@ class MemoryService:
           * gc_mode='hard' + gc_purge_enabled=True — hard delete как раньше.
         Beat продолжает отчитывать selected — наблюдаемость без действия.
         """
-        purge_allowed = self.config.gc_purge_enabled and self.config.gc_mode == "hard"
-        ids = await self.repository.select_gc_superseded(self.config.gc_retention_days)
+        purge_allowed = self.runtime.get("gc_purge_enabled") and self.runtime.get("gc_mode") == "hard"
+        ids = await self.repository.select_gc_superseded(self.runtime.get("gc_retention_days"))
         result: dict[str, int | str | bool] = {
-            "mode": self.config.gc_mode,
-            "purge_enabled": self.config.gc_purge_enabled,
+            "mode": self.runtime.get("gc_mode"),
+            "purge_enabled": self.runtime.get("gc_purge_enabled"),
             "selected": len(ids),
             "deleted": 0,
         }
@@ -933,14 +935,14 @@ class MemoryService:
             return result
         if not purge_allowed:
             GC_PURGE_BLOCKED_TOTAL.labels(
-                reason="purge_disabled" if not self.config.gc_purge_enabled
+                reason="purge_disabled" if not self.runtime.get("gc_purge_enabled")
                 else "mode_disabled"
             ).inc()
             logger.warning("gc_superseded: purge disabled, candidates only", extra={
                 "selected": len(ids),
-                "mode": self.config.gc_mode,
-                "purge_enabled": self.config.gc_purge_enabled,
-                "retention_days": self.config.gc_retention_days,
+                "mode": self.runtime.get("gc_mode"),
+                "purge_enabled": self.runtime.get("gc_purge_enabled"),
+                "retention_days": self.runtime.get("gc_retention_days"),
             })
             return result
         deleted = await self.repository.purge_memories(ids)
@@ -970,9 +972,9 @@ class MemoryService:
         try:
             rows = await self.repository.refresh_clusters(
                 ns_record.id,
-                threshold=self.config.cluster_threshold,
-                top_k=self.config.cluster_top_k,
-                min_members=self.config.cluster_min_members,
+                threshold=self.runtime.get("cluster_threshold"),
+                top_k=self.runtime.get("cluster_top_k"),
+                min_members=self.runtime.get("cluster_min_members"),
             )
         except SchemaPendingError:
             logger.warning(
@@ -1052,7 +1054,7 @@ class MemoryService:
             await redis.set(
                 f"{_CTX_KEY_PREFIX}{record.slug}{_CTX_DIRTY_SUFFIX}",
                 "1",
-                ex=self.config.context_cache_ttl,
+                ex=self.runtime.get("context_cache_ttl"),
             )
             logger.debug("context: dirty", extra={"slug": record.slug})
         except Exception:
@@ -1164,7 +1166,7 @@ class MemoryService:
             await redis.set(
                 f"{_CTX_KEY_PREFIX}{slug}",
                 context.model_dump_json(),
-                ex=self.config.context_cache_ttl,
+                ex=self.runtime.get("context_cache_ttl"),
             )
             await redis.delete(f"{_CTX_KEY_PREFIX}{slug}{_CTX_DIRTY_SUFFIX}")
         except Exception:
@@ -1193,7 +1195,7 @@ class MemoryService:
                 namespace=uid, project_id=record.id, limit=40
             )
             ranked = self._rank_candidates(
-                result.items, self.config.cloud_recency_half_life_days
+                result.items, self.runtime.get("cloud_recency_half_life_days")
             )
             quota = _SECTION_QUOTAS.get(section, 5)
             sections[section] = [r.content for r in ranked[:quota]]
@@ -1412,7 +1414,7 @@ class MemoryService:
                 f"strategy must be one of {'|'.join(_TRAVERSE_STRATEGIES)}, got: {strategy!r}"
             )
         if strategy == "activation":
-            if not self.config.traverse_activation_enabled:
+            if not self.runtime.get("traverse_activation_enabled"):
                 raise ValueError(
                     "traverse strategy 'activation' is disabled "
                     "(traverse_activation_enabled=False)"
@@ -1432,7 +1434,7 @@ class MemoryService:
 
         all_nodes = sorted(raw["nodes"], key=lambda n: str(n["id"]))
         total = len(all_nodes)
-        capped = all_nodes[: self.config.traverse_max_nodes]
+        capped = all_nodes[: self.runtime.get("traverse_max_nodes")]
         page = capped[offset : offset + limit] if limit is not None else capped[offset:]
         visible_ids = {str(n["id"]) for n in page}
 
@@ -1478,16 +1480,16 @@ class MemoryService:
         """
         started = time.perf_counter()
         edges = await self.repository.fetch_activation_edges(
-            self.config.edge_decay_lambda,
-            self.config.edge_decay_lambda_min,
+            self.runtime.get("edge_decay_lambda"),
+            self.runtime.get("edge_decay_lambda_min"),
             link_types,
-            self.config.traverse_symmetric_link_types,
+            self.runtime.get("traverse_symmetric_link_types"),
         )
-        spreader = ActivationSpreader(edges, damping=self.config.ppr_damping)
+        spreader = ActivationSpreader(edges, damping=self.runtime.get("ppr_damping"))
         ranked = spreader.spread(
             [start_id],
-            iterations=self.config.traverse_activation_iterations,
-            top_k=self.config.traverse_activation_top_k,
+            iterations=self.runtime.get("traverse_activation_iterations"),
+            top_k=self.runtime.get("traverse_activation_top_k"),
             ensure_ids=[start_id],  # контракт Ф2-PPR-05: старт всегда в выдаче
         )
         if not ranked:
@@ -1522,7 +1524,7 @@ class MemoryService:
                 for src, tgt, flow in spreader.edge_flows(
                     {node["id"] for node in nodes}
                 )
-                if flow >= self.config.edge_reinforce_flow_min
+                if flow >= self.runtime.get("edge_reinforce_flow_min")
             ])
         )
         logger.debug("traverse: activation done", extra={
@@ -1560,7 +1562,7 @@ class MemoryService:
         if not canonical:
             return 0
         touched = await self.repository.reinforce_relations(
-            canonical, self.config.edge_reinforce_alpha
+            canonical, self.runtime.get("edge_reinforce_alpha")
         )
         logger.debug("reinforce_edges: done", extra={
             "pairs": len(canonical), "touched": touched,
@@ -1575,23 +1577,23 @@ class MemoryService:
         повтор по обработанному состоянию — 0 кандидатов. Ни одного DELETE,
         ни одного UPDATE веса — материализуется только pruned_at.
         """
-        if not self.config.edge_lifecycle_enabled:
+        if not self.runtime.get("edge_lifecycle_enabled"):
             logger.info("edge_prune: lifecycle disabled (edge_lifecycle_enabled=False)")
             return {"skipped": "edge_lifecycle_enabled"}
-        dry = self.config.edge_prune_dry_run if dry_run is None else dry_run
+        dry = self.runtime.get("edge_prune_dry_run") if dry_run is None else dry_run
         ids = await self.repository.prune_candidates(
-            decay_lambda=self.config.edge_decay_lambda,
-            lambda_min=self.config.edge_decay_lambda_min,
-            min_age_days=self.config.edge_prune_min_age_days,
-            floor=self.config.edge_decay_floor,
+            decay_lambda=self.runtime.get("edge_decay_lambda"),
+            lambda_min=self.runtime.get("edge_decay_lambda_min"),
+            min_age_days=self.runtime.get("edge_prune_min_age_days"),
+            floor=self.runtime.get("edge_decay_floor"),
         )
         report: dict[str, int | str | bool] = {
             "dry_run": dry,
             "candidates": len(ids),
-            "lambda": self.config.edge_decay_lambda,
-            "lambda_min": self.config.edge_decay_lambda_min,
-            "floor": self.config.edge_decay_floor,
-            "min_age_days": self.config.edge_prune_min_age_days,
+            "lambda": self.runtime.get("edge_decay_lambda"),
+            "lambda_min": self.runtime.get("edge_decay_lambda_min"),
+            "floor": self.runtime.get("edge_decay_floor"),
+            "min_age_days": self.runtime.get("edge_prune_min_age_days"),
         }
         if dry:
             logger.info("edge_prune: DRY RUN report", extra=report)

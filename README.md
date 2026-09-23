@@ -302,22 +302,32 @@ Validation-ошибки (ValueError, InvalidNamespace) **не ретраятся
 
 ## Конфигурация
 
+Конфигурация selti — **трёхслойная**. Значение ключа резолвится по приоритету:
+env/compose (явно заданный, применяется рестартом) → таблица БД `app_settings`
+(меняется налету, hot-reload через `pg_notify`) → дефолт из `memory_server/config.py`.
+Runtime-ключ, заданный в env, жёстко блокирует поле в UI (read-only, 409 на запись);
+секреты и фундамент (адреса, порты) в БД не попадают никогда. Управление — экран
+**/ui/settings** (раздел «Конфигурация»: русские названия, тултипы «?», профили;
+встроенный профиль **«Заводские настройки»** возвращает дефолты одним применением).
+
+- Полный контракт системы и чек-лист добавления настройки — [docs/SETTINGS.md](docs/SETTINGS.md)
+- Реестр всех 97 runtime-ключей с русскими названиями — [docs/SETTINGS_REGISTRY.md](docs/SETTINGS_REGISTRY.md)
+
 ### Переменные окружения
 
 | Переменная               | Описание                                   | По умолчанию                                              |
 |--------------------------|--------------------------------------------|-----------------------------------------------------------|
-| `DATABASE_URL`           | PostgreSQL connection string (asyncpg)     | `postgresql+asyncpg://athena:athena@localhost:5432/selti` |
+| `DATABASE_URL`           | PostgreSQL connection string (asyncpg)     | `postgresql+asyncpg://svc_athene_ai:changeme@localhost:5432/memory` |
 | `REDIS_URL`              | Redis connection string                    | `redis://:@redis:6379/0`                                 |
 | `EMBEDDING_API_URL`      | URL API эмбеддингов (OpenAI-совместимый)   | `http://10.0.0.21:8080/v1`                               |
 | `EMBEDDING_API_KEY`      | Ключ аутентификации API эмбеддингов        | (пусто)                                                   |
 | `EMBEDDING_MODEL`        | Модель эмбеддингов                         | `qwen3-embedding-8b`                                      |
-| `EMBEDDING_DIMENSION`    | Размерность эмбеддинга                     | `8192`                                                    |
+| `EMBEDDING_DIMENSION`    | Размерность эмбеддинга                     | `4096`                                                    |
 | `API_KEY`                | Ключ аутентификации MCP-сервера            | (пусто — аутентификация отключена)                        |
 | `LOG_LEVEL`              | Уровень логирования                        | `INFO`                                                    |
-| `DEDUP_ENABLED`          | Включить дедупликацию                      | `true`                                                    |
-| `DEDUP_THRESHOLD`        | Глобальный порог семантической дедупликации | `0.95`                                                   |
-| `SEARCH_DEFAULT_LIMIT`   | Лимит результатов поиска по умолчанию      | `10`                                                      |
-| `SEARCH_DEFAULT_THRESHOLD`| Порог релевантности поиска по умолчанию    | `0.7`                                                     |
+| `DEDUP_ENABLED`          | Включить дедупликацию *(runtime-ключ — оверрайд, см. docs/SETTINGS.md)* | `true` |
+| `DEDUP_THRESHOLD`        | Глобальный порог семантической дедупликации *(runtime-ключ — оверрайд)* | `0.95` |
+| `SEARCH_DEFAULT_THRESHOLD`| Порог релевантности поиска по умолчанию *(runtime-ключ — оверрайд)* | `0.7` |
 | `MCP_HOST`               | Хост сервера                               | `0.0.0.0`                                                 |
 | `MCP_PORT`               | Порт сервера                               | `8000`                                                    |
 | `CELERY_BROKER_URL`      | URL брокера сообщений (Redis)              | `redis://localhost:6379/0`                                 |

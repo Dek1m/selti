@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from memory_server.config import Settings
+from memory_server.runtime_config import RuntimeConfig
 from memory_server.memory.activation import ActivationSpreader
 from memory_server.memory.service import MemoryService
 
@@ -24,14 +25,14 @@ GRAPH6 = [
 ]
 
 
-def activation_config(**overrides) -> Settings:
+def activation_config(**overrides) -> RuntimeConfig:
     base = {
         "dedup_enabled": False,
         "hybrid_search_enabled": False,
         "traverse_activation_enabled": True,
     }
     base.update(overrides)
-    return Settings(**base)
+    return RuntimeConfig(db_values=base)
 
 
 def ppr_reference(edges, seed, damping, iterations):
@@ -223,7 +224,7 @@ class TestServiceTraverseStrategy:
             repository=repo,
             embedding_provider=MagicMock(),
             namespace_repository=MagicMock(),
-            config=activation_config(**cfg),
+            runtime=activation_config(**cfg),
         ), repo
 
     @pytest.mark.asyncio
@@ -332,7 +333,7 @@ class TestActivationReinforceFlowFilter:
             repository=repo,
             embedding_provider=MagicMock(),
             namespace_repository=MagicMock(),
-            config=activation_config(**cfg),
+            runtime=activation_config(**cfg),
             edge_dispatch=dispatched.append,
         ), dispatched
 
