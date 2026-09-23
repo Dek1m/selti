@@ -788,6 +788,7 @@ export class FullMapScene {
   // ── pointer handling ──
 
   private onControlsStart(): void {
+    flyLog("controls-start");
     // any drag hides the tooltip immediately (§4.3)
     if (this.hoverIndex !== null) {
       this.hoverIndex = null;
@@ -817,6 +818,7 @@ export class FullMapScene {
   private onPointerUp = (event: PointerEvent): void => {
     const down = this.pointerDown;
     this.pointerDown = null;
+    flyLog("pointerup moved=" + (down ? down.moved : "no-down"));
     if (!down || down.moved || down.button !== 0) return;
     const rect = this.renderer.domElement.getBoundingClientRect();
     this.pointerScreen = { x: event.clientX - rect.left, y: event.clientY - rect.top };
@@ -874,6 +876,7 @@ export class FullMapScene {
   private emitClick(): void {
     const picked = this.pick();
     if (picked === null) {
+      flyLog("empty-click");
       // повторный клик в пустоту: отлёт на прежнюю рамку (если был подлёт)
       if (this.framedPrev) {
         const prev = this.framedPrev;
