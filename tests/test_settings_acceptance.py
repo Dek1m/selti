@@ -270,3 +270,51 @@ class TestDbUnavailableAtStartup:
         runtime2 = await st.get_runtime_config()
         assert st._runtime_config_bound is True
         assert runtime2.get("stale_days") == 30
+
+
+# ════════════════════════ Регрессия: дедлок первого вызова ════════════════════════
+
+
+class TestFirstCallNoDeadlock:
+    @pytest.mark.asyncio
+    async def test_first_get_runtime_config_no_services_lock_deadlock(self, monkeypatch):
+        """Регрессия прод-инцидента 23.09 (деплой fda6e9f): get_runtime_config
+        захватывал _services_lock и ВНУТРИ лока звал get_settings_repository(),
+        который при первом вызове берёт тот же лок — вложенный захват
+        asyncio.Lock (не реентерабельный) висел вечно: 4 uvicorn-воркера
+        зависали в lifespan, /live таймаутился, healthcheck красный, воркер
+        не поднимался по зависимости. Фикс: репозиторий берётся ДО лока.
+
+        get_settings_repository здесь НЕ мокаем — проверяется настоящий
+        вложенный путь на чистом state (в отличие от теста выше, где геттер
+        подменён и дедлок не ловится).
+        """
+        import asyncio
+
+        import memory_server.state as state_mod
+        from memory_server.runtime_config import RuntimeConfig
+
+        st = state_mod.SeltiState()
+
+        async def fake_pool():
+            return FakePool()
+
+        monkeypatch.setattr(st, "get_pool", fake_pool)
+
+        started: dict[str, bool] = {}
+
+        async def fake_start(self: RuntimeConfig) -> None:
+            # listener не поднимаем (юнит без PG); сам факт bind+start
+            # фиксируем флагом
+            started["bound"] = True
+
+        monkeypatch.setattr(RuntimeConfig, "start", fake_start)
+
+        # на старом коде (repo-вызов внутри лока) зависает → TimeoutError
+        runtime = await asyncio.wait_for(st.get_runtime_config(), timeout=3)
+        assert st._runtime_config_bound is True
+        assert started.get("bound") is True
+
+        # повторный вызов — быстрая ветка (ранний return до лока)
+        again = await asyncio.wait_for(st.get_runtime_config(), timeout=3)
+        assert again is runtime

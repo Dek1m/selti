@@ -238,14 +238,29 @@ class SeltiState:
         """
         if self._runtime_config is not None and self._runtime_config_bound:
             return self._runtime_config
+        # Репозиторий берём ДО лока: get_settings_repository() сам захватывает
+        # _services_lock при первом вызове — вложенный захват того же
+        # asyncio.Lock (не реентерабельный) дедлочил startup навсегда
+        # (прод-инцидент 23.09: воркеры висли в lifespan, /live таймаутился).
+        # Конвенция та же, что у get_pool() в остальных геттерах выше.
+        repository = None
+        try:
+            repository = await self.get_settings_repository()
+        except Exception as exc:
+            # Контракт «БД недоступна → дефолты + WARN»: процесс не роняем,
+            # привязка ретраится на следующем вызове
+            logger.warning(
+                "runtime_config: DB unavailable, defaults in effect",
+                extra={"error": str(exc)[:300], "error_type": type(exc).__name__},
+            )
         async with self._services_lock:
             if self._runtime_config is None:
                 from memory_server.runtime_config import RuntimeConfig
 
                 self._runtime_config = RuntimeConfig()
-            if not self._runtime_config_bound:
+            if repository is not None and not self._runtime_config_bound:
                 try:
-                    self._runtime_config.bind(await self.get_settings_repository())
+                    self._runtime_config.bind(repository)
                     await self._runtime_config.start()
                     self._runtime_config_bound = True
                 except Exception as exc:
