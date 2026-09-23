@@ -18,7 +18,7 @@ import { PULSE_SLOTS } from "./shaders";
 function source(ids = [10, 11, 12, 13]): PulseEdgeSource {
   return {
     ids: Float32Array.from(ids),
-    nodes: Int32Array.from(ids.flatMap((id, i) => [i * 2, i * 2 + 1])),
+    nodes: Int32Array.from(ids.flatMap((_id, i) => [i * 2, i * 2 + 1])),
     count: ids.length,
   };
 }

@@ -1035,6 +1035,10 @@ export class FullMapScene {
     const conPos = (this.contradictsEdges.geometry.getAttribute("position") as THREE.BufferAttribute).array as Float32Array;
     const conIdAttr = (this.contradictsEdges.geometry.getAttribute("aEdgeId") as THREE.BufferAttribute).array as Float32Array;
     const bufMeta = this.edgeBuffers;
+    // bufMeta создаётся вместе с мешами в buildEdgeLines; гвард обязателен:
+    // tsc -b (web-build в CI) ловит null здесь, а tsc --noEmit на references-
+    // only корневом tsconfig — нет (инцидент: прод остался на старом бандле)
+    if (!bufMeta) return;
     let mainN = 0;
     let supN = 0;
     let conN = 0;
