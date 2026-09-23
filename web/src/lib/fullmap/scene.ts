@@ -131,6 +131,7 @@ export class FullMapScene {
       `mainEdge pos0/1: ${raw}`,
       `pipeline calls=${info.calls} tris=${info.triangles} points=${info.points}`,
       `suns used=${this.suns ? this.suns.count : "none"} (cap 40, range 250)`,
+      `camera pos=${this.camera.position.x.toFixed(0)},${this.camera.position.y.toFixed(0)},${this.camera.position.z.toFixed(0)} target=${this.controls.target.x.toFixed(0)},${this.controls.target.y.toFixed(0)},${this.controls.target.z.toFixed(0)} dist=${this.camera.position.distanceTo(this.controls.target).toFixed(0)} fly=${this.flyAnimation ? 1 : 0}`,
     ].join(" | ");
   }
   private lastEdgeCull = 0;
