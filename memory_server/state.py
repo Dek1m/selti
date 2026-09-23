@@ -290,6 +290,11 @@ class SeltiState:
         if self._memory_service is not None:
             return self._memory_service
         pool = await self.get_pool()
+        # Инвариант: get_runtime_config() и get_settings_repository() берут
+        # _services_lock — зовём их ТОЛЬКО до входа в лок (вложенный захват
+        # asyncio.Lock дедлочит процесс: инцидент 23.09, воркер висел в
+        # SoftTimeLimitExceeded на первой же задаче).
+        runtime = await self.get_runtime_config()
         async with self._services_lock:
             if self._memory_service is not None:
                 return self._memory_service
@@ -322,7 +327,6 @@ class SeltiState:
             from memory_server.tasks.linker_tasks import enqueue_link
             from memory_server.tasks.memory_tasks import enqueue_reinforce
 
-            runtime = await self.get_runtime_config()
             self._memory_service = MemoryService(
                 repository=repository,
                 embedding_provider=self.get_embedding_client(),
@@ -341,6 +345,8 @@ class SeltiState:
         if self._map_service is not None:
             return self._map_service
         pool = await self.get_pool()
+        # Инвариант (см. get_memory_service): runtime-конфиг — до лока
+        runtime = await self.get_runtime_config()
         async with self._services_lock:
             if self._map_service is None:
                 from memory_server.memory.map_service import MapService
@@ -353,7 +359,7 @@ class SeltiState:
                     pool=pool,
                     redis_provider=self.get_redis_bytes,
                     project_repository=self._project_repository,
-                    runtime=await self.get_runtime_config(),
+                    runtime=runtime,
                 )
         return self._map_service
 
@@ -368,6 +374,8 @@ class SeltiState:
         if self._linker is not None:
             return self._linker
         pool = await self.get_pool()
+        # Инвариант (см. get_memory_service): runtime-конфиг — до лока
+        runtime = await self.get_runtime_config()
         async with self._services_lock:
             if self._linker is not None:
                 return self._linker
@@ -375,7 +383,6 @@ class SeltiState:
             from memory_server.memory.linker import Linker
             from memory_server.memory.qdrant_store import QdrantStore
 
-            runtime = await self.get_runtime_config()
             llm_base_url = runtime.get("linker_llm_base_url")
             qdrant_client = self.get_qdrant()
             llm = (

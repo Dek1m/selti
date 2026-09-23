@@ -318,3 +318,35 @@ class TestFirstCallNoDeadlock:
         # повторный вызов — быстрая ветка (ранний return до лока)
         again = await asyncio.wait_for(st.get_runtime_config(), timeout=3)
         assert again is runtime
+
+    @pytest.mark.asyncio
+    async def test_get_memory_service_with_unbound_runtime_config(self, monkeypatch):
+        """Воркер-сценарий того же инцидента: в celery-процессе нет lifespan,
+        первую задачу встречает get_memory_service(), который удерживает
+        _services_lock и (до фикса) звал get_runtime_config() ВНУТРИ лока —
+        при ещё не bound конфиге это вложенный захват → задачи висели до
+        SoftTimeLimitExceeded (240с), /api/stats и /api/search — 504.
+
+        Все конструкторы сервисов без IO: проверяется только блокировка.
+        """
+        import asyncio
+
+        import memory_server.state as state_mod
+        from memory_server.runtime_config import RuntimeConfig
+
+        st = state_mod.SeltiState()
+
+        async def fake_pool():
+            return FakePool()
+
+        async def fake_start(self: RuntimeConfig) -> None:
+            pass
+
+        monkeypatch.setattr(st, "get_pool", fake_pool)
+        monkeypatch.setattr(st, "get_qdrant", lambda: None)  # QdrantStore off
+        monkeypatch.setattr(st, "get_embedding_client", lambda: object())
+        monkeypatch.setattr(RuntimeConfig, "start", fake_start)
+
+        service = await asyncio.wait_for(st.get_memory_service(), timeout=5)
+        assert st._memory_service is service
+        assert st._runtime_config_bound is True
