@@ -35,20 +35,20 @@ describe("PulseOrchestrator: лимит одновременности", () => {
 });
 
 describe("PulseOrchestrator: рандом и фазировка", () => {
-  it("не каждый тик спавнит (часть рёбер вообще без импульса)", () => {
+  it("спавн на каждый тик после кулдауна; «без импульса» держат кулдаун и слоты", () => {
+    // частота втрое (Мастер 23.09): шанс 1.0, кулдаун 0.4-0.87с; тик 5с
+    // всегда больше кулдауна — спавн на каждом тике, одновременность
+    // держат PULSE_SLOTS (не больше двух живых)
     const orch = new PulseOrchestrator(mulberry32(7));
     const src = source();
     let spawnTicks = 0;
     for (let t = 0; t < 200; t++) {
       orch.tick(t * 5, src);
-      // тик со спавном: появился импульс с моментом старта == this тик
       if (orch.active.some((p) => p.start === t * 5)) spawnTicks++;
+      expect(orch.active.length).toBeLessThanOrEqual(PULSE_SLOTS);
     }
-    // шанс 0.8 за тик: при 200 тиках спавнов заметно меньше 200,
-    // но существенно больше нуля — «у какой-то не было вовсе»
-    expect(PULSE_SPAWN_CHANCE).toBeLessThan(1);
-    expect(spawnTicks).toBeGreaterThan(50);
-    expect(spawnTicks).toBeLessThan(200);
+    expect(PULSE_SPAWN_CHANCE).toBe(1);
+    expect(spawnTicks).toBe(200);
   });
 
   it("случайная пауза между спавнами ≥ PULSE_COOLDOWN_MIN_MS — фазы вразнобой", () => {
@@ -109,11 +109,16 @@ describe("PulseOrchestrator: жизненный цикл", () => {
     const src = source();
     orch.tick(0, src);
     expect(orch.active.length).toBe(1);
-    const { start, duration } = orch.active[0];
+    const { start, duration, slot: slot0 } = orch.active[0];
+    // частота втрое: кулдаун 0.4-0.87с < 1с — на втором тике может
+    // заспавниться второй импульс (слоты позволяют), первый ещё бежит
     orch.tick(start + duration - 0.01, src);
-    expect(orch.active.length).toBe(1); // ещё бежит
+    expect(orch.active.length).toBeLessThanOrEqual(PULSE_SLOTS);
+    expect(orch.active.some((p) => p.slot === slot0)).toBe(true); // ещё бежит
     orch.tick(start + duration + 0.01, src);
-    expect(orch.active.length).toBe(0); // пробежал
+    // первый пробежал; свежий второй (если был) живёт не дольше 1.8с от t1,
+    // а t2-t1 = 0.02с — он не мог успеть умереть: смерть строго по slot0
+    expect(orch.active.some((p) => p.slot === slot0)).toBe(false);
   });
 
   it("импульс умирает, если куллинг перезаписал его слот другим ребром", () => {
@@ -125,7 +130,10 @@ describe("PulseOrchestrator: жизненный цикл", () => {
     expect(src.ids[slot]).toBe(edgeId);
     src.ids[slot] = 999; // слот перезаписан другим ребром
     orch.tick(0.5, src);
-    expect(orch.active.length).toBe(0);
+    // частота втрое: кулдаун мог истечь — допустим свежий спавн на другом
+    // ребре; главное — перезаписанный импульс умер (его edgeId не живёт)
+    expect(orch.active.every((p) => p.edgeId !== 999 || p.slot !== slot)).toBe(true);
+    expect(orch.active.some((p) => p.edgeId === 999 && p.start === 0)).toBe(false);
   });
 
   it("пустой срез и отсутствие сцены не роняют тик", () => {
