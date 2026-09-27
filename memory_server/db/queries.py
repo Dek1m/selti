@@ -1075,7 +1075,7 @@ INSERT_COOCCURRENCE_LINKS = """
         INSERT INTO relations (source_id, target_id, link_type, weight, metadata)
         SELECT $1::uuid, c.neighbor_id, 'related_to', 0.5,
                jsonb_build_object('source', 'linker_v3', 'layer', 'l1c',
-                                  'session_id', $4)
+                                  'session_id', $4::text)
         FROM candidates c
         WHERE NOT EXISTS (
             SELECT 1 FROM relations r
