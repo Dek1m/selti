@@ -33,6 +33,19 @@ import psutil
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
+# Runner CI не имеет приватного argenta-logging (только прод-образ);
+# bench'у из map_layout нужен один GraphFileWriter — logger не читаем,
+# подставляем тихую заглушку ДО первого import memory_server.*
+import types  # noqa: E402
+
+_logging_stub = types.ModuleType("argenta_logging")
+_logging_stub.get_logger = lambda name: types.SimpleNamespace(
+    warning=lambda *args, **kwargs: None, info=lambda *args, **kwargs: None
+)
+_logging_stub.measure_duration = lambda *args, **kwargs: (lambda func: func)
+_logging_stub.request_id_var = None
+sys.modules.setdefault("argenta_logging", _logging_stub)
+
 from memory_server.memory import map_layout  # noqa: E402
 from memory_server.memory.map_drl_worker import SEED_RADIUS  # noqa: E402
 
