@@ -232,6 +232,7 @@ importance_multipliers: {"default": 1.0, "user_facts": 1.2, "project_meta": 1.1,
 | `schedule.rebuild_contexts` | interval 3600s | Пересборка облачков | Как часто переписываются грязные снапшоты «облачка знаний». Держать ≤ context_cache_ttl. | lifecycle_tasks.rebuild_contexts |
 | `schedule.refresh_clusters` | cron 02:00 | Пересчёт кластеров | Ежедневная разметка кластеров (после неё идут decay и отсечения). | lifecycle_tasks.refresh_clusters |
 | `schedule.layout_map` | cron *:10 | Раскладка карты | Часовой пересчёт layout_map (DrL, :10) после прохода линкера co_occurrence (:00) — карта свежая раз в час; без изменений (не dirty) — no-op + прогрев снапшота. | map_tasks.layout_map |
+| `schedule.layout_map_full` | cron 03:15 | Ночной полный DrL | Раз в сутки безусловный полный точный DrL на всех узлах (force): слот 03:15 — после confidence_decay 03:00, до edge_prune 03:30, разнесён с часовым :10 (rebuild-лок разводит их без гонки за память). | map_tasks.layout_map |
 | `schedule.confidence_decay` | cron 03:00 | Затухание уверенности | Ежедневное физическое затухание confidence по неймспейсам. | lifecycle_tasks.confidence_decay |
 | `schedule.edge_prune` | cron 03:30 | Отсечение рёбер | Ежедневная кампания жизни рёбер (после decay, до mark-stale). | lifecycle_tasks.edge_prune |
 | `schedule.mark_stale` | cron 04:00 | Пометка устаревших | Ежедневная пометка заброшенных гранул по порогам stale_*. | lifecycle_tasks.mark_stale |
@@ -335,9 +336,9 @@ int 10) не имеет ни одного потребителя в коде —
 
 | Слой | Ключей |
 |---|---|
-| Runtime (app_settings) | **97** (search 10, dedup 3, lifecycle 7, cluster 3, linker 20, edge 15, cloud 2, map 13, celery 9, schedule 13, api_caps 2) |
+| Runtime (app_settings) | **98** (search 10, dedup 3, lifecycle 7, cluster 3, linker 20, edge 15, cloud 2, map 13, celery 9, schedule 14, api_caps 2) |
 | — из них is_dangerous | 8 (dedup_enabled, gc_purge_enabled, gc_mode, gc_retention_days, linker_enabled, linker_reconciler_dry_run, edge_lifecycle_enabled, edge_prune_dry_run) |
-| — из них requires_restart | 25 (celery 8 — concurrency налету через broadcast, schedule 13, linker_llm_* 4) |
+| — из них requires_restart | 26 (celery 8 — concurrency налету через broadcast, schedule 14, linker_llm_* 4) |
 | Фундамент (env-only) | 28 полей config.py + 3 новых (DB_STATEMENT_TIMEOUT, TASK_RESULT_TIMEOUT, RUNTIME_ENV_OVERRIDES) + PROMETHEUS_MULTIPROC_DIR (compose) |
 | Код (не настройки) | 4 (_MAX_POOL_PER_PROCESS, _REDIS_TIMEOUT, _LOCAL_HOSTS, beat-константы надёжности) |
 | Мёртвые | 1 (search_default_limit) |

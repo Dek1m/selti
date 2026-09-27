@@ -49,7 +49,7 @@ class TestListAndGet:
         response = http.get("/api/settings")
         assert response.status_code == 200
         body = response.json()
-        assert len(body["settings"]) == 97
+        assert len(body["settings"]) == 98
         assert {g["key"] for g in body["groups"]} == {
             s.group for s in REGISTRY.values()
         }

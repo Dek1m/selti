@@ -117,23 +117,29 @@ from celery.schedules import crontab
 from memory_server.runtime_config import load_effective_values_sync
 from memory_server.settings_store import SCHEDULE_KEYS, get_default
 
-# schedule.* ключ → (имя beat-записи, задача); порядок = порядок реестра §2.10
-SCHEDULE_TASKS: dict[str, tuple[str, str]] = {
-    "schedule.update_worker_stats": ("update-worker-stats", "worker_stats.update"),
-    "schedule.update_business_metrics": ("update-business-metrics", "business_metrics.update"),
-    "schedule.rebuild_contexts": ("rebuild-contexts", "memory_server.tasks.lifecycle_tasks.rebuild_contexts"),
-    "schedule.refresh_clusters": ("refresh-clusters", "memory_server.tasks.lifecycle_tasks.refresh_clusters"),
+# schedule.* ключ → (имя beat-записи, задача, args); порядок = порядок
+# реестра §2.10. args непусты только там, где задача принимает флаг режима
+SCHEDULE_TASKS: dict[str, tuple[str, str, tuple]] = {
+    "schedule.update_worker_stats": ("update-worker-stats", "worker_stats.update", ()),
+    "schedule.update_business_metrics": ("update-business-metrics", "business_metrics.update", ()),
+    "schedule.rebuild_contexts": ("rebuild-contexts", "memory_server.tasks.lifecycle_tasks.rebuild_contexts", ()),
+    "schedule.refresh_clusters": ("refresh-clusters", "memory_server.tasks.lifecycle_tasks.refresh_clusters", ()),
     # Часовой цикл карты (приказ Мастера 27.09): co_occurrence :00 →
     # layout_map :10 (DrL + прогрев снапшота; dirty-гейт внутри rebuild)
-    "schedule.layout_map": ("layout-map", "memory_server.tasks.map_tasks.layout_map"),
-    "schedule.confidence_decay": ("confidence-decay", "memory_server.tasks.lifecycle_tasks.confidence_decay"),
-    "schedule.edge_prune": ("edge-prune", "memory_server.tasks.lifecycle_tasks.edge_prune"),
-    "schedule.mark_stale": ("mark-stale", "memory_server.tasks.lifecycle_tasks.mark_stale"),
-    "schedule.gc_superseded": ("gc-superseded", "memory_server.tasks.lifecycle_tasks.gc_superseded"),
-    "schedule.orphans_cleanup": ("orphans-cleanup", "memory_server.tasks.lifecycle_tasks.orphans_cleanup"),
-    "schedule.linker_name_reconciler": ("linker-name-reconciler", "memory_server.tasks.linker_tasks.name_reconciler"),
-    "schedule.linker_co_occurrence": ("linker-co-occurrence", "memory_server.tasks.linker_tasks.co_occurrence"),
-    "schedule.linker_l2_verdicts": ("linker-l2-verdicts", "memory_server.tasks.linker_tasks.l2_verdicts"),
+    "schedule.layout_map": ("layout-map", "memory_server.tasks.map_tasks.layout_map", ()),
+    # Ночной полный точный DrL на всех узлах — раз в сутки (Мастер 27.09,
+    # без огрублений/сэмплирования). Слот 03:15: после confidence_decay
+    # 03:00, до edge_prune 03:30, и не в лоб часовому :10 — rebuild-лок
+    # в MapService разводит их без гонки за память контейнера
+    "schedule.layout_map_full": ("layout-map-full", "memory_server.tasks.map_tasks.layout_map", (True,)),
+    "schedule.confidence_decay": ("confidence-decay", "memory_server.tasks.lifecycle_tasks.confidence_decay", ()),
+    "schedule.edge_prune": ("edge-prune", "memory_server.tasks.lifecycle_tasks.edge_prune", ()),
+    "schedule.mark_stale": ("mark-stale", "memory_server.tasks.lifecycle_tasks.mark_stale", ()),
+    "schedule.gc_superseded": ("gc-superseded", "memory_server.tasks.lifecycle_tasks.gc_superseded", ()),
+    "schedule.orphans_cleanup": ("orphans-cleanup", "memory_server.tasks.lifecycle_tasks.orphans_cleanup", ()),
+    "schedule.linker_name_reconciler": ("linker-name-reconciler", "memory_server.tasks.linker_tasks.name_reconciler", ()),
+    "schedule.linker_co_occurrence": ("linker-co-occurrence", "memory_server.tasks.linker_tasks.co_occurrence", ()),
+    "schedule.linker_l2_verdicts": ("linker-l2-verdicts", "memory_server.tasks.linker_tasks.l2_verdicts", ()),
 }
 
 
@@ -157,9 +163,12 @@ def _to_celery_schedule(key: str, raw: dict) -> float | crontab:
 def build_beat_schedule(values: dict) -> dict[str, dict]:
     """schedule.* значения → формат beat_schedule celery."""
     schedule: dict[str, dict] = {}
-    for key, (entry_name, task) in SCHEDULE_TASKS.items():
+    for key, (entry_name, task, args) in SCHEDULE_TASKS.items():
         raw = values.get(key, get_default(key))
-        schedule[entry_name] = {"task": task, "schedule": _to_celery_schedule(key, raw)}
+        entry = {"task": task, "schedule": _to_celery_schedule(key, raw)}
+        if args:
+            entry["args"] = list(args)  # beat-запись передаёт флаг режима в задачу
+        schedule[entry_name] = entry
     return schedule
 
 

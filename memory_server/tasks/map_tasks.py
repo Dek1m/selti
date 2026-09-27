@@ -135,16 +135,23 @@ def build_map_snapshot(
     queue="memory",
     routing_key="memory",
 )
-def layout_map(self) -> dict[str, Any]:
+def layout_map(self, force: bool = False) -> dict[str, Any]:
     """Пересчёт 3D-раскладки DrL + прогрев снапшота (часовой цикл карты).
 
     Beat-слот :10 каждого часа — сразу после часового co_occurrence (:00,
     приказ Мастера 27.09: карта свежая раз в час после линкера). rebuild
     идемпотентен: линкер ничего не создал (не dirty, версия та же) — no-op
     и остаётся только дешёвый прогрев кеша снапшота.
+
+    force=True — полный БЕЗУСЛОВНЫЙ точный DrL на всех узлах (Мастер
+    27.09: раз в сутки, без огрублений): ночной beat-слот 03:15 и ручной
+    запуск
+
+        celery -A memory_server.celery_app call \\
+            memory_server.tasks.map_tasks.layout_map --args '[true]'
     """
     service = _get_map_service()
-    result = run_async(service.rebuild_layout)
+    result = run_async(service.rebuild_layout, force=force)
     # Прогрев дефолтного снапшота в конце прогона (замена отдельного
     # beat-слота build_map_snapshot): rebuild снёс кеши — собираем сразу,
     # а не первым клиентом; no-op-ветке холодный кеш тоже не страшен

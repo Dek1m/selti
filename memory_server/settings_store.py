@@ -470,6 +470,10 @@ _RU_TEXTS: dict[str, tuple[str, str]] = {
         'Раскладка карты',
         'Часовой пересчёт layout_map (DrL, :10) после прохода линкера co_occurrence (:00) — карта свежая раз в час; без изменений (не dirty) — no-op + прогрев снапшота.',
     ),
+    'schedule.layout_map_full': (
+        'Ночной полный DrL',
+        'Раз в сутки безусловный полный точный DrL на всех узлах (force): слот 03:15 — после confidence_decay 03:00, до edge_prune 03:30, разнесён с часовым :10 (rebuild-лок разводит их без гонки за память).',
+    ),
     'schedule.confidence_decay': (
         'Затухание уверенности',
         'Ежедневное физическое затухание confidence по неймспейсам.',
@@ -624,6 +628,8 @@ def _build_registry() -> dict[str, SettingSpec]:
                     default={"type": "crontab", "minute": "0", "hour": "2"}),
         SettingSpec("schedule.layout_map", "json", "schedule", widget="text", requires_restart=True,
                     default={"type": "crontab", "minute": "10", "hour": "*"}),
+        SettingSpec("schedule.layout_map_full", "json", "schedule", widget="text", requires_restart=True,
+                    default={"type": "crontab", "minute": "15", "hour": "3"}),
         SettingSpec("schedule.confidence_decay", "json", "schedule", widget="text", requires_restart=True,
                     default={"type": "crontab", "minute": "0", "hour": "3"}),
         SettingSpec("schedule.edge_prune", "json", "schedule", widget="text", requires_restart=True,

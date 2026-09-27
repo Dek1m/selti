@@ -18,9 +18,9 @@ def _defaults() -> dict:
 
 
 class TestBuildBeatSchedule:
-    def test_defaults_produce_all_13_entries(self):
+    def test_defaults_produce_all_14_entries(self):
         schedule = build_beat_schedule(_defaults())
-        assert len(schedule) == 13
+        assert len(schedule) == 14
         assert schedule["update-worker-stats"]["task"] == "worker_stats.update"
         assert schedule["update-worker-stats"]["schedule"] == 30.0
         assert schedule["linker-l2-verdicts"]["schedule"] == 300.0
@@ -58,8 +58,8 @@ class TestRuntimeSchedulerSync:
             "memory_server.celery_app.read_schedule_values", return_value=_defaults()
         ):
             scheduler.setup_schedule()
-        assert len(app.conf.beat_schedule) == 13
-        assert len(scheduler.data) == 13
+        assert len(app.conf.beat_schedule) == 14
+        assert len(scheduler.data) == 14
         assert scheduler._current_raw == _defaults()
 
     def test_sync_without_change_keeps_entries(self):

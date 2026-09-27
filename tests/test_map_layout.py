@@ -15,7 +15,7 @@ import pytest
 from memory_server.config import Settings
 from memory_server.runtime_config import RuntimeConfig
 from memory_server.db import queries as ms_q
-from memory_server.memory import map_layout, map_service as ms
+from memory_server.memory import map_drl_worker, map_layout, map_service as ms
 from memory_server.memory.map_layout import (
     drl_layout,
     normalize_bbox,
@@ -218,17 +218,49 @@ class TestDrlIsolation:
         assert (result, status) == (None, "drl_failed_fallback")
 
     def test_worker_answer_roundtrip(self, monkeypatch):
-        """JSON-контракт потомка: {"status": "ok", "value": [[x,y,z],...]}."""
+        """Контракт потомка: stdout {"status": "ok", "value": node_count},
+        координаты — бинарный result-файл float64 (n,3)."""
+        import json as json_mod
+
         self._assume_igraph(monkeypatch)
-        monkeypatch.setattr(
-            map_layout,
-            "_run_isolated",
-            lambda *a, **kw: {"status": "ok", "value": [[0.5, 1.0, -0.5], [1.5, 2.0, 0.0]]},
-        )
+
+        def fake_worker(payload: bytes, timeout: float):
+            request = json_mod.loads(payload)
+            coords = np.array([[0.5, 1.0, -0.5], [1.5, 2.0, 0.0]], dtype="<f8")
+            coords.tofile(request["result"])
+            return {"status": "ok", "value": 2}
+
+        monkeypatch.setattr(map_layout, "_run_isolated", fake_worker)
         result, status = drl_layout(2, np.array([[0, 1]]), None, None)
         assert status == "drl"
         assert result.shape == (2, 3)
         assert result.dtype == np.float64
+        assert result[0] == pytest.approx((0.5, 1.0, -0.5))
+
+    def test_truncated_result_file_is_failed(self, monkeypatch):
+        """Полнота: result с числом строк ≠ node_count — не «почти готовая
+        карта», а DRL_FAILED (молчаливая потеря узлов недопустима)."""
+        import json as json_mod
+
+        self._assume_igraph(monkeypatch)
+
+        def short_result_worker(payload: bytes, timeout: float):
+            request = json_mod.loads(payload)
+            np.zeros((1, 3), dtype="<f8").tofile(request["result"])  # узла не хватает
+            return {"status": "ok", "value": 2}
+
+        monkeypatch.setattr(map_layout, "_run_isolated", short_result_worker)
+        result, status = drl_layout(2, np.array([[0, 1]]), None, None)
+        assert (result, status) == (None, "drl_failed_fallback")
+
+    def test_missing_result_file_is_failed(self, monkeypatch):
+        """Потомок ответил ok, но result-файла нет (умер до записи) — failed."""
+        self._assume_igraph(monkeypatch)
+        monkeypatch.setattr(
+            map_layout, "_run_isolated", lambda payload, timeout: {"status": "ok", "value": 2}
+        )
+        result, status = drl_layout(2, np.array([[0, 1]]), None, None)
+        assert (result, status) == (None, "drl_failed_fallback")
 
     def test_subprocess_crash_returns_none(self, monkeypatch):
         """Потомок убит (exit 137: segfault/OOM-kill) — родитель получает None,
@@ -267,6 +299,83 @@ class TestDrlIsolation:
             assert map_layout._run_isolated({"node_count": 1}, timeout=5) is None
 
 
+# ── Numpy-транспорт DrL: бинарный формат графа (Мастер 27.09) ──
+
+
+class TestGraphFileTransport:
+    """GraphFileWriter ↔ map_drl_worker.read_graph: рёбра int64 (m,2),
+    веса float64, сиды float64 (n,3); батчи склеиваются, трейлер в конце.
+    Питоновских списков в транспорте нет — только массивы и файл."""
+
+    def _write(
+        self, tmp_path, node_count, edge_batches, weight_batches=None, seed=None
+    ) -> tuple[int, str]:
+        writer = map_layout.GraphFileWriter(str(tmp_path))
+        for edges in edge_batches:  # фаза рёбер — все батчи подряд
+            writer.write_edges(np.asarray(edges, dtype=np.int64))
+        for batch_weights in weight_batches or []:  # затем фаза весов
+            writer.write_weights(np.asarray(batch_weights, dtype=np.float64))
+        if seed is not None:
+            writer.write_seed(np.asarray(seed, dtype=np.float64))
+        return writer.finish(node_count), writer.path
+
+    def test_roundtrip_edges_weights_seed(self, tmp_path):
+        """Батчевая запись склеивается в те же массивы на стороне воркера."""
+        edge_batches = [np.array([[0, 1], [1, 2]]), np.array([[2, 0]])]
+        weight_batches = [[0.5, -0.25], [0.0]]
+        seed = np.array([[1.0, 2.0, 3.0], [0.0, 0.0, 0.0], [9.0, -9.0, 1.0]])
+        count, path = self._write(tmp_path, 3, edge_batches, weight_batches, seed)
+        assert count == 3
+        node_count, edges, weights, seed_rt = map_drl_worker.read_graph(path)
+        assert node_count == 3
+        assert np.array_equal(edges, np.array([[0, 1], [1, 2], [2, 0]]))
+        assert np.array_equal(weights, np.array([0.5, -0.25, 0.0]))
+        assert np.array_equal(seed_rt, seed)
+
+    def test_roundtrip_edges_only(self, tmp_path):
+        """Без весов и сидов секции отсутствуют — None на чтении."""
+        _, path = self._write(tmp_path, 2, [np.array([[0, 1]])])
+        node_count, edges, weights, seed = map_drl_worker.read_graph(path)
+        assert (node_count, weights, seed) == (2, None, None)
+        assert np.array_equal(edges, np.array([[0, 1]]))
+
+    def test_appended_garbage_rejected(self, tmp_path):
+        """Битый транспорт (мусор в хвосте → трейлер смещён) — ValueError,
+        воркер ответит error, родитель уйдёт в fallback — не мусорная карта."""
+        _, path = self._write(tmp_path, 5, [np.array([[0, 1]])])
+        with open(path, "ab") as f:
+            f.write(b"\x01\x02\x03\x04")
+        with pytest.raises(ValueError):
+            map_drl_worker.read_graph(path)
+
+    def test_interleaved_batches_rejected(self, tmp_path):
+        """Перемежовка E1 W1 E2 W2 делала бы файл нечитаемым — писатель
+        требует все батчи рёбер до первого батча весов."""
+        writer = map_layout.GraphFileWriter(str(tmp_path))
+        writer.write_edges(np.array([[0, 1]], dtype=np.int64))
+        writer.write_weights(np.array([0.5]))
+        with pytest.raises(RuntimeError):
+            writer.write_edges(np.array([[1, 2]], dtype=np.int64))
+
+    def test_weights_edges_count_mismatch_rejected(self, tmp_path):
+        """Число весов обязано равняться числу рёбер — иначе файл битый."""
+        writer = map_layout.GraphFileWriter(str(tmp_path))
+        writer.write_edges(np.array([[0, 1], [1, 2]], dtype=np.int64))
+        writer.write_weights(np.array([0.5]))  # одного веса не хватает
+        with pytest.raises(RuntimeError):
+            writer.finish(3)
+
+    @pytest.mark.skipif(not HAS_IGRAPH, reason="python-igraph not installed")
+    def test_worker_builds_graph_from_array_without_lists(self):
+        """Воркер строит igraph напрямую из edge-array (igraph ≥ 0.11):
+        ни Graph.DictList/TupleList, ни tolist() в пути."""
+        import igraph
+
+        edges = np.array([[0, 1], [1, 2], [2, 0]], dtype=np.int64)
+        graph = igraph.Graph(n=3, edges=edges, directed=False)
+        assert (graph.vcount(), graph.ecount()) == (3, 3)
+
+
 @pytest.mark.skipif(not HAS_IGRAPH, reason="python-igraph not installed")
 class TestDrlLayout:
     def test_real_igraph_three_dimensions(self):
@@ -293,8 +402,27 @@ class TestDrlLayout:
 # ══════════════════════════════════════════════════════════════════
 
 
+class _FakeCursor:
+    """Курсор asyncpg: fetch(count) батчами — как читает _load_edges."""
+
+    def __init__(self, rows):
+        self._rows = list(rows)
+        self._pos = 0
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return None
+
+    async def fetch(self, count):
+        batch = self._rows[self._pos : self._pos + count]
+        self._pos += count
+        return batch
+
+
 def layout_pool(nodes, edges, old_rows=None, layout_exists=True, next_rev=7, executed=None):
-    """Мок пула для rebuild_layout: три fetch + execute-журнал."""
+    """Мок пула для rebuild_layout: fetch/cursor + execute-журнал."""
     from tests.test_map_snapshot import version_row
 
     if executed is None:
@@ -319,10 +447,15 @@ def layout_pool(nodes, edges, old_rows=None, layout_exists=True, next_rev=7, exe
     async def fetch(sql, *args):
         if sql is ms_q.MAP_LAYOUT_NODES_SQL:
             return nodes
-        if sql is ms_q.MAP_LAYOUT_EDGES_SQL:
+        if sql is ms_q.MAP_LAYOUT_EDGES_SQL:  # путь layout_galaxy (без курсора)
             return edges
         if sql is ms_q.MAP_LAYOUT_EXISTING_SQL:
             return old_rows or []
+        raise AssertionError(sql)
+
+    def cursor(sql, *args):
+        if sql is ms_q.MAP_LAYOUT_EDGES_SQL:  # путь rebuild_layout — стриминг
+            return _FakeCursor(edges)
         raise AssertionError(sql)
 
     async def execute(sql, *args):
@@ -331,6 +464,7 @@ def layout_pool(nodes, edges, old_rows=None, layout_exists=True, next_rev=7, exe
     conn.fetchrow = fetchrow
     conn.fetchval = fetchval
     conn.fetch = fetch
+    conn.cursor = cursor
     conn.execute = execute
     acm = AsyncMock()
     acm.__aenter__.return_value = conn
@@ -388,6 +522,9 @@ class TestRebuildLayout:
         assert args[0] == [A1, A2, A3]      # все узлы получили координаты
         assert args[4] == 7                  # rev
         for axis in (args[1], args[2], args[3]):
+            # Инвариант полноты (Мастер 27.09): выход содержит ровно
+            # node_count координат — потеря узлов в раскладке недопустима
+            assert len(axis) == len(LAYOUT_NODES)
             assert all(-1000 <= v <= 1000 for v in axis)
         # dirty снят; маркер no-op — версия ПОСЛЕ UPSERT (фикс F3)
         assert not await redis.exists(ms.DIRTY_KEY)
@@ -553,6 +690,69 @@ class TestRebuildLayout:
         assert np.allclose(seed[0], (0.0, 0.0, 0.0))     # старые на месте
         assert np.allclose(seed[2], (50.0, 0.0, 0.0))    # новый = среднее соседей
 
+    @pytest.mark.asyncio
+    async def test_force_ignores_noop_gate(self, monkeypatch):
+        """Ночной полный DrL (Мастер 27.09): force=True гоняет полный
+        пересчёт даже на свежей чистой карте (грязи нет, версия та же)."""
+        from tests.test_map_snapshot import FakeRedis
+
+        monkeypatch.setattr(map_layout, "drl_layout", deterministic_drl)
+        executed: list = []
+        redis = FakeRedis()
+        redis.data[ms.DIRTY_KEY.encode()] = b"1"
+
+        service = make_layout_service(
+            layout_pool(LAYOUT_NODES, LAYOUT_EDGES, executed=executed), redis
+        )
+        first = await service.rebuild_layout()          # dirty-прогон, маркер записан
+        assert first["ok"] is True
+        upserts_after_first = len(executed)
+
+        second = await service.rebuild_layout(force=True)  # чисто+свежо — но force
+        assert second["ok"] is True and second["force"] is True
+        assert second.get("noop") is None
+        assert len(executed) > upserts_after_first       # полный UPSERT повторился
+
+        third = await service.rebuild_layout()           # маркер обновлён force-прогоном
+        assert third == {"noop": True, "version": second["version"]}
+
+    @pytest.mark.asyncio
+    async def test_hourly_yields_to_rebuild_lock(self, monkeypatch):
+        """03:10/03:15 в одну ночь: часовой тик на занятом локе уступает —
+        два DrL-потомка в контейнере 1G это взаимный OOM."""
+        from tests.test_map_snapshot import FakeRedis
+
+        monkeypatch.setattr(map_layout, "drl_layout", deterministic_drl)
+        redis = FakeRedis()
+        redis.data[ms.DIRTY_KEY.encode()] = b"1"
+        redis.data[ms.REBUILD_LOCK_KEY.encode()] = b"1"  # ночной force держит
+
+        result = await make_layout_service(
+            layout_pool(LAYOUT_NODES, LAYOUT_EDGES), redis
+        ).rebuild_layout()
+
+        assert result["noop"] is True and result["reason"] == "locked"
+        assert ms.REBUILD_LOCK_KEY.encode() in redis.data  # чужой лок не сносим
+
+    @pytest.mark.asyncio
+    async def test_force_waits_then_reports_lock_busy(self, monkeypatch):
+        """force не берёт лок сразу — ждёт очередь; при вечнозанятом локе
+        честный lock_busy (ретрай следующей ночью), а не тихий скип."""
+        from tests.test_map_snapshot import FakeRedis
+
+        monkeypatch.setattr(map_layout, "drl_layout", deterministic_drl)
+        monkeypatch.setattr(ms, "_REBUILD_LOCK_WAIT", 0.0)
+        redis = FakeRedis()
+        redis.data[ms.DIRTY_KEY.encode()] = b"1"
+        redis.data[ms.REBUILD_LOCK_KEY.encode()] = b"1"
+
+        result = await make_layout_service(
+            layout_pool(LAYOUT_NODES, LAYOUT_EDGES), redis
+        ).rebuild_layout(force=True)
+
+        assert result["ok"] is False and result["reason"] == "lock_busy"
+        assert result["force"] is True
+
 
 # ══════════════════════════════════════════════════════════════════
 # Миграция 024 + beat-слот
@@ -588,3 +788,35 @@ class TestMigrationAndSchedule:
         # через __eq__ (все поля ежечасных расписаний совпадают с литералом)
         assert schedule["layout-map"]["schedule"] == crontab(minute=10)
         assert schedule["linker-co-occurrence"]["schedule"] == crontab(minute=0)
+
+    def test_beat_slot_night_full_drl(self):
+        """Ночной полный точный DrL раз в сутки (Мастер 27.09): отдельная
+        beat-запись с args=[True] — force-прогон layout_map."""
+        from celery.schedules import crontab
+
+        from memory_server.celery_app import app
+        from memory_server.settings_store import get_default
+
+        schedule = app.conf.beat_schedule
+        entry = schedule["layout-map-full"]
+        assert entry["task"] == "memory_server.tasks.map_tasks.layout_map"
+        assert entry["args"] == [True]
+        assert entry["schedule"] == crontab(minute=15, hour=3)
+        assert "args" not in schedule["layout-map"]  # часовой — обычный режим
+        assert get_default("schedule.layout_map_full") == {
+            "type": "crontab", "minute": "15", "hour": "3",
+        }
+
+    def test_night_slot_does_not_collide(self):
+        """Слот 03:15 не совпадает ни с decay 03:00, ни с prune 03:30, ни с
+        часовым :10 — расписание ночного окна без наложений (плюс rebuild-лок
+        разводит даже наложившиеся запуски)."""
+        from memory_server.settings_store import get_default
+
+        night = get_default("schedule.layout_map_full")
+        decay = get_default("schedule.confidence_decay")
+        prune = get_default("schedule.edge_prune")
+        hourly = get_default("schedule.layout_map")
+        assert {decay["hour"], night["hour"], prune["hour"]} == {"3"}  # окно 03:xx
+        minutes = {night["minute"], decay["minute"], prune["minute"], hourly["minute"]}
+        assert len(minutes) == 4  # все слоты различны

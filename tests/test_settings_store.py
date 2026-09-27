@@ -165,7 +165,7 @@ def make_repo(env_locked: set[str] | None = None) -> tuple[SettingsRepository, F
 
 class TestRegistry:
     def test_97_keys(self):
-        assert len(REGISTRY) == 97
+        assert len(REGISTRY) == 98
 
     def test_groups_cover_all_keys(self):
         for spec in REGISTRY.values():
@@ -181,7 +181,7 @@ class TestRegistry:
 
     def test_celery_and_schedule_restart_concurrency_live(self):
         restart = {k for k, s in REGISTRY.items() if s.requires_restart}
-        assert len(SCHEDULE_KEYS) == 13
+        assert len(SCHEDULE_KEYS) == 14
         assert SCHEDULE_KEYS <= restart
         # concurrency применяется налету (pool_grow/shrink) — не рестарт
         assert REGISTRY["celery_worker_concurrency"].requires_restart is False

@@ -98,7 +98,9 @@ services:
       resources:
         limits:
           cpus: "2.0"
-          memory: 512M
+          # 1G (добро Мастера 27.09): полный точный DrL на всех узлах —
+          # subprocess-потомок с numpy-транспортом + ~150-250M сам CELERY-воркер
+          memory: 1G
 
   # ── Celery Beat (периодические задачи) ───────────────────
   # Обязателен в проде: без него beat_schedule из celery_app.py

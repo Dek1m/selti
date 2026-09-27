@@ -27,6 +27,7 @@ import importlib.util
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -77,19 +78,91 @@ DRL_FAILED = "drl_failed_fallback"  # subprocess умер/завис/ошибс�
 _PACKAGE_ROOT = str(Path(__file__).resolve().parents[2])
 
 
+# ── Бинарный numpy-транспорт DrL (Мастер 27.09: полный точный прогон) ──
+# Формат графа (little-endian, C-order, секции подряд):
+#   [edges (m,2) int64][weights m float64]?[seed (n,3) float64]?[trailer 4×int64]
+# Трейлер В КОНЦЕ: родитель пишет потоково (батчи курсора БД) и не знает
+# m заранее; воркер (map_drl_worker.read_graph) читает секции от начала
+# по счётчикам трейлера и сверяет общий размер — битый файл = "error".
+_TRAILER_COUNT = 4  # node_count, edge_count, has_weights, has_seed
+
+
+class GraphFileWriter:
+    """Потоковая запись бинарного графа для DrL-воркера.
+
+    Рёбра доходят до igraph int64/float64-массивами напрямую из БД —
+    без JSON и питоновских списков пар (сотни МБ на 1.5M рёбер убили
+    полный DrL в 512M-контейнере, прод-замер 27.09). Память писателя
+    O(батч), не O(рёбра).
+
+    Формат секционный (edges → weights → seed → трейлер), батчи пишутся
+    строго по фазам: ВСЕ батчи рёбер, затем ВСЕ батчи весов — перемежовка
+    E1 W1 E2 W2 сделала бы файл нечитаемым, поэтому переход фаз защищён
+    исключением.
+    """
+
+    _PHASE_EDGES, _PHASE_WEIGHTS, _PHASE_SEED, _PHASE_DONE = 0, 1, 2, 3
+
+    def __init__(self, directory: str) -> None:
+        fd, self.path = tempfile.mkstemp(prefix="drl-graph-", suffix=".bin", dir=directory)
+        self._file = os.fdopen(fd, "wb")
+        self._phase = self._PHASE_EDGES
+        self.edge_count = 0
+        self._weight_count = 0
+        self._has_weights = False
+        self._has_seed = False
+
+    def write_edges(self, pairs: np.ndarray) -> None:
+        """Батч рёбер (k,2); все батчи рёбер — до первого батча весов."""
+        if self._phase != self._PHASE_EDGES:
+            raise RuntimeError("all edge batches must precede weight batches")
+        if len(pairs):
+            self._file.write(np.ascontiguousarray(pairs, dtype="<i8").tobytes())
+            self.edge_count += len(pairs)
+
+    def write_weights(self, values: np.ndarray) -> None:
+        """Батч весов; суммарно — ровно столько, сколько рёбер."""
+        if self._phase >= self._PHASE_SEED:
+            raise RuntimeError("weight batches must precede seed")
+        if len(values):
+            self._file.write(np.ascontiguousarray(values, dtype="<f8").tobytes())
+            self._weight_count += len(values)
+            self._has_weights = True
+        self._phase = self._PHASE_WEIGHTS
+
+    def write_seed(self, seed: np.ndarray) -> None:
+        """Стартовые позиции (n,3) float64 — целиком, секция последняя."""
+        if self._phase == self._PHASE_DONE:
+            raise RuntimeError("graph file already finished")
+        if seed is not None and len(seed):
+            self._file.write(np.ascontiguousarray(seed, dtype="<f8").tobytes())
+            self._has_seed = True
+        self._phase = self._PHASE_SEED
+
+    def finish(self, node_count: int) -> int:
+        """Дописать трейлер, закрыть; возвращает записанное число рёбер."""
+        if self._has_weights and self._weight_count != self.edge_count:
+            raise RuntimeError(
+                f"weights/edges count mismatch: {self._weight_count} vs {self.edge_count}"
+            )
+        trailer = np.array(
+            [node_count, self.edge_count, int(self._has_weights), int(self._has_seed)],
+            dtype="<i8",
+        )
+        self._file.write(trailer.tobytes())
+        self._file.close()
+        self._phase = self._PHASE_DONE
+        return self.edge_count
+
+
 def _run_isolated(input_bytes: bytes, timeout: float) -> dict | None:
     """Выполнить DrL-воркер отдельным интерпретатором с таймаутом.
 
     multiprocessing.Process из daemonic prefork-чайлда celery запрещён
     (AssertionError «daemonic processes are not allowed to have children»,
     прод-инцидент 27.09) — subprocess.Popen daemon-флаг не наследует,
-    работает из любого процесса. Обмен — JSON по stdin/stdout (payload
-    ~единицы МБ на 130k рёбер), pickle-канал multiprocessing не нужен.
-
-    Payload приходит УЖЕ сериализованным в байты: python-списки рёбер
-    (~десятки МБ на 130k пар) к моменту работы потомка в родителе
-    освобождены — контейнер воркера живёт в cgroup 512M (прод-OOM
-    27.09: потомок убивался, пока родитель держал копии).
+    работает из любого процесса. stdin — крошечный JSON с ПУТЯМИ
+    numpy-файлов (граф/результат); тяжёлые массивы через pipe не идут.
 
     Смерть потомка (segfault C-core, OOM-kill, exit != 0), зависание и
     битый ответ выглядят одинаково: None. Родитель всегда жив, потомок
@@ -126,6 +199,54 @@ def _run_isolated(input_bytes: bytes, timeout: float) -> dict | None:
     return answer if isinstance(answer, dict) else None
 
 
+def _read_coords(result_path: str, node_count: int) -> np.ndarray | None:
+    """Result-файл → (n,3) float64; битый/обрезанный → None.
+
+    Инвариант полноты: DrL-выход обязан содержать ровно node_count узлов —
+    недостающие строки означали бы молчаливую потерю узлов на карте.
+    """
+    try:
+        flat = np.fromfile(result_path, dtype="<f8")
+    except OSError:
+        return None
+    return flat.reshape(-1, 3) if flat.size == node_count * 3 else None
+
+
+def _run_drl_file(graph_path: str, node_count: int, timeout: float) -> tuple[np.ndarray | None, str]:
+    """Готовый граф-файл → изолированный DrL-воркер → координаты.
+
+    Общий путь массивного (drl_layout) и потокового (MapService.rebuild_layout)
+    транспорта: файл один, контракт статусов прежний JSON.
+    """
+    result_path = graph_path + ".result"
+    answer = _run_isolated(
+        _json_dumps({"graph": graph_path, "result": result_path, "rng_seed": _RNG_SEED}),
+        timeout,
+    )
+    if answer is not None:
+        status, value = answer.get("status"), answer.get("value")
+        if status == "ok":
+            coords = _read_coords(result_path, node_count)
+            if coords is not None:
+                return coords, DRL_OK
+            # файл недописан (потомок умер после ответа?) — честнее failed
+            logger.warning(
+                "map_layout: DrL result file missing or truncated",
+                extra={"nodes": node_count, "declared": value},
+            )
+            return None, DRL_FAILED
+        if status == "no_igraph":
+            return None, DRL_SPHERE
+        logger.warning("map_layout: DrL subprocess reported error", extra={
+            "error": str(value)[:200], "nodes": node_count,
+        })
+    else:
+        logger.warning("map_layout: DrL subprocess died or timed out", extra={
+            "nodes": node_count, "timeout": timeout,
+        })
+    return None, DRL_FAILED
+
+
 def drl_layout(
     node_count: int,
     edge_indices: np.ndarray,
@@ -146,39 +267,15 @@ def drl_layout(
     if importlib.util.find_spec("igraph") is None:
         return None, DRL_SPHERE
 
-    edge_pairs = [(int(a), int(b)) for a, b in edge_indices]
-    weight_list = (
-        [float(w) for w in weights] if weights is not None and len(weights) else None
-    )
-    seed_list = (
-        np.asarray(seed, dtype=np.float64).tolist() if seed is not None else None
-    )
-    input_bytes = _json_dumps({
-        "node_count": node_count,
-        "edges": edge_pairs,
-        "weights": weight_list,
-        "seed": seed_list,
-        "rng_seed": _RNG_SEED,
-    })
-    # Списки (десятки МБ на 130k рёбер) больше не нужны — потомок получает
-    # байты, родитель к моменту его работы память уже отдал (прод-OOM 27.09)
-    del edge_pairs, weight_list, seed_list
-    answer = _run_isolated(input_bytes, timeout)
-    del input_bytes
-    if answer is not None:
-        status, value = answer.get("status"), answer.get("value")
-        if status == "ok":
-            return np.asarray(value, dtype=np.float64), DRL_OK
-        if status == "no_igraph":
-            return None, DRL_SPHERE
-        logger.warning("map_layout: DrL subprocess reported error", extra={
-            "error": str(value)[:200], "nodes": node_count,
-        })
-    else:
-        logger.warning("map_layout: DrL subprocess died or timed out", extra={
-            "nodes": node_count, "timeout": timeout,
-        })
-    return None, DRL_FAILED
+    with tempfile.TemporaryDirectory(prefix="drl-") as tmp:
+        writer = GraphFileWriter(tmp)
+        writer.write_edges(np.asarray(edge_indices))
+        if weights is not None and len(weights):
+            writer.write_weights(np.asarray(weights, dtype=np.float64))
+        if seed is not None:
+            writer.write_seed(np.asarray(seed, dtype=np.float64))
+        writer.finish(node_count)
+        return _run_drl_file(writer.path, node_count, timeout)
 
 
 def normalize_bbox(coords: np.ndarray, half: float) -> np.ndarray:

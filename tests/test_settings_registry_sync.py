@@ -4,7 +4,7 @@
 Ф4-приёмка 2026-09-23 (Катерина). Тест постоянный: любая будущая правка
 одного источника без двух других — красный прогон с точным diff.
 
-Сравниваются: множество ключей (97), типы, дефолты, min/max, enum,
+Сравниваются: множество ключей (98), типы, дефолты, min/max, enum,
 is_dangerous, requires_restart, группы, виджеты, русские title/description.
 
 Нормализации при сравнении (задокументированные допущения):
@@ -316,7 +316,7 @@ def md_registry() -> dict[str, dict]:
 class TestThreeWaySync:
     def test_97_keys_in_all_three_sources(self, sql_seed, md_registry):
         store_keys = set(REGISTRY)
-        assert len(store_keys) == 97
+        assert len(store_keys) == 98
         assert set(sql_seed) == store_keys, (
             f"только в SQL: {sorted(set(sql_seed) - store_keys)}; "
             f"только в store: {sorted(store_keys - set(sql_seed))}"
@@ -435,8 +435,8 @@ class TestThreeWaySync:
             assert getattr(settings, key) == get_default(key), key
 
     def test_md_summary_counts(self):
-        """Сводка §7 реестра: 97 / 8 dangerous / 25 restart (26 − concurrency,
+        """Сводка §7 реестра: 98 / 8 dangerous / 26 restart (27 − concurrency,
         переведённый на налету-применение broadcast'ом)."""
-        assert len(REGISTRY) == 97
+        assert len(REGISTRY) == 98
         assert sum(1 for s in REGISTRY.values() if s.dangerous) == 8
-        assert sum(1 for s in REGISTRY.values() if s.requires_restart) == 25
+        assert sum(1 for s in REGISTRY.values() if s.requires_restart) == 26

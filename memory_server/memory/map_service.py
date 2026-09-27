@@ -73,6 +73,18 @@ _BUILD_POLL_INTERVAL = 0.5
 # одиночную вставку 15k строк
 _LAYOUT_BATCH = 5000
 
+# Батч потокового чтения рёбер (курсор asyncpg): records умирают в
+# пределах батча — родитель не держит полные списки кортежей (прод-OOM 27.09)
+_EDGE_CURSOR_BATCH = 8192
+
+# Сериализация rebuild'ов: ночной полный (03:15) и часовой dirty-прогон
+# (03:10) не должны поднять два DrL-потомка в одном контейнере — взаимный
+# OOM. TTL чуть выше time_limit layout_map (300с): упавший без finally
+# воркер не запирает карту навсегда.
+REBUILD_LOCK_KEY = "map:layout:lock"
+_REBUILD_LOCK_TTL = 360
+_REBUILD_LOCK_WAIT = 180.0  # force-задача ждёт очередь: ночной прогон обязан состояться
+
 
 def truncate_preview(text: str | None, limit: int) -> str | None:
     """Усечение по границе слова + «…» (решение Мастера 1): русский контент
@@ -357,48 +369,85 @@ class MapService:
 
     # ── Раскладка (M2): beat-таска layout_map ──────────────────────
 
-    async def rebuild_layout(self) -> dict[str, Any]:
+    async def _load_edges(self, index: dict[str, int]) -> tuple[np.ndarray, np.ndarray]:
+        """Рёбра из БД потоково: курсор батчами → компактные numpy-части.
+
+        Records (сотни МБ на 1.5M рёбер) умирают в пределах батча —
+        родитель не собирает полные списки кортежей; итог — int64/float64
+        массивы, транспорт DrL-воркера (numpy-контракт 27.09).
+        """
+        edge_parts: list[np.ndarray] = []
+        weight_parts: list[np.ndarray] = []
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(q.MAP_LAYOUT_EDGES_SQL) as cursor:
+                while batch := await cursor.fetch(_EDGE_CURSOR_BATCH):
+                    pairs: list[tuple[int, int]] = []
+                    weights: list[float] = []
+                    for row in batch:
+                        src = index.get(row["source_id"])
+                        tgt = index.get(row["target_id"])
+                        if src is not None and tgt is not None:
+                            pairs.append((src, tgt))
+                            weights.append(float(row["weight"] or 0.0))
+                    if pairs:
+                        edge_parts.append(np.asarray(pairs, dtype=np.int64))
+                        weight_parts.append(np.asarray(weights, dtype=np.float64))
+        if not edge_parts:
+            return np.empty((0, 2), dtype=np.int64), np.empty(0, dtype=np.float64)
+        return np.concatenate(edge_parts), np.concatenate(weight_parts)
+
+    async def rebuild_layout(self, force: bool = False) -> dict[str, Any]:
         """DrL dim=3 (seeding старых координат) → bbox → релаксация → UPSERT.
 
-        Идемпотентность: без dirty и с неизменным version-хэшем — no-op.
-        Fallback: igraph/рёбер нет или первый прогон — сферическая раскладка
-        кластеров. DrL умер (DRL_FAILED) на размещённой карте — прежние
-        координаты неприкосновенны, новые узлы разносит галактический
-        инкремент; часовой тик ретраит DrL (version меняется с новыми
-        рёбрами линкера).
+        force=True (ночной слот 03:15 и ручной запуск, Мастер 27.09) —
+        безусловный полный точный DrL на всех узлах: dirty-гейт и no-op-маркер
+        обходятся. Идемпотентность force=False: без dirty и с неизменным
+        version-хэшем — no-op. Fallback: igraph/рёбер нет или первый прогон —
+        сферическая раскладка кластеров. DrL умер (DRL_FAILED) на размещённой
+        карте — прежние координаты неприкосновенны, новые узлы разносит
+        галактический инкремент; часовой тик ретраит DrL (version меняется
+        с новыми рёбрами линкера).
         """
         started = time.monotonic()
         meta = await self._compute_meta()
         redis = await self._redis()
-        if not await redis.exists(DIRTY_KEY):
+        if not force and not await redis.exists(DIRTY_KEY):
             last = await redis.get(LAYOUT_GRAPH_KEY)
             if last is not None and last.decode() == meta["version"]:
                 return {"noop": True, "version": meta["version"]}
 
+        # Rebuild-лок (03:10 hourly + 03:15 force в одну ночь): два DrL-потомка
+        # в контейнере 1G — взаимный OOM. Часовой уступает (его работу ночью
+        # повторит force), force ждёт очередь до победного.
+        if not await redis.set(REBUILD_LOCK_KEY, "1", nx=True, ex=_REBUILD_LOCK_TTL):
+            if not force:
+                return {"noop": True, "reason": "locked", "version": meta["version"]}
+            deadline = time.monotonic() + _REBUILD_LOCK_WAIT
+            while time.monotonic() < deadline:
+                await _sleep(5.0)
+                if await redis.set(REBUILD_LOCK_KEY, "1", nx=True, ex=_REBUILD_LOCK_TTL):
+                    break
+            else:
+                return {"ok": False, "reason": "lock_busy", "force": True,
+                        "version": meta["version"]}
+        try:
+            return await self._rebuild_layout_locked(meta, force, started)
+        finally:
+            await redis.delete(REBUILD_LOCK_KEY)
+
+    async def _rebuild_layout_locked(
+        self, meta: dict[str, Any], force: bool, started: float
+    ) -> dict[str, Any]:
         async with self._pool.acquire() as conn:
             if not await conn.fetchval(q.MAP_LAYOUT_EXISTS_SQL):
                 return {"ok": False, "reason": "migration 024 pending"}
             node_rows = await conn.fetch(q.MAP_LAYOUT_NODES_SQL)
-            edge_rows = await conn.fetch(q.MAP_LAYOUT_EDGES_SQL)
             old_rows = await conn.fetch(q.MAP_LAYOUT_EXISTING_SQL)
             rev = int(await conn.fetchval(q.MAP_LAYOUT_NEXT_REV_SQL))
 
         index = {row["id"]: i for i, row in enumerate(node_rows)}
-        edge_list: list[tuple[int, int]] = []
-        weights: list[float] = []
-        for row in edge_rows:
-            src = index.get(row["source_id"])
-            tgt = index.get(row["target_id"])
-            if src is not None and tgt is not None:
-                edge_list.append((src, tgt))
-                weights.append(float(row["weight"]))
-        edge_indices = np.array(edge_list, dtype=np.int64).reshape(-1, 2)
-        weight_array = np.array(weights, dtype=np.float64)
-        edge_count = len(edge_list)
-        # Records (десятки МБ на 130k рёбер) больше не нужны: numpy-копии
-        # построены — отдаём память до spawn'а DrL-потомка (паттерн
-        # layout_galaxy, прод-OOM 27.09); счётчики рёбер сохранены для логов
-        del edge_list, weights, edge_rows
+        edge_indices, weight_array = await self._load_edges(index)
+        edge_count = len(edge_indices)
 
         bbox = self._runtime.get("map_layout_bbox")
         old_coords = np.full((len(node_rows), 3), np.nan)
@@ -422,7 +471,7 @@ class MapService:
                     # галактический инкремент — он размещённых не трогает
                     # (ON CONFLICT DO NOTHING) и сам снимает dirty/кешы;
                     # часовой тик ретраит DrL: version меняется с новыми
-                    # рёбрами линкера (замер 27.09: DrL-потомок OOM-ится в
+                    # рёбрами линкера (замер 27.09: DrL-потомок OOM-ился в
                     # cgroup 512M, 3D density grid igraph на 17.5k узлов)
                     logger.warning(
                         "map: layout kept, DrL died (galactic increment for new nodes)",
@@ -431,6 +480,7 @@ class MapService:
                     galaxy_report = await self.layout_galaxy(force=False)
                     return {
                         "ok": False, "reason": "drl_failed", "method": method,
+                        "force": force,
                         "galactic": galaxy_report,
                         "version": galaxy_report.get("version", meta["version"]),
                     }
@@ -457,6 +507,7 @@ class MapService:
                 coords[:, 2].tolist(),
                 rev,
             )
+        redis = await self._redis()
         await redis.delete(DIRTY_KEY)
         # Мета кешируется 60с — без сноса клиенты до его истечения видели бы
         # старую версию (и старый снапшот под ней). Симметрия с layout_galaxy.
@@ -475,13 +526,13 @@ class MapService:
             "map: layout rebuilt",
             extra={
                 "method": method, "nodes": len(node_rows), "edges": edge_count,
-                "rev": rev, "seconds": round(elapsed, 3),
+                "rev": rev, "force": force, "seconds": round(elapsed, 3),
             },
         )
         return {
             "ok": True, "method": method, "nodes": len(node_rows),
-            "edges": edge_count, "rev": rev, "version": post_meta["version"],
-            "seconds": round(elapsed, 3),
+            "edges": edge_count, "rev": rev, "force": force,
+            "version": post_meta["version"], "seconds": round(elapsed, 3),
         }
 
     # ── Galactic Layout v2 (GALACTIC_LAYOUT.md GL-1/GL-2) ───────────

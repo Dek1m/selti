@@ -1,0 +1,36 @@
+# Профилирование полного точного DrL на linux-раннере (Мастер 27.09).
+# Почему CI: igraph DrL на Windows-колёсах валится сегфолтом (F1 приёмки
+# карты, n≥200) — пик RSS полночного DrL можно замерить только в среде
+# прода; ubuntu-runner ставит тот же pip python-igraph, что и прод-образ.
+# Запуск: workflow_dispatch (вручную), результаты — в логах шагов bench.
+name: Bench DrL memory
+
+on:
+  workflow_dispatch:
+    inputs:
+      nodes:
+        description: "nodes (default 200000)"
+        default: "200000"
+      edges:
+        description: "edges (default 1460000)"
+        default: "1460000"
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install numpy "igraph>=1.0" psutil
+
+      - name: Bench corpus-size (17.5k / 119k)
+        run: python scripts/bench_drl_memory.py 17500 119000
+
+      - name: Bench synthetic 200k
+        run: python scripts/bench_drl_memory.py ${{ inputs.nodes }} ${{ inputs.edges }}
