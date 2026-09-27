@@ -182,3 +182,81 @@ class TestDirtyBumpTasks:
         monkeypatch.setattr(map_tasks, "_get_map_service", broken_get_service)
         # не поднимается: инвалидация не роняет кампанию-носитель
         map_tasks.bump_map_dirty()
+
+    def test_co_occurrence_bumps_on_created_links(self, monkeypatch):
+        """Приказ Мастера 27.09: часовой цикл карты — L1c создал рёбра,
+        dirty-флаг взведён (его подбирает layout_map на :10)."""
+        from memory_server.tasks import linker_tasks
+
+        bumped = []
+        linker = SimpleNamespace(
+            run_co_occurrence=lambda batch: {
+                "candidates": 5, "links_created": 12, "links_reinforced": 3,
+            }
+        )
+        monkeypatch.setattr(linker_tasks, "_get_linker", lambda: linker)
+        monkeypatch.setattr(
+            linker_tasks, "run_async", lambda func, *a, **kw: func(*a, **kw)
+        )
+        monkeypatch.setattr(linker_tasks, "bump_map_dirty", lambda: bumped.append(1))
+
+        linker_tasks.co_occurrence()
+        assert bumped == [1]
+
+    def test_co_occurrence_no_bump_without_new_links(self, monkeypatch):
+        """reinforced без created — карты это не грязнит: DrL-пересчёт
+        не гоняется вхолостую (экономика часового цикла)."""
+        from memory_server.tasks import linker_tasks
+
+        bumped = []
+        linker = SimpleNamespace(
+            run_co_occurrence=lambda batch: {
+                "candidates": 5, "links_created": 0, "links_reinforced": 9,
+            }
+        )
+        monkeypatch.setattr(linker_tasks, "_get_linker", lambda: linker)
+        monkeypatch.setattr(
+            linker_tasks, "run_async", lambda func, *a, **kw: func(*a, **kw)
+        )
+        monkeypatch.setattr(linker_tasks, "bump_map_dirty", lambda: bumped.append(1))
+
+        linker_tasks.co_occurrence()
+        assert bumped == []
+
+    def test_link_new_granule_bumps_on_created_links(self, monkeypatch):
+        from memory_server.tasks import linker_tasks
+
+        bumped = []
+        linker = SimpleNamespace(
+            link_new_granule=lambda granule_id: {
+                "granule_id": granule_id, "l1a_created": 2, "l1c_created": 1,
+            }
+        )
+        monkeypatch.setattr(linker_tasks, "_get_linker", lambda: linker)
+        monkeypatch.setattr(
+            linker_tasks, "run_async", lambda func, *a, **kw: func(*a, **kw)
+        )
+        monkeypatch.setattr(linker_tasks, "bump_map_dirty", lambda: bumped.append(1))
+
+        linker_tasks.link_new_granule("g1")
+        assert bumped == [1]
+
+    def test_link_new_granule_no_bump_on_queue_only(self, monkeypatch):
+        """Только L2-очередь (рёбер нет) — карту не тревожим."""
+        from memory_server.tasks import linker_tasks
+
+        bumped = []
+        linker = SimpleNamespace(
+            link_new_granule=lambda granule_id: {
+                "granule_id": granule_id, "l1a_created": 0, "l1c_created": 0,
+                "l2_enqueued": 3,
+            }
+        )
+        monkeypatch.setattr(linker_tasks, "_get_linker", lambda: linker)
+        monkeypatch.setattr(
+            linker_tasks, "run_async", lambda func, *a, **kw: func(*a, **kw)
+        )
+        monkeypatch.setattr(linker_tasks, "bump_map_dirty", lambda: bumped.append(1))
+
+        linker_tasks.link_new_granule("g1")
+        assert bumped == []

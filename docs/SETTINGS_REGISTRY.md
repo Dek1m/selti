@@ -231,14 +231,14 @@ importance_multipliers: {"default": 1.0, "user_facts": 1.2, "project_meta": 1.1,
 | `schedule.update_business_metrics` | interval 3600s | Бизнес-метрики | Период пересчёта агрегированных бизнес-метрик. | business_metrics.update |
 | `schedule.rebuild_contexts` | interval 3600s | Пересборка облачков | Как часто переписываются грязные снапшоты «облачка знаний». Держать ≤ context_cache_ttl. | lifecycle_tasks.rebuild_contexts |
 | `schedule.refresh_clusters` | cron 02:00 | Пересчёт кластеров | Ежедневная разметка кластеров (после неё идут decay и отсечения). | lifecycle_tasks.refresh_clusters |
-| `schedule.layout_map` | cron 02:30 | Раскладка карты | Ежедневный инкремент galactic_layout новых гранул (сразу после кластеров). | map_tasks.galactic_layout |
+| `schedule.layout_map` | cron *:10 | Раскладка карты | Часовой пересчёт layout_map (DrL, :10) после прохода линкера co_occurrence (:00) — карта свежая раз в час; без изменений (не dirty) — no-op + прогрев снапшота. | map_tasks.layout_map |
 | `schedule.confidence_decay` | cron 03:00 | Затухание уверенности | Ежедневное физическое затухание confidence по неймспейсам. | lifecycle_tasks.confidence_decay |
 | `schedule.edge_prune` | cron 03:30 | Отсечение рёбер | Ежедневная кампания жизни рёбер (после decay, до mark-stale). | lifecycle_tasks.edge_prune |
 | `schedule.mark_stale` | cron 04:00 | Пометка устаревших | Ежедневная пометка заброшенных гранул по порогам stale_*. | lifecycle_tasks.mark_stale |
 | `schedule.gc_superseded` | cron sun 05:00 | GC версий | Еженедельная сборка мусора superseded-версий (воскресенье, низкая нагрузка). | lifecycle_tasks.gc_superseded |
 | `schedule.orphans_cleanup` | cron sun 05:30 | Чистка сирот | Еженедельная чистка сиротских сущностей. | lifecycle_tasks.orphans_cleanup |
 | `schedule.linker_name_reconciler` | interval 3600s | Резолв имён | Как часто кампания подшивает «висячие» ссылки к реальным гранулам. | linker_tasks.name_reconciler |
-| `schedule.linker_co_occurrence` | interval 3600s | Co-occurrence-слой | Как часто пересчитывается слой L1c (не чаще раза в час, ADR-019 C L3). | linker_tasks.co_occurrence |
+| `schedule.linker_co_occurrence` | cron *:00 | Co-occurrence-слой | Проход L1c в :00 каждого часа (фиксированная минута — за ним в :10 едет пересчёт карты; не чаще раза в час, ADR-019 C L3). | linker_tasks.co_occurrence |
 | `schedule.linker_l2_verdicts` | interval 300s | L2-вердикты | Как часто воркер разбирает очередь серой зоны (очередь маленькая — можно часто). | linker_tasks.l2_verdicts |
 
 ### 2.11 Лимиты API — `group_key: api_caps`

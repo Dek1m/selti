@@ -1,11 +1,13 @@
 """Раскладка Полной карты 3D (PLAN_FULL_MAP_3D M2, §2.2) — чистая математика.
 
-Только numpy: модуль не знает про PG/Redis и напрямую юнит-тестируется.
+stdlib + numpy: модуль не знает про PG/Redis и напрямую юнит-тестируется.
+Единственная инфраструктурная деталь — запуск DrL-воркера потомком
+(subprocess, daemon-безопасность celery).
 Пайплайн таски layout_map:
 
     DrL(dim=3, weights=|w|, seed=старые координаты)   — igraph, физика,
-      в spawn-субпроцессе (сегфолт C-core не роняет воркер, фикс F1)
-      → normalize_bbox(±half)                          — фиксированный масштаб
+      в отдельном интерпретаторе-потомке (сегфолт C-core не роняет
+      воркер, фикс F1) → normalize_bbox(±half)        — фиксированный масштаб
       → relax_min_distance(d_min)                      — разлёт близких пар
       → clip(±half)                                    — жёсткая граница куба
 
@@ -22,13 +24,38 @@ Fallback (DrL упал / igraph недоступен / прогонов ещё �
 from __future__ import annotations
 
 import importlib.util
-import multiprocessing
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import numpy as np
 
 from memory_server.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _json_dumps(payload: object) -> bytes:
+    try:
+        import orjson
+
+        return orjson.dumps(payload)
+    except ImportError:  # orjson опционален локально — прод-образ ставит всегда
+        import json
+
+        return json.dumps(payload, separators=(",", ":")).encode()
+
+
+def _json_loads(raw: bytes):
+    try:
+        import orjson
+
+        return orjson.loads(raw)
+    except ImportError:
+        import json
+
+        return json.loads(raw)
 
 # Смещения 26 соседних ячеек + своя: обход spatial-hash при релаксации
 _CELL_OFFSETS = tuple(
@@ -45,33 +72,53 @@ DRL_SPHERE = "sphere"  # плановый fallback: нет рёбер / igraph �
 DRL_FAILED = "drl_failed_fallback"  # subprocess умер/завис/ошибся — щит сработал
 
 
-def _run_isolated(target, args: tuple, timeout: float):
-    """Выполнить target в spawn-субпроцессе с таймаутом, получить ответ из pipe.
+# Корень пакета для PYTHONPATH потомка: cwd celery-чайлда не обязан
+# содержать memory_server (запуск -m ищет пакет по sys.path)
+_PACKAGE_ROOT = str(Path(__file__).resolve().parents[2])
 
-    Смерть ребёнка (segfault C-core — exitcode 0xC0000005/139, try/except
-    бессилен) и зависание выглядят одинаково: ответа нет → None. Родитель
-    всегда жив, процесс всегда прибит — это и есть щит F1.3.
+
+def _run_isolated(payload: dict, timeout: float) -> dict | None:
+    """Выполнить DrL-воркер отдельным интерпретатором с таймаутом.
+
+    multiprocessing.Process из daemonic prefork-чайлда celery запрещён
+    (AssertionError «daemonic processes are not allowed to have children»,
+    прод-инцидент 27.09) — subprocess.Popen daemon-флаг не наследует,
+    работает из любого процесса. Обмен — JSON по stdin/stdout (payload
+    ~единицы МБ на 130k рёбер), pickle-канал multiprocessing не нужен.
+
+    Смерть потомка (segfault C-core, OOM-kill, exit != 0), зависание и
+    битый ответ выглядят одинаково: None. Родитель всегда жив, потомок
+    всегда прибит (subprocess.run при таймауте делает kill сам) —
+    это и есть щит F1.3.
     """
-    ctx = multiprocessing.get_context("spawn")
-    recv_conn, send_conn = ctx.Pipe(duplex=False)
-    process = ctx.Process(target=target, args=(send_conn, *args), daemon=True)
-    process.start()
+    env = dict(os.environ)
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = f"{_PACKAGE_ROOT}{os.pathsep}{existing}" if existing else _PACKAGE_ROOT
     try:
-        if not recv_conn.poll(timeout):
-            return None
-        try:
-            return recv_conn.recv()
-        except (EOFError, OSError):
-            return None  # ребёнок умер до/во время отправки
-    finally:
-        recv_conn.close()
-        send_conn.close()
-        if process.is_alive():
-            process.terminate()
-        process.join(5)
-        if process.is_alive():
-            process.kill()
-            process.join(1)
+        completed = subprocess.run(
+            [sys.executable, "-m", "memory_server.memory.map_drl_worker"],
+            input=_json_dumps(payload),
+            capture_output=True,
+            timeout=timeout,
+            env=env,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if completed.returncode != 0:
+        logger.warning(
+            "map_layout: DrL worker process died",
+            extra={
+                "exit": completed.returncode,
+                "stderr": completed.stderr.decode(errors="replace")[:200],
+            },
+        )
+        return None
+    try:
+        answer = _json_loads(completed.stdout)
+    except ValueError:
+        return None  # потомок умер посреди записи — пустой/битый stdout
+    return answer if isinstance(answer, dict) else None
 
 
 def drl_layout(
@@ -81,20 +128,18 @@ def drl_layout(
     seed: np.ndarray | None = None,
     timeout: float = 120.0,
 ) -> tuple[np.ndarray | None, str]:
-    """igraph DrL в 3D внутри изолированного субпроцесса.
+    """igraph DrL в 3D внутри изолированного интерпретатора-потомка.
 
     Возвращает (координаты | None, статус): DRL_OK при успехе; иначе None и
     DRL_SPHERE (плановый fallback: пустой граф / igraph не установлен) или
-    DRL_FAILED (субпроцесс умер, завис или ошибся — считать нельзя, вызывающий
-    уходит в сферу и инкрементирует метрику провала).
+    DRL_FAILED (потомок умер, завис или ошибся — считать нельзя, вызывающий
+    держит прежний layout).
     """
     if len(edge_indices) == 0:
         # Пустой граф роняет DrL 3D (density grid) — физике нечего считать
         return None, DRL_SPHERE
     if importlib.util.find_spec("igraph") is None:
         return None, DRL_SPHERE
-
-    from memory_server.memory import map_drl_worker
 
     edge_pairs = [(int(a), int(b)) for a, b in edge_indices]
     weight_list = (
@@ -103,13 +148,18 @@ def drl_layout(
     seed_list = (
         np.asarray(seed, dtype=np.float64).tolist() if seed is not None else None
     )
-    payload = _run_isolated(
-        map_drl_worker.run,
-        (node_count, edge_pairs, weight_list, seed_list, _RNG_SEED),
+    answer = _run_isolated(
+        {
+            "node_count": node_count,
+            "edges": edge_pairs,
+            "weights": weight_list,
+            "seed": seed_list,
+            "rng_seed": _RNG_SEED,
+        },
         timeout,
     )
-    if isinstance(payload, tuple):
-        status, value = payload
+    if answer is not None:
+        status, value = answer.get("status"), answer.get("value")
         if status == "ok":
             return np.asarray(value, dtype=np.float64), DRL_OK
         if status == "no_igraph":

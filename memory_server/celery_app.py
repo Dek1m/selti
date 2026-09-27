@@ -123,7 +123,9 @@ SCHEDULE_TASKS: dict[str, tuple[str, str]] = {
     "schedule.update_business_metrics": ("update-business-metrics", "business_metrics.update"),
     "schedule.rebuild_contexts": ("rebuild-contexts", "memory_server.tasks.lifecycle_tasks.rebuild_contexts"),
     "schedule.refresh_clusters": ("refresh-clusters", "memory_server.tasks.lifecycle_tasks.refresh_clusters"),
-    "schedule.layout_map": ("layout-map", "memory_server.tasks.map_tasks.galactic_layout"),
+    # Часовой цикл карты (приказ Мастера 27.09): co_occurrence :00 →
+    # layout_map :10 (DrL + прогрев снапшота; dirty-гейт внутри rebuild)
+    "schedule.layout_map": ("layout-map", "memory_server.tasks.map_tasks.layout_map"),
     "schedule.confidence_decay": ("confidence-decay", "memory_server.tasks.lifecycle_tasks.confidence_decay"),
     "schedule.edge_prune": ("edge-prune", "memory_server.tasks.lifecycle_tasks.edge_prune"),
     "schedule.mark_stale": ("mark-stale", "memory_server.tasks.lifecycle_tasks.mark_stale"),

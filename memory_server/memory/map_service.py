@@ -361,7 +361,10 @@ class MapService:
         """DrL dim=3 (seeding старых координат) → bbox → релаксация → UPSERT.
 
         Идемпотентность: без dirty и с неизменным version-хэшем — no-op.
-        Fallback: DrL/igraph недоступны → сферическая раскладка кластеров.
+        Fallback: igraph/рёбер нет или первый прогон — сферическая раскладка
+        кластеров. DrL умер (DRL_FAILED) на размещённой карте — координаты
+        НЕ трогаем: прежний layout ценнее сферической перетасовки, dirty
+        остаётся взведённым (следующий часовой тик ретрает расчёт).
         """
         started = time.monotonic()
         meta = await self._compute_meta()
@@ -407,6 +410,17 @@ class MapService:
         if coords is None:
             if drl_status == map_layout.DRL_FAILED:
                 MAP_LAYOUT_FALLBACKS.labels(reason="drl_failed").inc()
+                if old_rows:
+                    # Карта уже размещена: прежний layout ценнее сферической
+                    # перетасовки. dirty НЕ снимаем — часовой тик ретрает
+                    logger.warning(
+                        "map: layout kept, DrL died (old coords preserved)",
+                        extra={"nodes": len(node_rows), "edges": len(edge_list)},
+                    )
+                    return {
+                        "ok": False, "reason": "drl_failed", "method": method,
+                        "version": meta["version"],
+                    }
             cluster_ids = {row["cluster_id"] for row in node_rows if row["cluster_id"]}
             cluster_pos = {cid: i for i, cid in enumerate(sorted(cluster_ids))}
             cluster_of = np.array(
@@ -431,6 +445,11 @@ class MapService:
                 rev,
             )
         await redis.delete(DIRTY_KEY)
+        # Мета кешируется 60с — без сноса клиенты до его истечения видели бы
+        # старую версию (и старый снапшот под ней). Симметрия с layout_galaxy.
+        await redis.delete(META_KEY)
+        async for key in redis.scan_iter(match=f"{SNAP_KEY_PREFIX}*"):
+            await redis.delete(key)
         # Фикс F3: маркер no-op пишется ПОСЛЕ UPSERT и пересчитывается —
         # версия несёт НОВЫЙ rev. Иначе прошлая запись (rev-1) никогда не
         # совпадала с будущим подсчётом (rev) и каждая ночь гоняла layout

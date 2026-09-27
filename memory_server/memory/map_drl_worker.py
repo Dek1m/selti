@@ -2,18 +2,32 @@
 
 igraph 1.0.0 на отдельных платформах/графах валит процесс СЕГФОЛТОМ прямо
 в C-core layout_drl(dim=3) — try/except бесполезен, умирает воркер Celery.
-Единственная защита — адресная изоляция: расчёт в spawn-субпроцессе с
-таймаутом; смерть/зависание ребёнка для родителя — просто отсутствие
-ответа в pipe → сферический fallback.
+Единственная защита — адресная изоляция: расчёт в отдельном интерпретаторе
+(запуск `python -m memory_server.memory.map_drl_worker` из map_layout);
+смерть/зависание потомка для родителя — просто отсутствие ответа на
+stdout → прежний layout (fallback).
+
+Почему subprocess, а не multiprocessing.Process: задача исполняется в
+daemonic prefork-чайлде celery, где Process.start() запрещён
+(AssertionError «daemonic processes are not allowed to have children»,
+прод-инцидент 27.09); subprocess.Popen daemon-флаг не наследует. Изоляция
+при этом сильнее: крах C-core умирает в потомке, адресные пространства
+не пересекаются вовсе.
 
 Модуль НАМЕРЕННО лёгкий: только stdlib + numpy + igraph. Никаких
-импортов memory_server (логгер, config) — spawn-ребёнок не должен
-тянуть мир воркера, его задача умереть тихо и недорого.
+импортов memory_server (логгер, config) — потомок не должен тянуть мир
+воркера, его задача умереть тихо и недорого.
+
+Контракт: stdin — orjson/json payload {node_count, edges, weights, seed,
+rng_seed}; stdout — {"status": "ok"|"no_igraph"|"error", "value": ...}
+(ok → список [x, y, z] по узлам). Пустой stdout/ненулевой exitcode для
+родителя неотличимы от смерти — обрабатываются одинаково.
 """
 
 from __future__ import annotations
 
 import random
+import sys
 
 import numpy as np
 
@@ -24,24 +38,23 @@ SEED_RADIUS = 10.0
 
 
 def run(
-    conn,
     node_count: int,
     edge_pairs: list,
     weights: list | None,
     seed: list | None,
     rng_seed: int,
-) -> None:
-    """Посчитать DrL dim=3 и отправить результат в pipe.
+) -> tuple[str, object]:
+    """Посчитать DrL dim=3.
 
     Контракт ответа: ("ok", np.ndarray) | ("no_igraph", None) |
-    ("error", str). Письмо в pipe БЕЗ unsafe-pickle сюрпризов; соединение
-    закрывается всегда — родитель ловит EOF как отсутствие ответа.
+    ("error", str). Сериализацию в JSON делает main() — здесь чистый
+    расчёт, юнит-тестируется напрямую.
     """
     try:
         random.seed(rng_seed)
         import igraph
 
-        # Воспроизводимость ночных прогонов: DrL стартует со случайного
+        # Воспроизводимость прогонов: DrL стартует со случайного
         # состояния, дефолтный RNG платформозависим (фикс F1.2)
         igraph.set_random_number_generator(random.Random(rng_seed))
 
@@ -57,13 +70,45 @@ def run(
                 arr = arr * (SEED_RADIUS / scale)
             kwargs["seed"] = arr.tolist()
         layout = np.asarray(graph.layout_drl(**kwargs), dtype=np.float64)
-        conn.send(("ok", layout))
+        return "ok", layout
     except ImportError:
-        conn.send(("no_igraph", None))
-    except BaseException as exc:  # ребёнку нечем логировать — только доложить
-        try:
-            conn.send(("error", f"{type(exc).__name__}: {exc}"))
-        except Exception:
-            pass  # pipe уже мёртв — родитель увидит EOF
-    finally:
-        conn.close()
+        return "no_igraph", None
+    except BaseException as exc:  # потомку нечем логировать — только доложить
+        return "error", f"{type(exc).__name__}: {exc}"
+
+
+def main() -> None:
+    """Точка входа `python -m`: stdin JSON → run() → stdout JSON."""
+    try:
+        import orjson
+
+        payload = orjson.loads(sys.stdin.buffer.read())
+    except ImportError:
+        import json
+
+        payload = json.loads(sys.stdin.buffer.read())
+
+    status, value = run(
+        payload["node_count"],
+        payload["edges"],
+        payload.get("weights"),
+        payload.get("seed"),
+        payload["rng_seed"],
+    )
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+
+    try:
+        import orjson
+
+        sys.stdout.buffer.write(orjson.dumps({"status": status, "value": value}))
+    except ImportError:
+        import json
+
+        sys.stdout.buffer.write(
+            json.dumps({"status": status, "value": value}, separators=(",", ":")).encode()
+        )
+
+
+if __name__ == "__main__":
+    main()

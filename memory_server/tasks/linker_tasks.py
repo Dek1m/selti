@@ -106,7 +106,13 @@ def enqueue_link(granule_id: str) -> None:
 def link_new_granule(self, granule_id: str) -> dict[str, Any]:
     """Автолинкинг новой гранулы: L1a ANN + L2-очередь + L1c co-occurrence."""
     linker = _get_linker()
-    return run_async(linker.link_new_granule, granule_id)
+    result = run_async(linker.link_new_granule, granule_id)
+    # Новые рёбра меняют карту (приказ Мастера 27.09: карта пересчитывается
+    # после линкера). Только фактическое создание: reinforced-переписи весов
+    # снапшот пересобирать не обязывают — иначе dirty горел бы каждый прогон
+    if result.get("l1a_created", 0) + result.get("l1c_created", 0):
+        bump_map_dirty()
+    return result
 
 
 @shared_task(
@@ -158,7 +164,14 @@ def co_occurrence(self, batch: int | None = None) -> dict[str, Any]:
     """L1c для исторического корпуса: соседи той же сессии → related_to 0.5
     сквозь косинус-гейт; обработанные гранулы помечаются l1c_done."""
     linker = _get_linker()
-    return run_async(linker.run_co_occurrence, batch=batch)
+    result = run_async(linker.run_co_occurrence, batch=batch)
+    # Часовой цикл карты (приказ Мастера 27.09): этот проход — главный
+    # производитель рёбер, его dirty-флаг подбирает layout_map на :10.
+    # Только фактическое создание: reinforced-переписи весов без новых
+    # рёбер не должны гонять DrL-пересчёт вхолостую
+    if result.get("links_created", 0):
+        bump_map_dirty()
+    return result
 
 
 @shared_task(

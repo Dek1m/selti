@@ -166,13 +166,14 @@ def _parse_md_default(raw: str, key: str) -> object | None:
         return float(raw)
     if raw.startswith("[") and raw.endswith("]"):
         return json.loads(raw)
-    # §2.10: interval Ns / cron HH:MM / cron sun HH:MM
+    # §2.10: interval Ns / cron HH:MM / cron *:MM (ежечасно) / cron sun HH:MM
     m = re.fullmatch(r"interval (\d+)s", raw)
     if m:
         return {"type": "interval", "seconds": int(m.group(1))}
-    m = re.fullmatch(r"cron (\d{2}):(\d{2})", raw)
+    m = re.fullmatch(r"cron (\d{2}|\*):(\d{2})", raw)
     if m:
-        return {"type": "crontab", "hour": str(int(m.group(1))), "minute": str(int(m.group(2)))}
+        hour = m.group(1) if m.group(1) == "*" else str(int(m.group(1)))
+        return {"type": "crontab", "hour": hour, "minute": str(int(m.group(2)))}
     m = re.fullmatch(r"cron (\w+) (\d{2}):(\d{2})", raw)
     if m:
         return {

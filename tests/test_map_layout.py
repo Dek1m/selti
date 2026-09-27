@@ -126,21 +126,145 @@ class TestSeedPositions:
         assert np.ptp(radii) > 1.0
 
 
-# ── Пикклуемые цели spawn-субпроцессов (верхний уровень модуля) ──
-
-def dying_worker(conn, *args):
-    """Имитация segfault C-core: смерть без ответа в pipe (fix F1)."""
-    import os
-
-    conn.close()
-    os._exit(137)
+# ── Контракт subprocess-изоляции DrL (daemon-безопасность, 27.09) ──
 
 
-def sleeping_worker(conn, *args):
-    """Имитация зависшего расчёта: молчит дольше таймаута родителя."""
-    import time
+class TestDaemonSafety:
+    """Прод-регрессия 27.09: задача исполняется в daemonic prefork-чайлде
+    celery, где multiprocessing.Process.start() падает AssertionError
+    «daemonic processes are not allowed to have children». DrL-путь обязан
+    работать под daemon'ом: subprocess.Popen daemon-флаг не наследует."""
 
-    time.sleep(30)
+    def test_drl_layout_survives_daemonic_parent(self):
+        import multiprocessing
+
+        ctx = multiprocessing.get_context("spawn")
+        recv, send = ctx.Pipe(duplex=False)
+        child = ctx.Process(target=_daemon_drl_child, args=(send,), daemon=True)
+        child.start()
+        try:
+            assert recv.poll(120), "daemon-чайлд не ответил (упал до send)"
+            result = recv.recv()
+        finally:
+            child.join(15)
+            send.close()
+            recv.close()
+        assert child.exitcode == 0, f"daemon-чайлд умер: exit={child.exitcode}"
+        assert result["ok"] is True, result
+        assert result["status"] in ("drl", "sphere"), result
+
+
+def _daemon_drl_child(conn) -> None:
+    """Тело daemonic-потомка: реальный прогон drl_layout (spawn интерпретатора
+    воркера). AssertionError от multiprocessing убил бы чайлда до send —
+    родитель увидел бы тишину и тест покраснел."""
+    try:
+        from memory_server.memory import map_layout
+
+        # Без igraph find_spec уводит в sphere ДО запуска потомка; подмена
+        # спека гоняет полный путь daemon → subprocess → JSON-канал (внутри
+        # потомка честный ImportError → {"status": "no_igraph"} → sphere)
+        map_layout.importlib.util.find_spec = lambda name: object()
+        coords, status = map_layout.drl_layout(
+            3, np.array([[0, 1], [1, 2]]), None, None, timeout=60
+        )
+        conn.send({
+            "ok": status in ("drl", "sphere"),
+            "status": status,
+            "shape": None if coords is None else list(coords.shape),
+        })
+    except BaseException as exc:
+        try:
+            conn.send({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+        except Exception:
+            pass
+    finally:
+        conn.close()
+
+
+class TestDrlIsolation:
+    def test_empty_graph_is_planned_sphere(self):
+        result, status = drl_layout(3, np.empty((0, 2), dtype=np.int64), None, None)
+        assert (result, status) == (None, "sphere")
+
+    def test_missing_igraph_is_planned_sphere(self, monkeypatch):
+        monkeypatch.setattr(
+            map_layout.importlib.util, "find_spec", lambda name: None
+        )
+        result, status = drl_layout(2, np.array([[0, 1]]), None, None)
+        assert (result, status) == (None, "sphere")
+
+    def _assume_igraph(self, monkeypatch):
+        """Тесты контракта _run_isolated не должны зависеть от наличия
+        igraph в окружении: спек «установлен» — гейт пройден, дело доходит
+        до (замоканного) потомка."""
+        monkeypatch.setattr(
+            map_layout.importlib.util, "find_spec", lambda name: object()
+        )
+
+    def test_no_answer_from_subprocess_is_failed_fallback(self, monkeypatch):
+        # щит F1.3: потомок умер/завис/ошибся — статус drl_failed_fallback
+        self._assume_igraph(monkeypatch)
+        monkeypatch.setattr(map_layout, "_run_isolated", lambda *a, **kw: None)
+        result, status = drl_layout(2, np.array([[0, 1]]), None, None)
+        assert (result, status) == (None, "drl_failed_fallback")
+
+    def test_worker_error_is_failed_fallback(self, monkeypatch):
+        self._assume_igraph(monkeypatch)
+        monkeypatch.setattr(
+            map_layout, "_run_isolated", lambda *a, **kw: {"status": "error", "value": "boom"}
+        )
+        result, status = drl_layout(2, np.array([[0, 1]]), None, None)
+        assert (result, status) == (None, "drl_failed_fallback")
+
+    def test_worker_answer_roundtrip(self, monkeypatch):
+        """JSON-контракт потомка: {"status": "ok", "value": [[x,y,z],...]}."""
+        self._assume_igraph(monkeypatch)
+        monkeypatch.setattr(
+            map_layout,
+            "_run_isolated",
+            lambda *a, **kw: {"status": "ok", "value": [[0.5, 1.0, -0.5], [1.5, 2.0, 0.0]]},
+        )
+        result, status = drl_layout(2, np.array([[0, 1]]), None, None)
+        assert status == "drl"
+        assert result.shape == (2, 3)
+        assert result.dtype == np.float64
+
+    def test_subprocess_crash_returns_none(self, monkeypatch):
+        """Потомок убит (exit 137: segfault/OOM-kill) — родитель получает None,
+        а не исключение: try/except на segfault не работает в принципе."""
+        import subprocess as sp_mod
+        from unittest.mock import patch
+
+        with patch.object(
+            map_layout.subprocess, "run", return_value=sp_mod.CompletedProcess(
+                args=[], returncode=137, stdout=b"", stderr=b"fatal"
+            )
+        ) as mock_run:
+            assert map_layout._run_isolated({"node_count": 1}, timeout=5) is None
+        assert mock_run.call_args.kwargs["input"]
+
+    def test_subprocess_timeout_returns_none_fast(self, monkeypatch):
+        """Таймаут: subprocess.run прибивает потомка сам и бросает
+        TimeoutExpired — _run_isolated переводит его в None."""
+        import subprocess as sp_mod
+        from unittest.mock import patch
+
+        with patch.object(
+            map_layout.subprocess, "run", side_effect=sp_mod.TimeoutExpired(cmd="x", timeout=0.5)
+        ):
+            assert map_layout._run_isolated({"node_count": 1}, timeout=0.5) is None
+
+    def test_subprocess_garbage_stdout_returns_none(self, monkeypatch):
+        import subprocess as sp_mod
+        from unittest.mock import patch
+
+        with patch.object(
+            map_layout.subprocess, "run", return_value=sp_mod.CompletedProcess(
+                args=[], returncode=0, stdout=b"\xff\xfe not json", stderr=b""
+            )
+        ):
+            assert map_layout._run_isolated({"node_count": 1}, timeout=5) is None
 
 
 @pytest.mark.skipif(not HAS_IGRAPH, reason="python-igraph not installed")
@@ -162,45 +286,6 @@ class TestDrlLayout:
         seed = seed_positions(8, edges, old, 1000)
         result, status = drl_layout(8, edges, np.ones(8), seed, timeout=30)
         assert status == "drl" and result is not None
-
-
-class TestDrlIsolation:
-    def test_empty_graph_is_planned_sphere(self):
-        result, status = drl_layout(3, np.empty((0, 2), dtype=np.int64), None, None)
-        assert (result, status) == (None, "sphere")
-
-    def test_missing_igraph_is_planned_sphere(self, monkeypatch):
-        monkeypatch.setattr(
-            map_layout.importlib.util, "find_spec", lambda name: None
-        )
-        result, status = drl_layout(2, np.array([[0, 1]]), None, None)
-        assert (result, status) == (None, "sphere")
-
-    def test_no_answer_from_subprocess_is_failed_fallback(self, monkeypatch):
-        # щит F1.3: ребёнок умер/завис/ошибся — статус drl_failed_fallback
-        monkeypatch.setattr(map_layout, "_run_isolated", lambda *a, **kw: None)
-        result, status = drl_layout(2, np.array([[0, 1]]), None, None)
-        assert (result, status) == (None, "drl_failed_fallback")
-
-    def test_worker_error_is_failed_fallback(self, monkeypatch):
-        monkeypatch.setattr(map_layout, "_run_isolated", lambda *a, **kw: ("error", "boom"))
-        result, status = drl_layout(2, np.array([[0, 1]]), None, None)
-        assert (result, status) == (None, "drl_failed_fallback")
-
-    def test_subprocess_death_returns_none_to_parent(self):
-        # e2e щита: реальный spawn, ребёнок умирает молча — родитель жив
-        # и получает None (try/except на segfault не работает в принципе)
-        payload = map_layout._run_isolated(dying_worker, (), timeout=10)
-        assert payload is None
-
-    def test_subprocess_timeout_kills_child(self):
-        import time as time_mod
-
-        started = time_mod.monotonic()
-        payload = map_layout._run_isolated(sleeping_worker, (), timeout=0.5)
-        elapsed = time_mod.monotonic() - started
-        assert payload is None
-        assert elapsed < 10  # не ждали sleep(30): terminate прибил ребёнка
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -393,6 +478,30 @@ class TestRebuildLayout:
         assert len(executed) == 1
 
     @pytest.mark.asyncio
+    async def test_drl_death_keeps_existing_layout(self, monkeypatch):
+        """Приказ Мастера 27.09: потомок DrL умер, а карта уже размещена —
+        прежний layout неприкосновенен (сфера НЕ перетасовывает карту),
+        UPSERT не выполнялся, dirty остаётся взведённым для ретрая."""
+        from tests.test_map_snapshot import FakeRedis
+
+        def dead_drl(*args, **kwargs):
+            return None, "drl_failed_fallback"
+
+        monkeypatch.setattr(map_layout, "drl_layout", dead_drl)
+        executed: list = []
+        redis = FakeRedis()
+        redis.data[ms.DIRTY_KEY.encode()] = b"1"
+        old = [{"node_id": A1, "x": -100.0, "y": 0.0, "z": 50.0}]
+
+        result = await make_layout_service(
+            layout_pool(LAYOUT_NODES, LAYOUT_EDGES, old_rows=old, executed=executed), redis
+        ).rebuild_layout()
+
+        assert result["ok"] is False and result["reason"] == "drl_failed"
+        assert executed == []  # координаты не тронуты
+        assert await redis.exists(ms.DIRTY_KEY)  # часовой тик ретрает
+
+    @pytest.mark.asyncio
     async def test_pending_migration_graceful(self):
         from tests.test_map_snapshot import FakeRedis
 
@@ -449,15 +558,19 @@ class TestMigrationAndSchedule:
         assert "ALTER TABLE map_layout OWNER TO svc_athene_ai" in sql
         assert "DROP TABLE IF EXISTS map_layout" in sql  # DOWN-секция
 
-    def test_beat_slot_after_refresh_clusters(self):
+    def test_beat_slot_hourly_after_linker(self):
+        from celery.schedules import crontab
+
         from memory_server.celery_app import app
 
         schedule = app.conf.beat_schedule
-        # GALACTIC_LAYOUT §7: слот layout-map передан galactic_layout (v2),
-        # DrL-путь layout_map жив до приёмки v2 как ручной
+        # Приказ Мастера 27.09: слот layout-map вернулся на layout_map и
+        # стал часовым (:10, сразу после часового co_occurrence :00);
+        # galactic_layout остаётся ручным force-пересевом без beat-слота
         assert schedule["layout-map"]["task"] == (
-            "memory_server.tasks.map_tasks.galactic_layout"
+            "memory_server.tasks.map_tasks.layout_map"
         )
-        cron = schedule["layout-map"]["schedule"]
-        # 02:30 UTC — после refresh_clusters (02:00), кластеры нового состава учтены
-        assert (set(cron.hour), set(cron.minute)) == ({2}, {30})
+        # crontab(hour="*") разворачивается в диапазон 0..23 — сверка
+        # через __eq__ (все поля ежечасных расписаний совпадают с литералом)
+        assert schedule["layout-map"]["schedule"] == crontab(minute=10)
+        assert schedule["linker-co-occurrence"]["schedule"] == crontab(minute=0)

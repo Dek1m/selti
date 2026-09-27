@@ -715,22 +715,22 @@ class TestTaskAndContracts:
 
         assert "memory_server.tasks.map_tasks.galactic_layout" in app.tasks
 
-    def test_beat_slot_taken_from_drl(self):
+    def test_beat_slot_returned_to_drl(self):
         from memory_server.celery_app import app
 
         schedule = app.conf.beat_schedule
-        # galactic занимает слот layout_map (§7): 02:30 UTC после кластеров
+        # Приказ Мастера 27.09: слот layout-map вернулся на layout_map —
+        # часовой DrL-пересчёт после линкера (:00 → :10); galactic_layout
+        # остаётся зарегистрированной ручной задачей (force-пересев)
         assert schedule["layout-map"]["task"] == (
-            "memory_server.tasks.map_tasks.galactic_layout"
+            "memory_server.tasks.map_tasks.layout_map"
         )
-        cron = schedule["layout-map"]["schedule"]
-        assert (set(cron.hour), set(cron.minute)) == ({2}, {30})
 
     def test_drl_task_survives_until_v2_acceptance(self):
         from memory_server.celery_app import app
 
-        # старый путь жив до приёмки v2 — удаляется вместе со щитом (§7)
         assert "memory_server.tasks.map_tasks.layout_map" in app.tasks
+        assert "memory_server.tasks.map_tasks.galactic_layout" in app.tasks
 
     def test_insert_ignore_never_updates_existing_rows(self):
         sql = ms_q.MAP_LAYOUT_INSERT_IGNORE_SQL

@@ -5,10 +5,13 @@ map_positions       — координаты map_layout по ids (созвезд
 build_map_snapshot  — холодная сборка снапшота под build-lock, gz-байты
                       в Redis (PLAN: Celery-JSON не переносит байты, web
                       читает Redis сам — как fast-path облачка Фазы 6)
-layout_map          — DrL dim=3 + релаксация + bbox (путь M2; после приёмки
-                      Galactic v2 удаляется вместе с изоляцией-щитом, §7)
-galactic_layout     — Galactic Layout v2 (GALACTIC_LAYOUT.md): beat-слот
-                      layout-map, инкремент новых гранул; force — ручной
+layout_map          — DrL dim=3 + релаксация + bbox; часовой beat-слот
+                      :10 после линкера (приказ Мастера 27.09), прогрев
+                      снапшота в конце — первый /full не платит холодную
+                      сборку; при живом кеше прогрев — один Redis-GET
+galactic_layout     — Galactic Layout v2 (GALACTIC_LAYOUT.md): ручной
+                      force-пересев (слот :10 отдан layout_map, beat не
+                      тикает); инкремент внутри force-прогона
 bump_map_dirty      — инвалидатор кешей после reconciler/refresh_clusters
 """
 
@@ -133,8 +136,23 @@ def build_map_snapshot(
     routing_key="memory",
 )
 def layout_map(self) -> dict[str, Any]:
-    """Пересчёт 3D-раскладки DrL (M2; beat-слот передан galactic_layout)."""
-    return run_async(_get_map_service().rebuild_layout)
+    """Пересчёт 3D-раскладки DrL + прогрев снапшота (часовой цикл карты).
+
+    Beat-слот :10 каждого часа — сразу после часового co_occurrence (:00,
+    приказ Мастера 27.09: карта свежая раз в час после линкера). rebuild
+    идемпотентен: линкер ничего не создал (не dirty, версия та же) — no-op
+    и остаётся только дешёвый прогрев кеша снапшота.
+    """
+    service = _get_map_service()
+    result = run_async(service.rebuild_layout)
+    # Прогрев дефолтного снапшота в конце прогона (замена отдельного
+    # beat-слота build_map_snapshot): rebuild снёс кеши — собираем сразу,
+    # а не первым клиентом; no-op-ветке холодный кеш тоже не страшен
+    warm = run_async(
+        service.ensure_snapshot, with_preview=True, project_id=None, namespace=None
+    )
+    result["snapshot"] = {"cached": warm.get("cached"), "bytes": warm.get("bytes")}
+    return result
 
 
 @shared_task(
@@ -153,12 +171,10 @@ def layout_map(self) -> dict[str, Any]:
     routing_key="memory",
 )
 def galactic_layout(self, force: bool = False) -> dict[str, Any]:
-    """Galactic Layout v2 (GALACTIC_LAYOUT.md) — занимает beat-слот 02:30 UTC.
+    """Galactic Layout v2 (GALACTIC_LAYOUT.md) — ручная задача.
 
-    force=False (beat, дефолт): размещает ТОЛЬКО гранулы без строки
-    map_layout (инкремент §4: барицентр соседей / центроид кластера /
-    гало); старые строки не пересчитываются никогда.
-
+    Beat-слот :10 отдан layout_map (часовой цикл карты, приказ Мастера
+    27.09): инкрементальные размещения галактики покрывает DrL-rebuild.
     force=True — полный побитово детерминированный пересев галактики
     (перноудовые RNG §3; снос сферического fallback). ТОЛЬКО ручной
     запуск по команде Мастера/Рэя, например:

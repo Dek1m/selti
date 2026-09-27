@@ -468,7 +468,7 @@ _RU_TEXTS: dict[str, tuple[str, str]] = {
     ),
     'schedule.layout_map': (
         'Раскладка карты',
-        'Ежедневный инкремент galactic_layout новых гранул (сразу после кластеров).',
+        'Часовой пересчёт layout_map (DrL, :10) после прохода линкера co_occurrence (:00) — карта свежая раз в час; без изменений (не dirty) — no-op + прогрев снапшота.',
     ),
     'schedule.confidence_decay': (
         'Затухание уверенности',
@@ -496,7 +496,7 @@ _RU_TEXTS: dict[str, tuple[str, str]] = {
     ),
     'schedule.linker_co_occurrence': (
         'Co-occurrence-слой',
-        'Как часто пересчитывается слой L1c (не чаще раза в час, ADR-019 C L3).',
+        'Проход L1c в :00 каждого часа (фиксированная минута — за ним в :10 едет пересчёт карты; не чаще раза в час, ADR-019 C L3).',
     ),
     'schedule.linker_l2_verdicts': (
         'L2-вердикты',
@@ -623,7 +623,7 @@ def _build_registry() -> dict[str, SettingSpec]:
         SettingSpec("schedule.refresh_clusters", "json", "schedule", widget="text", requires_restart=True,
                     default={"type": "crontab", "minute": "0", "hour": "2"}),
         SettingSpec("schedule.layout_map", "json", "schedule", widget="text", requires_restart=True,
-                    default={"type": "crontab", "minute": "30", "hour": "2"}),
+                    default={"type": "crontab", "minute": "10", "hour": "*"}),
         SettingSpec("schedule.confidence_decay", "json", "schedule", widget="text", requires_restart=True,
                     default={"type": "crontab", "minute": "0", "hour": "3"}),
         SettingSpec("schedule.edge_prune", "json", "schedule", widget="text", requires_restart=True,
@@ -637,7 +637,7 @@ def _build_registry() -> dict[str, SettingSpec]:
         SettingSpec("schedule.linker_name_reconciler", "json", "schedule", widget="text", requires_restart=True,
                     default={"type": "interval", "seconds": 3600}),
         SettingSpec("schedule.linker_co_occurrence", "json", "schedule", widget="text", requires_restart=True,
-                    default={"type": "interval", "seconds": 3600}),
+                    default={"type": "crontab", "minute": "0", "hour": "*"}),
         SettingSpec("schedule.linker_l2_verdicts", "json", "schedule", widget="text", requires_restart=True,
                     default={"type": "interval", "seconds": 300}),
         # ── api_caps (2) ──
