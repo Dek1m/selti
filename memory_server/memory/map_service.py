@@ -362,9 +362,10 @@ class MapService:
 
         Идемпотентность: без dirty и с неизменным version-хэшем — no-op.
         Fallback: igraph/рёбер нет или первый прогон — сферическая раскладка
-        кластеров. DrL умер (DRL_FAILED) на размещённой карте — координаты
-        НЕ трогаем: прежний layout ценнее сферической перетасовки, dirty
-        остаётся взведённым (следующий часовой тик ретрает расчёт).
+        кластеров. DrL умер (DRL_FAILED) на размещённой карте — прежние
+        координаты неприкосновенны, новые узлы разносит галактический
+        инкремент; часовой тик ретраит DrL (version меняется с новыми
+        рёбрами линкера).
         """
         started = time.monotonic()
         meta = await self._compute_meta()
@@ -417,14 +418,21 @@ class MapService:
                 MAP_LAYOUT_FALLBACKS.labels(reason="drl_failed").inc()
                 if old_rows:
                     # Карта уже размещена: прежний layout ценнее сферической
-                    # перетасовки. dirty НЕ снимаем — часовой тик ретрает
+                    # перетасовки. Новые узлы (без строк) разносит
+                    # галактический инкремент — он размещённых не трогает
+                    # (ON CONFLICT DO NOTHING) и сам снимает dirty/кешы;
+                    # часовой тик ретраит DrL: version меняется с новыми
+                    # рёбрами линкера (замер 27.09: DrL-потомок OOM-ится в
+                    # cgroup 512M, 3D density grid igraph на 17.5k узлов)
                     logger.warning(
-                        "map: layout kept, DrL died (old coords preserved)",
+                        "map: layout kept, DrL died (galactic increment for new nodes)",
                         extra={"nodes": len(node_rows), "edges": edge_count},
                     )
+                    galaxy_report = await self.layout_galaxy(force=False)
                     return {
                         "ok": False, "reason": "drl_failed", "method": method,
-                        "version": meta["version"],
+                        "galactic": galaxy_report,
+                        "version": galaxy_report.get("version", meta["version"]),
                     }
             cluster_ids = {row["cluster_id"] for row in node_rows if row["cluster_id"]}
             cluster_pos = {cid: i for i, cid in enumerate(sorted(cluster_ids))}

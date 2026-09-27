@@ -480,14 +480,26 @@ class TestRebuildLayout:
     @pytest.mark.asyncio
     async def test_drl_death_keeps_existing_layout(self, monkeypatch):
         """Приказ Мастера 27.09: потомок DrL умер, а карта уже размещена —
-        прежний layout неприкосновенен (сфера НЕ перетасовывает карту),
-        UPSERT не выполнялся, dirty остаётся взведённым для ретрая."""
+        прежний layout неприкосновенен (сфера НЕ перетасовывает карту);
+        новые узлы разносит галактический инкремент, его отчёт вложен."""
+        from unittest.mock import AsyncMock
+
         from tests.test_map_snapshot import FakeRedis
 
         def dead_drl(*args, **kwargs):
             return None, "drl_failed_fallback"
 
         monkeypatch.setattr(map_layout, "drl_layout", dead_drl)
+        galaxy_calls: list = []
+        galaxy_mock = AsyncMock(
+            return_value={"ok": True, "force": False, "placed": 4, "version": "v2"}
+        )
+
+        async def spy_layout_galaxy(self, force=False):
+            galaxy_calls.append(force)
+            return await galaxy_mock(force=force)
+
+        monkeypatch.setattr(ms.MapService, "layout_galaxy", spy_layout_galaxy)
         executed: list = []
         redis = FakeRedis()
         redis.data[ms.DIRTY_KEY.encode()] = b"1"
@@ -498,8 +510,10 @@ class TestRebuildLayout:
         ).rebuild_layout()
 
         assert result["ok"] is False and result["reason"] == "drl_failed"
-        assert executed == []  # координаты не тронуты
-        assert await redis.exists(ms.DIRTY_KEY)  # часовой тик ретрает
+        assert result["galactic"]["placed"] == 4
+        assert result["version"] == "v2"
+        assert galaxy_calls == [False]  # инкремент, не пересев
+        assert executed == []  # DrL-UPSERT не выполнялся — координаты целы
 
     @pytest.mark.asyncio
     async def test_pending_migration_graceful(self):
