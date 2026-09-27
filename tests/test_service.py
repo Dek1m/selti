@@ -899,3 +899,24 @@ class TestTraverseCaps:
         assert len(result.nodes) == 3
         assert result.truncated is False
         assert result.total_nodes == 3
+
+
+# ── Валидация session_id (линкер L1c требует metadata.session_id) ──
+
+
+def test_warn_missing_session_id_warns(caplog):
+    from memory_server.memory.service import warn_missing_session_id
+
+    with caplog.at_level("WARNING"):
+        warn_missing_session_id({"source": "workspace_file"}, scope="store", extra={"id": "x1"})
+        warn_missing_session_id(None, scope="store", extra={"id": "x2"})
+    msgs = [r.message for r in caplog.records if "session_id" in r.message]
+    assert len(msgs) == 2
+
+
+def test_warn_missing_session_id_silent_when_present(caplog):
+    from memory_server.memory.service import warn_missing_session_id
+
+    with caplog.at_level("WARNING"):
+        warn_missing_session_id({"session_id": "ses_abc"}, scope="store", extra={"id": "x3"})
+    assert not [r for r in caplog.records if "session_id" in r.message]

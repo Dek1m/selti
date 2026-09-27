@@ -57,6 +57,18 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+
+def warn_missing_session_id(metadata: dict | None, *, scope: str, extra: dict) -> None:
+    """Гранула без metadata.session_id выпадает из L1c-кампании линкера
+    (кандидат-запрос требует session_id IS NOT NULL) — расхождение канала
+    записи со схемой линкера. Не блокирует запись, только сигнал в лог."""
+    if not (metadata or {}).get("session_id"):
+        logger.warning(
+            "store: metadata missing session_id — linker L1c will skip this granule",
+            extra={"scope": scope, **extra},
+        )
+
+
 # Redis-ключи облачка (Фаза 6.1): ctx:{slug} — кеш снапшота,
 # ctx:{slug}:dirty — флаг «после снапшота были записи в проект».
 _CTX_KEY_PREFIX = "ctx:"
@@ -320,6 +332,7 @@ class MemoryService:
             record = await self.repository.get_by_id(memory_id)
             if record is None:
                 raise RuntimeError(f"Failed to retrieve memory after insert: {memory_id}")
+            warn_missing_session_id(metadata, scope="store", extra={"id": memory_id})
             await self._mark_context_dirty(record.project_id)
 
             if metadata and "links" in metadata:

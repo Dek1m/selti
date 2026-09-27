@@ -705,6 +705,16 @@ def ingest_batch(
 
     # Batch embed
     if to_insert:
+        missing_sid = [
+            i for i, item in enumerate(to_insert)
+            if not (item.get("metadata") or {}).get("session_id")
+        ]
+        if missing_sid:
+            logger.warning(
+                "ingest_batch: entries missing metadata.session_id — "
+                "linker L1c will skip them",
+                extra={"count": len(missing_sid), "indices": missing_sid[:20]},
+            )
         texts_to_embed = [
             item["content"] for item in to_insert if item["embedding"] is None
         ]
