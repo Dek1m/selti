@@ -77,7 +77,7 @@ DRL_FAILED = "drl_failed_fallback"  # subprocess умер/завис/ошибс�
 _PACKAGE_ROOT = str(Path(__file__).resolve().parents[2])
 
 
-def _run_isolated(payload: dict, timeout: float) -> dict | None:
+def _run_isolated(input_bytes: bytes, timeout: float) -> dict | None:
     """Выполнить DrL-воркер отдельным интерпретатором с таймаутом.
 
     multiprocessing.Process из daemonic prefork-чайлда celery запрещён
@@ -85,6 +85,11 @@ def _run_isolated(payload: dict, timeout: float) -> dict | None:
     прод-инцидент 27.09) — subprocess.Popen daemon-флаг не наследует,
     работает из любого процесса. Обмен — JSON по stdin/stdout (payload
     ~единицы МБ на 130k рёбер), pickle-канал multiprocessing не нужен.
+
+    Payload приходит УЖЕ сериализованным в байты: python-списки рёбер
+    (~десятки МБ на 130k пар) к моменту работы потомка в родителе
+    освобождены — контейнер воркера живёт в cgroup 512M (прод-OOM
+    27.09: потомок убивался, пока родитель держал копии).
 
     Смерть потомка (segfault C-core, OOM-kill, exit != 0), зависание и
     битый ответ выглядят одинаково: None. Родитель всегда жив, потомок
@@ -97,7 +102,7 @@ def _run_isolated(payload: dict, timeout: float) -> dict | None:
     try:
         completed = subprocess.run(
             [sys.executable, "-m", "memory_server.memory.map_drl_worker"],
-            input=_json_dumps(payload),
+            input=input_bytes,
             capture_output=True,
             timeout=timeout,
             env=env,
@@ -148,16 +153,18 @@ def drl_layout(
     seed_list = (
         np.asarray(seed, dtype=np.float64).tolist() if seed is not None else None
     )
-    answer = _run_isolated(
-        {
-            "node_count": node_count,
-            "edges": edge_pairs,
-            "weights": weight_list,
-            "seed": seed_list,
-            "rng_seed": _RNG_SEED,
-        },
-        timeout,
-    )
+    input_bytes = _json_dumps({
+        "node_count": node_count,
+        "edges": edge_pairs,
+        "weights": weight_list,
+        "seed": seed_list,
+        "rng_seed": _RNG_SEED,
+    })
+    # Списки (десятки МБ на 130k рёбер) больше не нужны — потомок получает
+    # байты, родитель к моменту его работы память уже отдал (прод-OOM 27.09)
+    del edge_pairs, weight_list, seed_list
+    answer = _run_isolated(input_bytes, timeout)
+    del input_bytes
     if answer is not None:
         status, value = answer.get("status"), answer.get("value")
         if status == "ok":

@@ -59,10 +59,15 @@ def run(
         igraph.set_random_number_generator(random.Random(rng_seed))
 
         graph = igraph.Graph(n=node_count, edges=edge_pairs, directed=False)
+        # Рёбра скопированы в C-core — python-списки (десятки МБ на 130k
+        # пар) освобождаем ДО расчёта: потомок живёт в cgroup воркера
+        # (прод-OOM 27.09)
+        del edge_pairs
         kwargs: dict = {"dim": 3}
         if weights:
             # |w|: DrL не терпит неположительных весов
             kwargs["weights"] = [max(abs(float(w)), 1e-6) for w in weights]
+            del weights
         if seed is not None:
             arr = np.asarray(seed, dtype=np.float64)
             scale = float(np.abs(arr).max())
@@ -87,14 +92,16 @@ def main() -> None:
         import json
 
         payload = json.loads(sys.stdin.buffer.read())
+    node_count = payload["node_count"]
+    edges = payload["edges"]
+    weights = payload.get("weights")
+    seed = payload.get("seed")
+    rng_seed = payload["rng_seed"]
+    # dict.payload больше не держит списки — они у run(), сам словарь
+    # (с копиями ссылок) освобожден до старта расчёта
+    payload = None
 
-    status, value = run(
-        payload["node_count"],
-        payload["edges"],
-        payload.get("weights"),
-        payload.get("seed"),
-        payload["rng_seed"],
-    )
+    status, value = run(node_count, edges, weights, seed, rng_seed)
     if isinstance(value, np.ndarray):
         value = value.tolist()
 

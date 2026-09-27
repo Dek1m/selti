@@ -393,6 +393,11 @@ class MapService:
                 weights.append(float(row["weight"]))
         edge_indices = np.array(edge_list, dtype=np.int64).reshape(-1, 2)
         weight_array = np.array(weights, dtype=np.float64)
+        edge_count = len(edge_list)
+        # Records (десятки МБ на 130k рёбер) больше не нужны: numpy-копии
+        # построены — отдаём память до spawn'а DrL-потомка (паттерн
+        # layout_galaxy, прод-OOM 27.09); счётчики рёбер сохранены для логов
+        del edge_list, weights, edge_rows
 
         bbox = self._runtime.get("map_layout_bbox")
         old_coords = np.full((len(node_rows), 3), np.nan)
@@ -415,7 +420,7 @@ class MapService:
                     # перетасовки. dirty НЕ снимаем — часовой тик ретрает
                     logger.warning(
                         "map: layout kept, DrL died (old coords preserved)",
-                        extra={"nodes": len(node_rows), "edges": len(edge_list)},
+                        extra={"nodes": len(node_rows), "edges": edge_count},
                     )
                     return {
                         "ok": False, "reason": "drl_failed", "method": method,
@@ -461,13 +466,13 @@ class MapService:
         logger.info(
             "map: layout rebuilt",
             extra={
-                "method": method, "nodes": len(node_rows), "edges": len(edge_list),
+                "method": method, "nodes": len(node_rows), "edges": edge_count,
                 "rev": rev, "seconds": round(elapsed, 3),
             },
         )
         return {
             "ok": True, "method": method, "nodes": len(node_rows),
-            "edges": len(edge_list), "rev": rev, "version": post_meta["version"],
+            "edges": edge_count, "rev": rev, "version": post_meta["version"],
             "seconds": round(elapsed, 3),
         }
 
