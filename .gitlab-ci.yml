@@ -1,0 +1,95 @@
+# ============================================================
+# GitLab CI: selti (ai.atom.ui prod)
+# Перенос GitHub Actions auto-deploy.yml (27.09) + pytest-стадия.
+# Раннер: shell на ai.atom.ui, теги [deploy, shell], user svc_athene_ai.
+# Деплой-путь: git-клон ~/app/src/selti (НЕ rsync, как раньше).
+# ============================================================
+stages:
+  - test
+  - deploy
+
+variables:
+  APP_DIR: "$HOME/app"
+  SRC_DIR: "$HOME/app/src/selti"
+
+# --- pytest: полный suite (1328 тестов, моки внутри, сервисов не нужно) ---
+pytest:
+  stage: test
+  tags: [deploy, shell]
+  timeout: 15m
+  script:
+    - |
+      docker run --rm -v "$CI_PROJECT_DIR":/src:ro -w /src \
+        -v pytest-pip-cache:/root/.cache/pip \
+        python:3.14-slim bash -c '
+          apt-get update -qq && apt-get install -y -qq --no-install-recommends git gcc libpq-dev >/dev/null
+          pip install -q -r requirements.txt
+          python -m pytest tests/ -q --no-header -p no:cacheprovider
+        '
+
+# --- Деплой на прод: только main, после зелёных тестов ---
+deploy:
+  stage: deploy
+  tags: [deploy, shell]
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  timeout: 30m
+  script:
+    # 1. Обновляем git-клон пакета на сервере (замена rsync из GH Actions)
+    - cd "$SRC_DIR" && git fetch origin && git reset --hard origin/main && git clean -fd
+    - cd "$SRC_DIR" && git log --oneline -1
+    # 2. Бэкап БД перед деплоем (миграции применяются при старте, DOWN-миграций нет)
+    #    Ретеншн: последние 10 бэкапов, старше 14 дней — удаляются.
+    - |
+      mkdir -p ~/backups
+      BACKUP=~/backups/memory_$(date +%Y%m%d_%H%M%S)_pre-deploy.sql
+      docker exec postgres pg_dump -U svc_athene_ai -d memory > "$BACKUP"
+      test -s "$BACKUP" || { echo "pg_dump returned empty file, aborting deploy"; exit 1; }
+      echo "backup OK: $BACKUP ($(du -h "$BACKUP" | cut -f1))"
+      ls -1t ~/backups/memory_*_pre-deploy.sql 2>/dev/null | tail -n +11 | xargs -r rm -f
+      find ~/backups -name "memory_*_pre-deploy.sql" -mtime +14 -delete
+    # 3. Откаточные теги (:previous живёт 72h — см. prune ниже)
+    #    Фикс: старый workflow тегал несуществующий app-selti, образ selti
+    #    оставался без защиты — теперь тегаем фактические образы.
+    - |
+      cd "$APP_DIR"
+      for img in selti app-celery-worker; do
+        if [ -n "$(docker images -q ${img}:latest 2>/dev/null)" ]; then
+          docker tag ${img}:latest ${img}:previous
+          echo "rollback tag: ${img}:previous"
+        fi
+      done
+    # 4. Сборка и запуск (порядок/health — через depends_on в compose)
+    - cd "$APP_DIR" && docker compose build selti celery-worker
+    - cd "$APP_DIR" && docker compose up -d selti celery-worker celery-beat
+    - sleep 5 && cd "$APP_DIR" && docker compose ps selti celery-worker celery-beat
+    # 5. Web UI: сборка в контейнере (node:20-bookworm — npm на musl флейкает,
+    #    инциденты 20-21.09; ретрай оставлен). --user: dist принадлежит
+    #    пользователю раннера — иначе rsync --delete не сможет удалить (инцидент 20.09)
+    - |
+      docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+        -v "$SRC_DIR/web":/app -w /app \
+        node:20-bookworm-slim sh -c '
+          (npm ci --no-audit --no-fund --cache /tmp/.npm-cache ||
+            { rm -rf node_modules /tmp/.npm-cache; npm ci --no-audit --no-fund --cache /tmp/.npm-cache; }
+          ) && npm run build'
+      test -f "$SRC_DIR/web/dist/index.html" || { echo "web build failed: no dist/index.html"; exit 1; }
+    # 6. Выкладка статики в nginx
+    - |
+      mkdir -p /etc/nginx/landing/ui
+      rsync -a --delete "$SRC_DIR/web/dist/" /etc/nginx/landing/ui/
+      ls -la /etc/nginx/landing/ui/ | head -5
+    # 7. Сквозной smoke (инцидент 22.09: «зелёный» деплой при мёртвом фронте)
+    - |
+      curl -sf http://localhost:8000/live >/dev/null \
+        && echo "selti /live OK" || { echo "selti /live FAILED"; exit 1; }
+      curl -skf --resolve memory.atom.ui:443:127.0.0.1 https://memory.atom.ui/live >/dev/null \
+        && echo "nginx->selti OK" || { echo "nginx->selti FAILED (502 = upstream)"; exit 1; }
+      LAN_IP=$(hostname -I | awk '{print $1}')
+      curl -skf --interface "$LAN_IP" --resolve ai.atom.ui:443:"$LAN_IP" https://ai.atom.ui/ui/ >/dev/null \
+        && echo "web UI OK (from $LAN_IP)" || { echo "web UI FAILED"; exit 1; }
+      curl -skf --interface "$LAN_IP" --resolve ai.atom.ui:443:"$LAN_IP" https://ai.atom.ui/api/namespaces >/dev/null \
+        && echo "web UI API OK (nginx auth-inject + selti)" || { echo "web UI API FAILED"; exit 1; }
+  after_script:
+    # 72h, не 24h: :previous должен пережить окно отката. Prune всё равно заберёт dangling.
+    - docker image prune -af --filter "until=72h" || true
