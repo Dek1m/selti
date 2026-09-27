@@ -96,7 +96,10 @@ def spawn_worker(payload: dict, poll: bool) -> tuple[dict | None, list[tuple[flo
             except psutil.Error:
                 break
             time.sleep(0.05)
-    out, err = proc.communicate(timeout=30)
+    # stdin уже закрыт вручную — communicate() падает «flush of closed file»;
+    # процесс мёртв (poll-цикл вышел) → в pipes только EOF, читаем напрямую
+    out = proc.stdout.read() if proc.stdout else b""
+    err = proc.stderr.read() if proc.stderr else b""
     elapsed = time.perf_counter() - started
     if proc.returncode != 0:
         print(f"  worker died rc={proc.returncode}: {err.decode(errors='replace')[:300]}")
