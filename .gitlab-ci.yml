@@ -93,3 +93,21 @@ deploy:
   after_script:
     # 72h, не 24h: :previous должен пережить окно отката. Prune всё равно заберёт dangling.
     - docker image prune -af --filter "until=72h" || true
+
+# --- Bench DrL memory (ручной запуск, перенос bench-drl.yml из GitHub) ---
+# Профилирование полного точного DrL (сегфолт Windows-колёс igraph — мерить
+# можно только в linux). Запуск: pipeline web UI -> Run pipeline -> bench-drl.
+bench-drl:
+  stage: test
+  tags: [deploy, shell]
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+  timeout: 2h
+  script:
+    - |
+      docker run --rm -v "$CI_PROJECT_DIR":/src:ro -w /src         -v pytest-pip-cache:/root/.cache/pip         python:3.12-slim bash -c '
+          apt-get update -qq && apt-get install -y -qq --no-install-recommends git gcc >/dev/null
+          pip install -q numpy "igraph>=1.0" psutil
+          python scripts/bench_drl_memory.py 17500 119000
+          python scripts/bench_drl_memory.py 200000 1460000
+        '
