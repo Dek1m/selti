@@ -8,9 +8,6 @@ stages:
   - test
   - deploy
 
-variables:
-  APP_DIR: "$HOME/app"
-  SRC_DIR: "$HOME/app/src/selti"
 
 # --- pytest: полный suite (1328 тестов, моки внутри, сервисов не нужно) ---
 pytest:
@@ -35,6 +32,9 @@ deploy:
     - if: '$CI_COMMIT_BRANCH == "main"'
   timeout: 30m
   script:
+    # $HOME из variables разворачивается на стороне GitLab (без HOME юзера) —
+    # пути вычисляем в самой джобе, shell-раннер даёт корректный HOME.
+    - export APP_DIR="$HOME/app" SRC_DIR="$HOME/app/src/selti"
     # 1. Обновляем git-клон пакета на сервере (замена rsync из GH Actions)
     - cd "$SRC_DIR" && git fetch origin && git reset --hard origin/main && git clean -fd
     - cd "$SRC_DIR" && git log --oneline -1
