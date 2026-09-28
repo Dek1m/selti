@@ -403,22 +403,42 @@ class TestDrlLayout:
 
 
 class _FakeCursor:
-    """Курсор asyncpg: fetch(count) батчами — как читает _load_edges."""
+    """Курсор asyncpg: fetch(count) батчами — как читает _load_edges.
+    У Cursor нет __aenter__/__aexit__ — как в реальном asyncpg."""
 
     def __init__(self, rows):
         self._rows = list(rows)
         self._pos = 0
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc):
-        return None
-
     async def fetch(self, count):
         batch = self._rows[self._pos : self._pos + count]
         self._pos += count
         return batch
+
+
+class _FakeCursorFactory:
+    """CursorFactory asyncpg: единственный режим — await → Cursor.
+    __aenter__/__aexit__ отсутствуют (прод-TypeError 3680e85: async with
+    conn.cursor(...) невозможен) — мок повторяет контракт библиотеки."""
+
+    def __init__(self, rows):
+        self._rows = list(rows)
+
+    def __await__(self):
+        async def resolve():
+            return _FakeCursor(self._rows)
+
+        return resolve().__await__()
+
+
+class _FakeStatement:
+    """Statement asyncpg: cursor() → CursorFactory (без параметров)."""
+
+    def __init__(self, factory):
+        self._factory = factory
+
+    def cursor(self):
+        return self._factory
 
 
 def layout_pool(nodes, edges, old_rows=None, layout_exists=True, next_rev=7, executed=None):
@@ -453,10 +473,16 @@ def layout_pool(nodes, edges, old_rows=None, layout_exists=True, next_rev=7, exe
             return old_rows or []
         raise AssertionError(sql)
 
-    def cursor(sql, *args):
+    async def prepare(sql, *args):
         if sql is ms_q.MAP_LAYOUT_EDGES_SQL:  # путь rebuild_layout — стриминг
-            return _FakeCursor(edges)
+            return _FakeStatement(_FakeCursorFactory(edges))
         raise AssertionError(sql)
+
+    def cursor(sql, *args):
+        # Регрессия 3680e85: async with conn.cursor(...) — CursorFactory
+        # без __aenter__/__aexit__ (TypeError на проде). Правильный путь —
+        # prepare → stmt.cursor().
+        raise AssertionError("conn.cursor must not be called: prepare → stmt.cursor()")
 
     async def execute(sql, *args):
         executed.append((sql, args))
@@ -464,6 +490,7 @@ def layout_pool(nodes, edges, old_rows=None, layout_exists=True, next_rev=7, exe
     conn.fetchrow = fetchrow
     conn.fetchval = fetchval
     conn.fetch = fetch
+    conn.prepare = prepare
     conn.cursor = cursor
     conn.execute = execute
     acm = AsyncMock()
@@ -498,6 +525,44 @@ LAYOUT_NODES = [
     {"id": A3, "cluster_id": None},
 ]
 LAYOUT_EDGES = [{"source_id": A1, "target_id": A2, "weight": 0.8}]
+
+
+class TestLoadEdges:
+    """Фикс 3680e85: стриминг рёбер через statement-cursor в транзакции."""
+
+    @pytest.mark.asyncio
+    async def test_streams_edges_via_statement_cursor(self):
+        edges = [
+            {"source_id": A1, "target_id": A2, "weight": 0.8},
+            {"source_id": A2, "target_id": A3, "weight": 0.4},
+            {"source_id": A1, "target_id": "00000000-0000-0000-0000-0dead0000001",
+             "weight": 0.9},
+        ]
+        service = make_layout_service(layout_pool(LAYOUT_NODES, edges), MagicMock())
+        index = {row["id"]: i for i, row in enumerate(LAYOUT_NODES)}
+
+        pairs, weights = await service._load_edges(index)
+
+        # ребро в неизвестный id отброшено; остальные — индексами узлов
+        assert pairs.tolist() == [[0, 1], [1, 2]]
+        assert weights.tolist() == [0.8, 0.4]
+        assert pairs.dtype == np.int64 and weights.dtype == np.float64
+
+    @pytest.mark.asyncio
+    async def test_empty_graph_returns_typed_empty_arrays(self):
+        service = make_layout_service(layout_pool(LAYOUT_NODES, []), MagicMock())
+
+        pairs, weights = await service._load_edges({A1: 0})
+
+        assert pairs.shape == (0, 2) and pairs.dtype == np.int64
+        assert weights.shape == (0,) and weights.dtype == np.float64
+
+    def test_cursor_factory_is_not_async_context_manager(self):
+        # Инвариант контракта asyncpg: у CursorFactory нет __aenter__ —
+        # «удобрение» мока ими снова спрячет прод-TypeError
+        factory = _FakeCursorFactory([])
+        assert not hasattr(factory, "__aenter__")
+        assert not hasattr(factory, "__aexit__")
 
 
 class TestRebuildLayout:

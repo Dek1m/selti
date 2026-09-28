@@ -375,11 +375,17 @@ class MapService:
         Records (сотни МБ на 1.5M рёбер) умирают в пределах батча —
         родитель не собирает полные списки кортежей; итог — int64/float64
         массивы, транспорт DrL-воркера (numpy-контракт 27.09).
+
+        Паттерн asyncpg (фикс регрессии 3680e85): CursorFactory не имеет
+        __aenter__/__aexit__ — async with невозможен; курсор statement'а
+        живёт только внутри транзакции (portal server-side курсора).
         """
         edge_parts: list[np.ndarray] = []
         weight_parts: list[np.ndarray] = []
         async with self._pool.acquire() as conn:
-            async with conn.cursor(q.MAP_LAYOUT_EDGES_SQL) as cursor:
+            async with conn.transaction():
+                stmt = await conn.prepare(q.MAP_LAYOUT_EDGES_SQL)
+                cursor = await stmt.cursor()
                 while batch := await cursor.fetch(_EDGE_CURSOR_BATCH):
                     pairs: list[tuple[int, int]] = []
                     weights: list[float] = []
