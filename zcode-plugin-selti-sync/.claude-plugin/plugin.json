@@ -1,7 +1,8 @@
 {
   "name": "selti-sync",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Auto-register git workspaces in selti project registry",
+  "hooks": "./hooks/hooks.json",
   "author": {
     "name": "Argenta Team"
   },
